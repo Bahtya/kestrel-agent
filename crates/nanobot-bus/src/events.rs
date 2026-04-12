@@ -152,6 +152,24 @@ pub enum AgentEvent {
         component: String,
         reason: String,
     },
+
+    /// Gateway is reconnecting (possibly with resume).
+    GatewayReconnecting {
+        platform: String,
+        attempt: u32,
+        resumable: bool,
+    },
+
+    /// Gateway successfully resumed a session.
+    GatewayResumed {
+        platform: String,
+        session_id: String,
+    },
+
+    /// Gateway starting a fresh identify (old session lost).
+    GatewayReidentify {
+        platform: String,
+    },
 }
 
 #[cfg(test)]

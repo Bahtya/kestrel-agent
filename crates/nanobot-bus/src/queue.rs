@@ -93,6 +93,11 @@ impl MessageBus {
         self.event_tx.subscribe()
     }
 
+    /// Get a clone of the event sender (for wiring gateway lifecycle events).
+    pub fn event_sender(&self) -> broadcast::Sender<AgentEvent> {
+        self.event_tx.clone()
+    }
+
     /// Publish a streaming chunk.
     pub fn publish_stream_chunk(&self, chunk: StreamChunk) {
         let _ = self.stream_tx.send(chunk);

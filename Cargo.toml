@@ -102,3 +102,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+tempfile = { workspace = true }

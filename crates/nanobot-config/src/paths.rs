@@ -53,9 +53,27 @@ pub fn get_sessions_dir() -> Result<PathBuf> {
 }
 
 /// Get the config file path.
+///
+/// Checks in order:
+/// 1. `~/.nanobot-rust/config.yaml` (Rust default)
+/// 2. `~/.nanobot/config.yaml` (Python legacy fallback)
 pub fn get_config_path() -> Result<PathBuf> {
     let home = get_nanobot_home()?;
-    Ok(home.join("config.yaml"))
+    let rust_path = home.join("config.yaml");
+    if rust_path.exists() {
+        return Ok(rust_path);
+    }
+
+    // Fall back to Python nanobot config location
+    if let Some(home) = dirs::home_dir() {
+        let python_path = home.join(".nanobot").join("config.yaml");
+        if python_path.exists() {
+            return Ok(python_path);
+        }
+    }
+
+    // Return the Rust default (may not exist yet, will be created)
+    Ok(rust_path)
 }
 
 /// Get the memory storage directory.
@@ -116,6 +134,19 @@ mod tests {
         std::env::set_var("NANOBOT_RUST_HOME", "/tmp/test-nanobot");
         let home = get_nanobot_home().unwrap();
         assert_eq!(home, PathBuf::from("/tmp/test-nanobot"));
+        std::env::remove_var("NANOBOT_RUST_HOME");
+    }
+
+    #[test]
+    fn test_config_path_fallback() {
+        // With a custom home that doesn't exist, it falls back to ~/.nanobot/config.yaml
+        // if that exists, otherwise returns the Rust default path.
+        std::env::set_var("NANOBOT_RUST_HOME", "/tmp/test-nanobot-config-fallback");
+        let path = get_config_path().unwrap();
+        // Either the Python fallback or the Rust default is acceptable
+        let is_python_fallback = path == dirs::home_dir().unwrap().join(".nanobot").join("config.yaml");
+        let is_rust_default = path == PathBuf::from("/tmp/test-nanobot-config-fallback/config.yaml");
+        assert!(is_python_fallback || is_rust_default, "unexpected config path: {path:?}");
         std::env::remove_var("NANOBOT_RUST_HOME");
     }
 }

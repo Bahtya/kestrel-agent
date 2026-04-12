@@ -39,6 +39,15 @@ pub const STREAMING_CHUNK_INTERVAL_MS: u64 = 100;
 /// Default tool execution timeout in seconds.
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
+/// Default context window in tokens (approximate).
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
+
+/// Fraction of context window at which compaction triggers.
+pub const COMPACTION_THRESHOLD_RATIO: f64 = 0.8;
+
+/// Number of recent messages to keep during compaction.
+pub const COMPACTION_KEEP_RECENT: usize = 10;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,18 +2,22 @@
 //!
 //! Agent loop, runner, context building, memory, skills, subagents, and hooks.
 
+pub mod compaction;
 pub mod context;
 pub mod hook;
 pub mod loop_mod;
 pub mod memory;
+pub mod notes;
 pub mod runner;
 pub mod skills;
 pub mod subagent;
 
+pub use compaction::{compact_session, CompactionConfig, CompactionResult, CompactionStrategy};
 pub use context::ContextBuilder;
 pub use hook::{AgentHook, CompositeHook};
 pub use loop_mod::AgentLoop;
 pub use memory::MemoryStore;
+pub use notes::{Note, NotesManager};
 pub use runner::AgentRunner;
 pub use skills::SkillsLoader;
 pub use subagent::SubagentManager;

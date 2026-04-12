@@ -1,8 +1,10 @@
 //! Agent loop — the main message processing cycle.
 //!
 //! Consumes InboundMessages from the bus, builds context, runs the agent,
-//! and publishes OutboundMessages back. Mirrors the Python `agent/loop.py`.
+//! and publishes OutboundMessages back. Includes context compaction and
+//! structured notes support.
 
+use crate::compaction::{compact_session, CompactionConfig};
 use crate::context::ContextBuilder;
 use crate::hook::CompositeHook;
 use crate::runner::AgentRunner;
@@ -27,6 +29,7 @@ pub struct AgentLoop {
     tool_registry: Arc<ToolRegistry>,
     hooks: Arc<RwLock<CompositeHook>>,
     running: Arc<RwLock<bool>>,
+    compaction_config: CompactionConfig,
 }
 
 impl AgentLoop {
@@ -45,6 +48,7 @@ impl AgentLoop {
         let tool_registry = Arc::new(tool_registry);
         let hooks = Arc::new(RwLock::new(CompositeHook::new()));
         let running = Arc::new(RwLock::new(false));
+        let compaction_config = CompactionConfig::default();
 
         Self {
             config,
@@ -54,6 +58,7 @@ impl AgentLoop {
             tool_registry,
             hooks,
             running,
+            compaction_config,
         }
     }
 
@@ -122,6 +127,24 @@ impl AgentLoop {
 
         // Add user message to session
         session.add_user_message(msg.content.clone());
+
+        // Compact context if approaching token limits
+        if self.compaction_config.needs_compaction(&session) {
+            match compact_session(&mut session, &self.compaction_config) {
+                Ok(result) => {
+                    if result.messages_after < result.messages_before {
+                        info!(
+                            "Context compacted: {} → {} messages",
+                            result.messages_before, result.messages_after
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("Context compaction failed for session {}: {}", session_key, e);
+                }
+            }
+        }
+
         self.session_manager.save_session(&session)?;
 
         // Build context
@@ -241,5 +264,11 @@ impl AgentLoop {
     /// Get a reference to the hooks for adding new hooks.
     pub fn hooks(&self) -> Arc<RwLock<CompositeHook>> {
         self.hooks.clone()
+    }
+
+    /// Set a custom compaction configuration.
+    pub fn with_compaction_config(mut self, config: CompactionConfig) -> Self {
+        self.compaction_config = config;
+        self
     }
 }

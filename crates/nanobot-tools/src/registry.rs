@@ -79,6 +79,22 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.tools.read().is_empty()
     }
+
+    /// Create a new registry excluding the specified tool names.
+    ///
+    /// All tools not in `denied` are cloned into a new registry.
+    /// Used by sub-agents to restrict tool access.
+    pub fn filter_out(&self, denied: &[String]) -> ToolRegistry {
+        let tools = self.tools.read();
+        let filtered: HashMap<String, Arc<dyn Tool>> = tools
+            .iter()
+            .filter(|(name, _)| !denied.contains(name))
+            .map(|(name, tool)| (name.clone(), tool.clone()))
+            .collect();
+        ToolRegistry {
+            tools: Arc::new(RwLock::new(filtered)),
+        }
+    }
 }
 
 impl Default for ToolRegistry {

@@ -20,7 +20,9 @@ pub use memory::MemoryStore;
 pub use notes::{Note, NotesManager};
 pub use runner::AgentRunner;
 pub use skills::SkillsLoader;
-pub use subagent::SubagentManager;
+pub use subagent::{
+    ParallelSpawnConfig, SpawnSummary, SubAgentManager, SubAgentResult, SubAgentTask, TaskStatus,
+};
 
 /// Result from a streaming LLM completion (internal type).
 pub(crate) struct StreamingResult {

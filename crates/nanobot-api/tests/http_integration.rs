@@ -101,15 +101,15 @@ async fn test_chat_completions_no_provider_configured() {
         .body(Body::from(serde_json::to_string(&req_body).unwrap()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    // No provider configured → 500
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // No provider configured → model not found (404)
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(v["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("No provider"));
+        .contains("not found"));
 }
 
 #[tokio::test]

@@ -7,11 +7,13 @@ use crate::base::{
     BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider, ToolCallDelta,
 };
 use crate::build_client;
+use crate::retry::{retry_with_backoff, RetryConfig};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Configuration for an OpenAI-compatible provider.
@@ -30,17 +32,36 @@ pub struct OpenAiCompatConfig {
 pub struct OpenAiCompatProvider {
     config: OpenAiCompatConfig,
     client: Client,
+    retry: Arc<RetryConfig>,
 }
 
 impl OpenAiCompatProvider {
     pub fn new(config: OpenAiCompatConfig) -> anyhow::Result<Self> {
         let client = build_client(config.no_proxy)?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            retry: Arc::new(RetryConfig::default()),
+        })
     }
 
     /// Create with a custom HTTP client (useful for testing).
     pub fn with_client(config: OpenAiCompatConfig, client: Client) -> Self {
-        Self { config, client }
+        Self {
+            config,
+            client,
+            retry: Arc::new(RetryConfig::default()),
+        }
+    }
+
+    /// Create with a custom retry configuration.
+    pub fn with_retry(config: OpenAiCompatConfig, retry: RetryConfig) -> anyhow::Result<Self> {
+        let client = build_client(config.no_proxy)?;
+        Ok(Self {
+            config,
+            client,
+            retry: Arc::new(retry),
+        })
     }
 
     fn build_headers(&self) -> HashMap<String, String> {
@@ -329,60 +350,72 @@ impl LlmProvider for OpenAiCompatProvider {
         let url = format!("{}/chat/completions", self.config.base_url);
         let body = self.build_request_body(&request);
         let headers = self.build_headers();
+        let client = self.client.clone();
+        let retry_config = self.retry.clone();
 
         debug!(
             "Sending completion request to {} (model: {})",
             url, request.model
         );
 
-        let mut req_builder = self.client.post(&url);
-        for (k, v) in headers {
-            req_builder = req_builder.header(&k, &v);
-        }
+        retry_with_backoff(&retry_config, move |_attempt| {
+            let url = url.clone();
+            let body = body.clone();
+            let headers = headers.clone();
+            let client = client.clone();
+            async move {
+                let mut req_builder = client.post(&url);
+                for (k, v) in &headers {
+                    req_builder = req_builder.header(k.as_str(), v.as_str());
+                }
 
-        let resp = req_builder
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("Failed to send request to {}", url))?;
+                let resp = req_builder
+                    .json(&body)
+                    .send()
+                    .await
+                    .with_context(|| format!("Failed to send request to {}", url))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("API error ({}): {}", status, text);
-        }
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("API error ({}): {}", status, text);
+                }
 
-        let api_resp: OpenAiResponse = resp.json().await.context("Failed to parse API response")?;
+                let api_resp: OpenAiResponse =
+                    resp.json().await.context("Failed to parse API response")?;
 
-        let choice = api_resp
-            .choices
-            .into_iter()
-            .next()
-            .context("No choices in API response")?;
+                let choice = api_resp
+                    .choices
+                    .into_iter()
+                    .next()
+                    .context("No choices in API response")?;
 
-        let tool_calls = choice.message.tool_calls.map(|tcs| {
-            tcs.into_iter()
-                .map(|tc| ToolCall {
-                    id: tc.id,
-                    call_type: tc.call_type,
-                    function: FunctionCall {
-                        name: tc.function.name,
-                        arguments: tc.function.arguments,
-                    },
+                let tool_calls = choice.message.tool_calls.map(|tcs| {
+                    tcs.into_iter()
+                        .map(|tc| ToolCall {
+                            id: tc.id,
+                            call_type: tc.call_type,
+                            function: FunctionCall {
+                                name: tc.function.name,
+                                arguments: tc.function.arguments,
+                            },
+                        })
+                        .collect()
+                });
+
+                Ok(CompletionResponse {
+                    content: choice.message.content,
+                    tool_calls,
+                    usage: api_resp.usage.map(|u| Usage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        total_tokens: u.total_tokens,
+                    }),
+                    finish_reason: choice.finish_reason,
                 })
-                .collect()
-        });
-
-        Ok(CompletionResponse {
-            content: choice.message.content,
-            tool_calls,
-            usage: api_resp.usage.map(|u| Usage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            }),
-            finish_reason: choice.finish_reason,
+            }
         })
+        .await
     }
 
     async fn complete_stream(&self, request: CompletionRequest) -> Result<BoxStream> {
@@ -391,30 +424,40 @@ impl LlmProvider for OpenAiCompatProvider {
         body["stream"] = json!(true);
 
         let headers = self.build_headers();
+        let retry_config = self.retry.clone();
 
         debug!(
             "Sending streaming request to {} (model: {})",
             url, request.model
         );
 
-        let mut req_builder = self.client.post(&url);
-        for (k, v) in headers {
-            req_builder = req_builder.header(&k, &v);
-        }
+        retry_with_backoff(&retry_config, move |_attempt| {
+            let url = url.clone();
+            let body = body.clone();
+            let headers = headers.clone();
+            let client = self.client.clone();
+            async move {
+                let mut req_builder = client.post(&url);
+                for (k, v) in &headers {
+                    req_builder = req_builder.header(k.as_str(), v.as_str());
+                }
 
-        let resp = req_builder
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("Failed to send streaming request to {}", url))?;
+                let resp = req_builder
+                    .json(&body)
+                    .send()
+                    .await
+                    .with_context(|| format!("Failed to send streaming request to {}", url))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("API error ({}): {}", status, text);
-        }
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("API error ({}): {}", status, text);
+                }
 
-        Ok(Self::parse_sse_stream(resp.bytes_stream()))
+                Ok(Self::parse_sse_stream(resp.bytes_stream()))
+            }
+        })
+        .await
     }
 
     fn supports_model(&self, model: &str) -> bool {

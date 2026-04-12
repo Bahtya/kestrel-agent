@@ -6,9 +6,11 @@ pub mod anthropic;
 pub mod base;
 pub mod openai_compat;
 pub mod registry;
+pub mod retry;
 
 pub use base::{CompletionRequest, CompletionResponse, LlmProvider};
 pub use registry::ProviderRegistry;
+pub use retry::RetryConfig;
 
 /// Build a reqwest client with proper proxy handling.
 ///

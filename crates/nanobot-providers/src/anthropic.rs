@@ -7,10 +7,12 @@ use crate::base::{
     BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider, ToolCallDelta,
 };
 use crate::build_client;
+use crate::retry::{retry_with_backoff, RetryConfig};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Anthropic API configuration.
@@ -26,18 +28,37 @@ pub struct AnthropicConfig {
 pub struct AnthropicProvider {
     config: AnthropicConfig,
     client: Client,
+    retry: Arc<RetryConfig>,
 }
 
 impl AnthropicProvider {
     pub fn new(config: AnthropicConfig) -> anyhow::Result<Self> {
         // Anthropic is a foreign API — never skip proxy.
         let client = build_client(false)?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            retry: Arc::new(RetryConfig::default()),
+        })
     }
 
     /// Create with a custom HTTP client (useful for testing).
     pub fn with_client(config: AnthropicConfig, client: Client) -> Self {
-        Self { config, client }
+        Self {
+            config,
+            client,
+            retry: Arc::new(RetryConfig::default()),
+        }
+    }
+
+    /// Create with a custom retry configuration.
+    pub fn with_retry(config: AnthropicConfig, retry: RetryConfig) -> anyhow::Result<Self> {
+        let client = build_client(false)?;
+        Ok(Self {
+            config,
+            client,
+            retry: Arc::new(retry),
+        })
     }
 
     fn base_url(&self) -> &str {

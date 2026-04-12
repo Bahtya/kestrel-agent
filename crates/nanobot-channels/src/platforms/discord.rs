@@ -669,6 +669,114 @@ impl BaseChannel for DiscordChannel {
 }
 
 // ---------------------------------------------------------------------------
+// Extended methods (not part of BaseChannel trait)
+// ---------------------------------------------------------------------------
+
+/// Body for editing a message via PATCH.
+#[derive(Debug, Serialize)]
+struct EditMessageBody {
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embed: Option<DiscordEmbed>,
+}
+
+impl DiscordChannel {
+    /// Edit a previously sent message.
+    ///
+    /// Uses `PATCH /channels/{channel_id}/messages/{message_id}`.
+    /// Only the bot's own messages can be edited.
+    pub async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<SendResult> {
+        debug!(
+            "Editing Discord message {} in channel {}",
+            message_id, channel_id
+        );
+
+        let body = EditMessageBody {
+            content: content.to_string(),
+            embed: None,
+        };
+
+        let path = format!("/channels/{channel_id}/messages/{message_id}");
+        let url = format!("{}{path}", self.api_base());
+        let mut req = self.client.patch(&url);
+        if let Some(auth) = self.auth_header() {
+            req = req.header("Authorization", auth);
+        }
+
+        let resp = req
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to edit Discord message")?;
+
+        let status = resp.status();
+        if status != StatusCode::OK {
+            let text = resp.text().await.unwrap_or_default();
+            return Ok(Self::make_error_result(status, &text));
+        }
+
+        let msg: DiscordMessageResponse = resp
+            .json()
+            .await
+            .context("Failed to parse Discord edit response")?;
+
+        debug!(message_id = %msg.id, "Discord message edited");
+        Ok(SendResult {
+            success: true,
+            message_id: Some(msg.id),
+            error: None,
+            retryable: false,
+        })
+    }
+
+    /// Delete a previously sent message.
+    ///
+    /// Uses `DELETE /channels/{channel_id}/messages/{message_id}`.
+    /// Only the bot's own messages can be deleted (unless has MANAGE_MESSAGES).
+    pub async fn delete_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<SendResult> {
+        debug!(
+            "Deleting Discord message {} in channel {}",
+            message_id, channel_id
+        );
+
+        let path = format!("/channels/{channel_id}/messages/{message_id}");
+        let url = format!("{}{path}", self.api_base());
+        let mut req = self.client.delete(&url);
+        if let Some(auth) = self.auth_header() {
+            req = req.header("Authorization", auth);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .context("Failed to delete Discord message")?;
+
+        let status = resp.status();
+        if status != StatusCode::NO_CONTENT {
+            let text = resp.text().await.unwrap_or_default();
+            return Ok(Self::make_error_result(status, &text));
+        }
+
+        debug!(message_id = %message_id, "Discord message deleted");
+        Ok(SendResult {
+            success: true,
+            message_id: Some(message_id.to_string()),
+            error: None,
+            retryable: false,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

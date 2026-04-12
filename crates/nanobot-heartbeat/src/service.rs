@@ -16,6 +16,8 @@ use nanobot_bus::MessageBus;
 use nanobot_config::Config;
 use nanobot_core::{Message, MessageRole};
 use nanobot_providers::ProviderRegistry;
+use nanobot_session::SessionManager;
+use nanobot_tools::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +28,10 @@ use tracing::{debug, error, info, warn};
 pub struct HeartbeatService {
     config: Arc<Config>,
     provider_registry: Arc<ProviderRegistry>,
+    #[allow(dead_code)]
+    tool_registry: Arc<ToolRegistry>,
+    #[allow(dead_code)]
+    session_manager: Arc<SessionManager>,
     interval: Duration,
     running: Arc<RwLock<bool>>,
     bus: Option<Arc<MessageBus>>,
@@ -45,6 +51,12 @@ impl HeartbeatService {
         Self {
             config: Arc::new(config),
             provider_registry: Arc::new(ProviderRegistry::new()),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            session_manager: Arc::new(
+                SessionManager::new(std::env::temp_dir()).unwrap_or_else(|_| {
+                    SessionManager::new(std::env::temp_dir()).expect("temp dir must work")
+                }),
+            ),
             interval: Duration::from_secs(interval_secs),
             running: Arc::new(RwLock::new(false)),
             bus: None,
@@ -62,6 +74,12 @@ impl HeartbeatService {
         Self {
             config: Arc::new(config),
             provider_registry: Arc::new(ProviderRegistry::new()),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            session_manager: Arc::new(
+                SessionManager::new(data_dir).unwrap_or_else(|_| {
+                    SessionManager::new(std::env::temp_dir()).expect("temp dir must work")
+                }),
+            ),
             interval: Duration::from_secs(interval_secs),
             running: Arc::new(RwLock::new(false)),
             bus: None,
@@ -70,26 +88,37 @@ impl HeartbeatService {
         }
     }
 
-    /// Create with full registries and bus for real health checks.
+    /// Create with full registries for real health checks.
+    ///
+    /// This is the primary constructor used by the binary crate (gateway/heartbeat commands).
     pub fn with_registries(
         config: Config,
         provider_registry: ProviderRegistry,
-        bus: MessageBus,
-        data_dir: PathBuf,
+        tool_registry: ToolRegistry,
+        session_manager: SessionManager,
     ) -> Self {
         let interval_secs = config.heartbeat.interval_secs.max(60);
+        let data_dir = nanobot_config::paths::get_data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir());
         let state_path = data_dir.join("heartbeat_state.json");
         let state = load_state(&state_path).unwrap_or_default();
 
         Self {
             config: Arc::new(config),
             provider_registry: Arc::new(provider_registry),
+            tool_registry: Arc::new(tool_registry),
+            session_manager: Arc::new(session_manager),
             interval: Duration::from_secs(interval_secs),
             running: Arc::new(RwLock::new(false)),
-            bus: Some(Arc::new(bus)),
+            bus: None,
             state_path,
             state: parking_lot::Mutex::new(state),
         }
+    }
+
+    /// Wire a MessageBus for event emission during health checks.
+    pub fn set_bus(&mut self, bus: MessageBus) {
+        self.bus = Some(Arc::new(bus));
     }
 
     /// Start the heartbeat loop.
@@ -335,7 +364,11 @@ mod tests {
         let config = Config::default();
         let bus = MessageBus::new();
         let providers = ProviderRegistry::new();
-        HeartbeatService::with_registries(config, providers, bus, dir.to_path_buf())
+        let tools = ToolRegistry::new();
+        let session_mgr = SessionManager::new(dir.to_path_buf()).unwrap();
+        let mut svc = HeartbeatService::with_registries(config, providers, tools, session_mgr);
+        svc.set_bus(bus);
+        svc
     }
 
     // === Construction ===
@@ -356,12 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn test_construction_with_bus() {
+    fn test_construction_with_registries() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
-        let bus = MessageBus::new();
         let providers = ProviderRegistry::new();
-        let svc = HeartbeatService::with_registries(config, providers, bus, dir.path().to_path_buf());
+        let tools = ToolRegistry::new();
+        let session_mgr = SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let svc = HeartbeatService::with_registries(config, providers, tools, session_mgr);
         assert!(svc.interval() >= Duration::from_secs(60));
     }
 
@@ -473,7 +507,10 @@ mod tests {
         let bus = MessageBus::new();
         let mut events_rx = bus.subscribe_events();
         let providers = ProviderRegistry::new();
-        let svc = HeartbeatService::with_registries(config, providers, bus, dir.path().to_path_buf());
+        let tools = ToolRegistry::new();
+        let session_mgr = SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let mut svc = HeartbeatService::with_registries(config, providers, tools, session_mgr);
+        svc.set_bus(bus);
 
         svc.run_checks().await.unwrap();
 
@@ -491,7 +528,10 @@ mod tests {
         let config = Config::default();
         let bus = MessageBus::new();
         let providers = ProviderRegistry::new();
-        let svc = HeartbeatService::with_registries(config, providers, bus, dir.path().to_path_buf());
+        let tools = ToolRegistry::new();
+        let session_mgr = SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let mut svc = HeartbeatService::with_registries(config, providers, tools, session_mgr);
+        svc.set_bus(bus);
 
         svc.run_checks().await.unwrap();
         assert_eq!(svc.state().restarts_requested, 0);

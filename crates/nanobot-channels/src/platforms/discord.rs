@@ -261,12 +261,48 @@ impl DiscordChannel {
         }
     }
 
-    /// Run the Gateway WebSocket listener in the background.
+    /// Run the Gateway WebSocket listener with automatic reconnection.
+    ///
+    /// On disconnect or RECONNECT request, reconnects with exponential
+    /// backoff (1s → 2s → 4s → … → 60s max). Resets on successful HELLO.
     async fn run_gateway(
         token: String,
         handler: tokio::sync::mpsc::Sender<InboundMessage>,
         running: Arc<AtomicBool>,
     ) {
+        let mut backoff_secs: u64 = 1;
+        let max_backoff_secs: u64 = 60;
+
+        while running.load(Ordering::Relaxed) {
+            let should_reconnect = Self::run_gateway_session(&token, &handler, &running).await;
+
+            if !running.load(Ordering::Relaxed) {
+                break; // Clean shutdown
+            }
+
+            if should_reconnect {
+                warn!(
+                    "Discord Gateway disconnected — reconnecting in {}s",
+                    backoff_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(max_backoff_secs);
+            } else {
+                break; // Fatal error, don't reconnect
+            }
+        }
+
+        info!("Discord Gateway listener stopped");
+    }
+
+    /// Run a single Gateway session (connect → process → disconnect).
+    ///
+    /// Returns `true` if reconnection should be attempted, `false` for fatal errors.
+    async fn run_gateway_session(
+        token: &str,
+        handler: &tokio::sync::mpsc::Sender<InboundMessage>,
+        running: &Arc<AtomicBool>,
+    ) -> bool {
         use futures::SinkExt;
         use futures::StreamExt;
         use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -278,7 +314,7 @@ impl DiscordChannel {
             Ok(c) => c,
             Err(e) => {
                 error!("Discord Gateway WebSocket connect failed: {}", e);
-                return;
+                return false;
             }
         };
 
@@ -287,12 +323,12 @@ impl DiscordChannel {
             let msg = match ws.next().await {
                 Some(Ok(WsMessage::Text(text))) => text,
                 Some(Ok(WsMessage::Close(_))) => {
-                    info!("Discord Gateway closed");
-                    return;
+                    info!("Discord Gateway closed during HELLO");
+                    return true; // Reconnect
                 }
                 Some(Err(e)) => {
-                    error!("Discord Gateway read error: {}", e);
-                    return;
+                    error!("Discord Gateway read error during HELLO: {}", e);
+                    return true; // Reconnect
                 }
                 _ => continue,
             };
@@ -307,7 +343,7 @@ impl DiscordChannel {
                     Ok(h) => h,
                     Err(e) => {
                         error!("Failed to parse HELLO: {}", e);
-                        return;
+                        return false; // Protocol error
                     }
                 };
                 break hello.heartbeat_interval;
@@ -334,7 +370,7 @@ impl DiscordChannel {
         });
         if let Err(e) = ws.send(WsMessage::Text(identify.to_string().into())).await {
             error!("Failed to send IDENTIFY: {}", e);
-            return;
+            return true; // Reconnect
         }
 
         info!("Discord Gateway IDENTIFY sent (intents: {})", intents::TEXT_BOT);
@@ -376,7 +412,7 @@ impl DiscordChannel {
                                             if let Ok(msg_data) =
                                                 serde_json::from_value::<GatewayMessage>(payload.d)
                                             {
-                                                Self::dispatch_message(&handler, &msg_data).await;
+                                                Self::dispatch_message(handler, &msg_data).await;
                                             }
                                         }
                                         _ => {}
@@ -387,11 +423,11 @@ impl DiscordChannel {
                                 }
                                 opcodes::INVALID_SESSION => {
                                     warn!("Discord Gateway INVALID_SESSION — session no longer valid");
-                                    break;
+                                    return true; // Reconnect with fresh IDENTIFY
                                 }
                                 opcodes::RECONNECT => {
-                                    warn!("Discord Gateway RECONNECT requested — reconnecting");
-                                    break;
+                                    warn!("Discord Gateway RECONNECT requested");
+                                    return true; // Reconnect
                                 }
                                 _ => {
                                     debug!("Discord Gateway op={} ignored", payload.op);
@@ -416,7 +452,8 @@ impl DiscordChannel {
             }
         }
 
-        info!("Discord Gateway listener stopped");
+        // Loop ended — either disconnect or error. Reconnect unless shutting down.
+        true
     }
 
     /// Convert a Gateway message to an InboundMessage and send it.

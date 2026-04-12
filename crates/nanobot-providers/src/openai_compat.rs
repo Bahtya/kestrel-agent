@@ -64,6 +64,19 @@ impl OpenAiCompatProvider {
         })
     }
 
+    /// Create with a custom HTTP client and retry configuration (useful for testing).
+    pub fn with_client_and_retry(
+        config: OpenAiCompatConfig,
+        client: Client,
+        retry: RetryConfig,
+    ) -> Self {
+        Self {
+            config,
+            client,
+            retry: Arc::new(retry),
+        }
+    }
+
     fn build_headers(&self) -> HashMap<String, String> {
         let mut headers = HashMap::new();
         headers.insert(

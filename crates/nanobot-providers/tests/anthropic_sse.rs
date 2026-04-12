@@ -1,11 +1,11 @@
-//! Integration tests for Anthropic Claude SSE streaming.
+//! Integration tests for Anthropic Claude provider.
 //!
-//! Starts a minimal HTTP server that serves Anthropic-format SSE events
-//! and verifies that the provider correctly parses them.
+//! Tests non-streaming, SSE streaming, tool use, and retry with backoff
+//! against a minimal mock HTTP server.
 
 use futures::StreamExt;
 use nanobot_providers::anthropic::{AnthropicConfig, AnthropicProvider};
-use nanobot_providers::LlmProvider;
+use nanobot_providers::{LlmProvider, RetryConfig};
 
 /// Helper: start a mock HTTP server on a random port.
 async fn start_mock_server(
@@ -45,20 +45,79 @@ async fn start_mock_server(
     (port, handle)
 }
 
-/// Build a provider pointing at localhost (no system proxy).
-fn make_provider(port: u16) -> AnthropicProvider {
-    let client = reqwest::Client::builder()
+/// Helper: start a mock server that returns `error_count` error responses,
+/// then a 200 with the given success body.
+async fn start_mock_retry_server(
+    error_status: u16,
+    error_count: usize,
+    success_body: &str,
+) -> (u16, tokio::task::JoinHandle<()>) {
+    let body = success_body.to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let err_count = error_count;
+
+    let handle = tokio::spawn(async move {
+        for i in 0..=err_count {
+            let (stream, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let (reader, mut writer) = stream.into_split();
+            let mut buf_reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if buf_reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+
+            if i < err_count {
+                let resp = format!(
+                    "HTTP/1.1 {} Error\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    error_status
+                );
+                let _ = writer.write_all(resp.as_bytes()).await;
+            } else {
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = writer.write_all(resp.as_bytes()).await;
+            }
+        }
+    });
+
+    (port, handle)
+}
+
+/// Build a no-proxy HTTP client for tests.
+fn test_client() -> reqwest::Client {
+    reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .no_proxy()
         .build()
-        .unwrap();
-    let config = AnthropicConfig {
+        .unwrap()
+}
+
+fn make_config(port: u16) -> AnthropicConfig {
+    AnthropicConfig {
         api_key: "sk-test-key".to_string(),
         model: "claude-sonnet-4-20250514".to_string(),
         api_version: Some("2023-06-01".to_string()),
         base_url: Some(format!("http://127.0.0.1:{}", port)),
-    };
-    AnthropicProvider::with_client(config, client)
+    }
+}
+
+fn make_provider(port: u16) -> AnthropicProvider {
+    AnthropicProvider::with_client(make_config(port), test_client())
+}
+
+fn make_provider_with_retry(port: u16, retry: RetryConfig) -> AnthropicProvider {
+    AnthropicProvider::with_client_and_retry(make_config(port), test_client(), retry)
 }
 
 fn make_request(stream: bool) -> nanobot_providers::CompletionRequest {
@@ -92,6 +151,24 @@ async fn test_anthropic_non_streaming_with_mock() {
     let usage = response.usage.unwrap();
     assert_eq!(usage.prompt_tokens, Some(10));
     assert_eq!(usage.completion_tokens, Some(5));
+}
+
+/// Test non-streaming Anthropic completion with tool_use blocks.
+#[tokio::test]
+async fn test_anthropic_non_streaming_tool_calls() {
+    let response_body = r#"{"id":"msg_456","type":"message","role":"assistant","content":[{"type":"text","text":"Let me check the weather."},{"type":"tool_use","id":"toolu_abc","name":"get_weather","input":{"city":"Berlin"}}],"model":"claude-sonnet-4-20250514","stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":15}}"#;
+
+    let (port, _handle) = start_mock_server(response_body, "application/json").await;
+    let provider = make_provider(port);
+
+    let response = provider.complete(make_request(false)).await.unwrap();
+    assert_eq!(response.content.as_deref(), Some("Let me check the weather."));
+    let tool_calls = response.tool_calls.unwrap();
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].id, "toolu_abc");
+    assert_eq!(tool_calls[0].call_type, "function");
+    assert_eq!(tool_calls[0].function.name, "get_weather");
+    assert_eq!(response.finish_reason.as_deref(), Some("tool_use"));
 }
 
 /// Test Anthropic SSE streaming with content_block_delta events.
@@ -187,4 +264,44 @@ async fn test_anthropic_sse_tool_calls() {
         all_deltas[0].function_arguments.as_deref(),
         Some("{\"city\":\"Berlin\"}")
     );
+}
+
+/// Test that the Anthropic provider retries on 429 and eventually succeeds.
+#[tokio::test]
+async fn test_anthropic_retry_on_429_then_success() {
+    let success_body = r#"{"id":"msg_retry","type":"message","role":"assistant","content":[{"type":"text","text":"retry ok!"}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+
+    // Server returns 429 once, then 200.
+    let (port, _handle) = start_mock_retry_server(429, 1, success_body).await;
+    let retry = RetryConfig::default().with_max_retries(3);
+    let provider = make_provider_with_retry(port, retry);
+
+    let response = provider.complete(make_request(false)).await.unwrap();
+    assert_eq!(response.content.as_deref(), Some("retry ok!"));
+}
+
+/// Test that the Anthropic provider retries on 503 and eventually succeeds.
+#[tokio::test]
+async fn test_anthropic_retry_on_503_then_success() {
+    let success_body = r#"{"id":"msg_retry2","type":"message","role":"assistant","content":[{"type":"text","text":"server recovered"}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+
+    let (port, _handle) = start_mock_retry_server(503, 2, success_body).await;
+    let retry = RetryConfig::default().with_max_retries(3);
+    let provider = make_provider_with_retry(port, retry);
+
+    let response = provider.complete(make_request(false)).await.unwrap();
+    assert_eq!(response.content.as_deref(), Some("server recovered"));
+}
+
+/// Test that the Anthropic provider returns error when retries are exhausted.
+#[tokio::test]
+async fn test_anthropic_retry_exhausted() {
+    // Server always returns 429.
+    let (port, _handle) = start_mock_retry_server(429, 5, "").await;
+    let retry = RetryConfig::default().with_max_retries(2);
+    let provider = make_provider_with_retry(port, retry);
+
+    let result = provider.complete(make_request(false)).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("429"));
 }

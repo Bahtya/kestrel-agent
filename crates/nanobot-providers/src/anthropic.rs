@@ -61,6 +61,19 @@ impl AnthropicProvider {
         })
     }
 
+    /// Create with a custom HTTP client and retry configuration (useful for testing).
+    pub fn with_client_and_retry(
+        config: AnthropicConfig,
+        client: Client,
+        retry: RetryConfig,
+    ) -> Self {
+        Self {
+            config,
+            client,
+            retry: Arc::new(retry),
+        }
+    }
+
     fn base_url(&self) -> &str {
         self.config
             .base_url
@@ -343,131 +356,158 @@ impl LlmProvider for AnthropicProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         let url = format!("{}/v1/messages", self.base_url());
         let body = self.build_request_body(&request);
+        let api_key = self.config.api_key.clone();
+        let api_version = self
+            .config
+            .api_version
+            .clone()
+            .unwrap_or_else(|| "2023-06-01".to_string());
+        let client = self.client.clone();
+        let retry_config = self.retry.clone();
 
         debug!("Anthropic request to {} (model: {})", url, request.model);
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.config.api_key)
-            .header(
-                "anthropic-version",
-                self.config.api_version.as_deref().unwrap_or("2023-06-01"),
-            )
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| "Failed to send Anthropic request")?;
+        retry_with_backoff(&retry_config, move |_attempt| {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = api_key.clone();
+            let api_version = api_version.clone();
+            let client = client.clone();
+            async move {
+                let resp = client
+                    .post(&url)
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", &api_version)
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .with_context(|| "Failed to send Anthropic request")?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic API error ({}): {}", status, text);
-        }
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("Anthropic API error ({}): {}", status, text);
+                }
 
-        let api_resp: serde_json::Value = resp
-            .json()
-            .await
-            .context("Failed to parse Anthropic response")?;
+                let api_resp: serde_json::Value = resp
+                    .json()
+                    .await
+                    .context("Failed to parse Anthropic response")?;
 
-        // Extract text content
-        let content = api_resp
-            .get("content")
-            .and_then(|c| c.as_array())
-            .and_then(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if b.get("type")?.as_str()? == "text" {
-                            b.get("text")?.as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .next()
-            });
-
-        // Extract tool calls
-        let tool_calls = api_resp
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if b.get("type")?.as_str()? == "tool_use" {
-                            Some(ToolCall {
-                                id: b.get("id")?.as_str()?.to_string(),
-                                call_type: "function".to_string(),
-                                function: FunctionCall {
-                                    name: b.get("name")?.as_str()?.to_string(),
-                                    arguments: serde_json::to_string(
-                                        b.get("input").unwrap_or(&json!({})),
-                                    )
-                                    .unwrap_or_default(),
-                                },
+                // Extract text content
+                let content = api_resp
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|blocks| {
+                        blocks
+                            .iter()
+                            .filter_map(|b| {
+                                if b.get("type")?.as_str()? == "text" {
+                                    b.get("text")?.as_str().map(String::from)
+                                } else {
+                                    None
+                                }
                             })
-                        } else {
-                            None
-                        }
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .next()
+                    });
+
+                // Extract tool calls
+                let tool_calls = api_resp
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter_map(|b| {
+                                if b.get("type")?.as_str()? == "tool_use" {
+                                    Some(ToolCall {
+                                        id: b.get("id")?.as_str()?.to_string(),
+                                        call_type: "function".to_string(),
+                                        function: FunctionCall {
+                                            name: b.get("name")?.as_str()?.to_string(),
+                                            arguments: serde_json::to_string(
+                                                b.get("input").unwrap_or(&json!({})),
+                                            )
+                                            .unwrap_or_default(),
+                                        },
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
                     })
-                    .collect::<Vec<_>>()
-            })
-            .filter(|tc| !tc.is_empty());
+                    .filter(|tc| !tc.is_empty());
 
-        let usage = api_resp.get("usage").map(|u| Usage {
-            prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
-            completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
-            total_tokens: None,
-        });
+                let usage = api_resp.get("usage").map(|u| Usage {
+                    prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
+                    completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
+                    total_tokens: None,
+                });
 
-        let stop_reason = api_resp
-            .get("stop_reason")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+                let stop_reason = api_resp
+                    .get("stop_reason")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
-        Ok(CompletionResponse {
-            content,
-            tool_calls,
-            usage,
-            finish_reason: stop_reason,
+                Ok(CompletionResponse {
+                    content,
+                    tool_calls,
+                    usage,
+                    finish_reason: stop_reason,
+                })
+            }
         })
+        .await
     }
 
     async fn complete_stream(&self, request: CompletionRequest) -> Result<BoxStream> {
         let url = format!("{}/v1/messages", self.base_url());
         let mut body = self.build_request_body(&request);
         body["stream"] = json!(true);
+        let api_key = self.config.api_key.clone();
+        let api_version = self
+            .config
+            .api_version
+            .clone()
+            .unwrap_or_else(|| "2023-06-01".to_string());
+        let retry_config = self.retry.clone();
 
         debug!(
             "Anthropic streaming request to {} (model: {})",
             url, request.model
         );
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.config.api_key)
-            .header(
-                "anthropic-version",
-                self.config.api_version.as_deref().unwrap_or("2023-06-01"),
-            )
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| "Failed to send Anthropic streaming request")?;
+        retry_with_backoff(&retry_config, move |_attempt| {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = api_key.clone();
+            let api_version = api_version.clone();
+            let client = self.client.clone();
+            async move {
+                let resp = client
+                    .post(&url)
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", &api_version)
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .with_context(|| "Failed to send Anthropic streaming request")?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic API error ({}): {}", status, text);
-        }
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("Anthropic API error ({}): {}", status, text);
+                }
 
-        Ok(Self::parse_sse_stream(resp.bytes_stream()))
+                Ok(Self::parse_sse_stream(resp.bytes_stream()))
+            }
+        })
+        .await
     }
 
     fn supports_model(&self, model: &str) -> bool {

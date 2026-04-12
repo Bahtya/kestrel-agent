@@ -56,7 +56,7 @@ impl RetryConfig {
 
 /// Decide whether a status code is retryable.
 pub fn is_retryable_status(status: u16) -> bool {
-    status == 429 || (status >= 500 && status < 600)
+    status == 429 || (500..600).contains(&status)
 }
 
 /// Extract the `Retry-After` header value in seconds.
@@ -129,16 +129,20 @@ fn is_retryable_err(err: &anyhow::Error) -> bool {
 }
 
 /// Extract HTTP status code from an error message like "API error (429): ..."
+/// or "API error (429 Too Many Requests): ..."
 fn extract_status_code(msg: &str) -> Option<u16> {
     let start = msg.find('(')?;
     let end = msg.find(')').filter(|e| *e > start)?;
-    let code_str = &msg[start + 1..end];
+    let inner = &msg[start + 1..end];
+    // Take the first word (the numeric code) in case of "429 Too Many Requests".
+    let code_str = inner.split_whitespace().next()?;
     code_str.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_is_retryable_status() {
@@ -190,6 +194,9 @@ mod tests {
         assert_eq!(extract_status_code("API error (429): rate limited"), Some(429));
         assert_eq!(extract_status_code("Anthropic API error (503): unavailable"), Some(503));
         assert_eq!(extract_status_code("API error (401): unauthorized"), Some(401));
+        // With status reason phrase from reqwest
+        assert_eq!(extract_status_code("API error (429 Too Many Requests): rate limited"), Some(429));
+        assert_eq!(extract_status_code("Anthropic API error (503 Service Unavailable): "), Some(503));
         assert_eq!(extract_status_code("Some other error"), None);
     }
 
@@ -227,14 +234,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_succeeds_after_retries() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
         let config = RetryConfig::default().with_max_retries(3);
-        let mut calls = 0u32;
+
+        let calls_clone = calls.clone();
         let result = retry_with_backoff(&config, move |_attempt| {
-            let mut calls_inner = calls;
+            let calls = calls_clone.clone();
             async move {
-                calls_inner += 1;
-                calls = calls_inner;
-                if calls_inner < 3 {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if n < 3 {
                     Err(anyhow::anyhow!("API error (429): rate limited"))
                 } else {
                     Ok::<_, anyhow::Error>("success")
@@ -244,6 +253,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result, "success");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -259,17 +269,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_non_retryable_error() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
         let config = RetryConfig::default();
-        let mut calls = 0u32;
+
+        let calls_clone = calls.clone();
         let result = retry_with_backoff(&config, move |_attempt| {
+            let calls = calls_clone.clone();
             async move {
-                calls += 1;
+                calls.fetch_add(1, Ordering::SeqCst);
                 Err::<(), _>(anyhow::anyhow!("API error (401): unauthorized"))
             }
         })
         .await;
         assert!(result.is_err());
         // Should not retry on 401
-        assert_eq!(calls, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

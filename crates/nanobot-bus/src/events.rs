@@ -132,6 +132,13 @@ pub enum AgentEvent {
 
     /// Agent encountered an error.
     Error { session_key: String, error: String },
+
+    /// A cron job fired.
+    CronFired {
+        job_id: String,
+        job_name: Option<String>,
+        message: String,
+    },
 }
 
 #[cfg(test)]

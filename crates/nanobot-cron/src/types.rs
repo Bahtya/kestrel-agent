@@ -171,11 +171,11 @@ mod tests {
             kind: ScheduleKind::Cron,
             at_ms: None,
             every_ms: None,
-            expr: Some("0 * * * *".to_string()),
+            expr: Some("0 0 * * * * *".to_string()),
             tz: Some("UTC".to_string()),
         };
         assert_eq!(cron.kind, ScheduleKind::Cron);
-        assert_eq!(cron.expr.as_deref(), Some("0 * * * *"));
+        assert_eq!(cron.expr.as_deref(), Some("0 0 * * * * *"));
         assert_eq!(cron.tz.as_deref(), Some("UTC"));
     }
 

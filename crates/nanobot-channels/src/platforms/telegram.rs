@@ -254,6 +254,9 @@ impl TelegramChannel {
     }
 
     /// Poll `getUpdates` in a loop until `running` is cleared.
+    ///
+    /// Uses exponential backoff on transient errors (max 60s).
+    /// The backoff resets on any successful response.
     async fn poll_loop(
         client: reqwest::Client,
         token: String,
@@ -263,6 +266,8 @@ impl TelegramChannel {
         let base_url = format!("https://api.telegram.org/bot{}", token);
         let mut offset: Option<i64> = None;
         let timeout_secs: u32 = 30;
+        let mut backoff_secs: u64 = 1;
+        let max_backoff_secs: u64 = 60;
 
         info!("Telegram polling task started");
 
@@ -279,8 +284,9 @@ impl TelegramChannel {
                 Ok(r) => r,
                 Err(e) => {
                     // Transient network error — back off and retry.
-                    error!("Telegram getUpdates request failed: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    error!("Telegram getUpdates request failed: {e} (retry in {backoff_secs}s)");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(max_backoff_secs);
                     continue;
                 }
             };
@@ -295,13 +301,21 @@ impl TelegramChannel {
             };
 
             if !body.ok {
-                error!(
-                    "Telegram getUpdates error: {}",
-                    body.description.as_deref().unwrap_or("unknown")
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let desc = body.description.as_deref().unwrap_or("unknown");
+                // "Conflict: terminated by other getUpdates request" means
+                // another bot instance is running — use a longer backoff.
+                if desc.contains("Conflict") || desc.contains("terminated") {
+                    warn!("Telegram getUpdates conflict — another bot instance may be running (retry in {backoff_secs}s)");
+                } else {
+                    error!("Telegram getUpdates error: {desc}");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(max_backoff_secs);
                 continue;
             }
+
+            // Success — reset backoff.
+            backoff_secs = 1;
 
             let updates = body.result.unwrap_or_default();
 

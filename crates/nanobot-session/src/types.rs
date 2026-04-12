@@ -3,6 +3,27 @@
 use nanobot_core::{Message, MessageRole, SessionSource};
 use serde::{Deserialize, Serialize};
 
+/// Maximum notes before compaction triggers.
+pub const MAX_NOTES_BEFORE_COMPACTION: usize = 50;
+
+/// A structured note attached to a session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionNote {
+    /// Short key / title for the note.
+    pub key: String,
+    /// The note content.
+    pub content: String,
+    /// Category for grouping (e.g. "decision", "preference", "todo").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// When this note was created (RFC 3339).
+    #[serde(default)]
+    pub created_at: String,
+    /// When this note was last updated (RFC 3339).
+    #[serde(default)]
+    pub updated_at: String,
+}
+
 /// A conversation session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -11,6 +32,10 @@ pub struct Session {
 
     /// Conversation message history.
     pub messages: Vec<SessionEntry>,
+
+    /// Structured notes attached to this session.
+    #[serde(default)]
+    pub notes: Vec<SessionNote>,
 
     /// Session metadata.
     #[serde(default)]
@@ -27,6 +52,7 @@ impl Session {
         Self {
             key,
             messages: Vec::new(),
+            notes: Vec::new(),
             metadata: SessionMetadata::default(),
             source: None,
         }
@@ -128,6 +154,108 @@ impl Session {
         self.messages.clear();
         self.metadata.truncated = false;
         self.metadata.turn_count = 0;
+    }
+
+    // ── Structured Notes CRUD ──────────────────────────────────
+
+    /// Save a note (create or update by key).
+    pub fn save_note(&mut self, key: String, content: String, category: Option<String>) {
+        let now = chrono::Local::now().to_rfc3339();
+        if let Some(existing) = self.notes.iter_mut().find(|n| n.key == key) {
+            existing.content = content;
+            if category.is_some() {
+                existing.category = category;
+            }
+            existing.updated_at = now;
+        } else {
+            self.notes.push(SessionNote {
+                key,
+                content,
+                category,
+                created_at: now.clone(),
+                updated_at: now,
+            });
+        }
+    }
+
+    /// Get a note by key.
+    pub fn get_note(&self, key: &str) -> Option<&SessionNote> {
+        self.notes.iter().find(|n| n.key == key)
+    }
+
+    /// Delete a note by key. Returns true if a note was removed.
+    pub fn delete_note(&mut self, key: &str) -> bool {
+        let before = self.notes.len();
+        self.notes.retain(|n| n.key != key);
+        self.notes.len() < before
+    }
+
+    /// Get notes filtered by category.
+    pub fn notes_by_category(&self, category: &str) -> Vec<&SessionNote> {
+        self.notes
+            .iter()
+            .filter(|n| n.category.as_deref() == Some(category))
+            .collect()
+    }
+
+    /// Compact notes when they exceed the limit.
+    ///
+    /// Keeps the most recent notes and merges older ones into a summary
+    /// note with key `_compacted`.
+    pub fn compact_notes(&mut self) -> bool {
+        if self.notes.len() <= MAX_NOTES_BEFORE_COMPACTION {
+            return false;
+        }
+
+        let keep = MAX_NOTES_BEFORE_COMPACTION / 2;
+        let older: Vec<SessionNote> = self.notes.drain(..self.notes.len().saturating_sub(keep)).collect();
+        if older.is_empty() {
+            return false;
+        }
+
+        let mut summary_parts = Vec::new();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for note in older.iter() {
+            *counts.entry(note.category.clone().unwrap_or_else(|| "general".to_string())).or_insert(0) += 1;
+            summary_parts.push(format!("- {}: {}", note.key, note.content));
+        }
+
+        let mut cat_summary: Vec<String> = counts
+            .iter()
+            .map(|(cat, count)| format!("{} ({})", cat, count))
+            .collect();
+        cat_summary.sort();
+
+        let compacted = SessionNote {
+            key: "_compacted".to_string(),
+            content: format!(
+                "Compacted {} older notes ({}). Key points:\n{}",
+                older.len(),
+                cat_summary.join(", "),
+                summary_parts.join("\n"),
+            ),
+            category: Some("_system".to_string()),
+            created_at: chrono::Local::now().to_rfc3339(),
+            updated_at: chrono::Local::now().to_rfc3339(),
+        };
+        self.notes.insert(0, compacted);
+        true
+    }
+
+    /// Format notes as context for the system prompt.
+    pub fn format_notes_context(&self) -> Option<String> {
+        if self.notes.is_empty() {
+            return None;
+        }
+        let mut parts = vec!["## Session Notes".to_string()];
+        for note in &self.notes {
+            if let Some(cat) = &note.category {
+                parts.push(format!("- [{}] {}: {}", cat, note.key, note.content));
+            } else {
+                parts.push(format!("- {}: {}", note.key, note.content));
+            }
+        }
+        Some(parts.join("\n"))
     }
 }
 
@@ -299,5 +427,147 @@ mod tests {
         assert!(entry.tool_call_id.is_none());
         assert!(entry.tool_calls.is_none());
         assert!(entry.timestamp.is_some());
+    }
+
+    // === Notes CRUD ===
+
+    #[test]
+    fn test_session_new_has_empty_notes() {
+        let session = Session::new("test:notes".to_string());
+        assert!(session.notes.is_empty());
+    }
+
+    #[test]
+    fn test_save_and_get_note() {
+        let mut session = Session::new("test:notes".to_string());
+        session.save_note("lang".to_string(), "Rust".to_string(), Some("tech".to_string()));
+
+        let note = session.get_note("lang").unwrap();
+        assert_eq!(note.key, "lang");
+        assert_eq!(note.content, "Rust");
+        assert_eq!(note.category.as_deref(), Some("tech"));
+        assert!(!note.created_at.is_empty());
+    }
+
+    #[test]
+    fn test_save_updates_existing() {
+        let mut session = Session::new("test:notes".to_string());
+        session.save_note("key1".to_string(), "v1".to_string(), None);
+        session.save_note("key1".to_string(), "v2".to_string(), Some("cat".to_string()));
+
+        assert_eq!(session.notes.len(), 1);
+        let note = session.get_note("key1").unwrap();
+        assert_eq!(note.content, "v2");
+        assert_eq!(note.category.as_deref(), Some("cat"));
+    }
+
+    #[test]
+    fn test_get_note_missing() {
+        let session = Session::new("test:notes".to_string());
+        assert!(session.get_note("nope").is_none());
+    }
+
+    #[test]
+    fn test_delete_note() {
+        let mut session = Session::new("test:notes".to_string());
+        session.save_note("a".to_string(), "note a".to_string(), None);
+        session.save_note("b".to_string(), "note b".to_string(), None);
+
+        assert!(session.delete_note("a"));
+        assert_eq!(session.notes.len(), 1);
+        assert!(session.get_note("a").is_none());
+    }
+
+    #[test]
+    fn test_delete_note_missing() {
+        let mut session = Session::new("test:notes".to_string());
+        assert!(!session.delete_note("nope"));
+    }
+
+    #[test]
+    fn test_notes_by_category() {
+        let mut session = Session::new("test:notes".to_string());
+        session.save_note("n1".to_string(), "a".to_string(), Some("decision".to_string()));
+        session.save_note("n2".to_string(), "b".to_string(), Some("preference".to_string()));
+        session.save_note("n3".to_string(), "c".to_string(), Some("decision".to_string()));
+
+        let decisions = session.notes_by_category("decision");
+        assert_eq!(decisions.len(), 2);
+        let prefs = session.notes_by_category("preference");
+        assert_eq!(prefs.len(), 1);
+    }
+
+    #[test]
+    fn test_format_notes_context_empty() {
+        let session = Session::new("test:notes".to_string());
+        assert!(session.format_notes_context().is_none());
+    }
+
+    #[test]
+    fn test_format_notes_context() {
+        let mut session = Session::new("test:notes".to_string());
+        session.save_note("lang".to_string(), "Rust".to_string(), Some("tech".to_string()));
+        session.save_note("style".to_string(), "Concise".to_string(), None);
+
+        let ctx = session.format_notes_context().unwrap();
+        assert!(ctx.contains("## Session Notes"));
+        assert!(ctx.contains("[tech] lang: Rust"));
+        assert!(ctx.contains("style: Concise"));
+    }
+
+    #[test]
+    fn test_compact_notes_noop_when_under_limit() {
+        let mut session = Session::new("test:notes".to_string());
+        for i in 0..10 {
+            session.save_note(format!("n{}", i), format!("note {}", i), None);
+        }
+        assert!(!session.compact_notes());
+        assert_eq!(session.notes.len(), 10);
+    }
+
+    #[test]
+    fn test_compact_notes_triggers_when_over_limit() {
+        let mut session = Session::new("test:notes".to_string());
+        for i in 0..(MAX_NOTES_BEFORE_COMPACTION + 10) {
+            session.save_note(format!("n{}", i), format!("note {}", i), Some("general".to_string()));
+        }
+        assert_eq!(session.notes.len(), MAX_NOTES_BEFORE_COMPACTION + 10);
+
+        let compacted = session.compact_notes();
+        assert!(compacted);
+        // Should have: 1 compacted summary + keep recent notes
+        assert!(session.notes.len() < MAX_NOTES_BEFORE_COMPACTION + 10);
+        assert!(session.get_note("_compacted").is_some());
+    }
+
+    #[test]
+    fn test_note_survives_session_save_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = crate::manager::SessionManager::new(dir.path().to_path_buf()).unwrap();
+
+        {
+            let mut session = mgr.get_or_create("test:persist", None);
+            session.save_note("persist".to_string(), "survives reload".to_string(), Some("test".to_string()));
+            mgr.save_session(&session).unwrap();
+        }
+
+        let loaded = mgr.get_or_create("test:persist", None);
+        let note = loaded.get_note("persist").unwrap();
+        assert_eq!(note.content, "survives reload");
+        assert_eq!(note.category.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn test_session_note_serde_roundtrip() {
+        let note = SessionNote {
+            key: "test".to_string(),
+            content: "content".to_string(),
+            category: Some("cat".to_string()),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&note).unwrap();
+        let back: SessionNote = serde_json::from_str(&json).unwrap();
+        assert_eq!(note, back);
     }
 }

@@ -3,7 +3,6 @@
 //! Builds the system prompt from identity files, memory, skills, runtime metadata.
 //! Mirrors the Python `agent/context.py` ContextBuilder.
 
-use crate::notes::NotesManager;
 use anyhow::Result;
 use nanobot_bus::events::InboundMessage;
 use nanobot_config::Config;
@@ -41,7 +40,7 @@ impl<'a> ContextBuilder<'a> {
         }
 
         // Structured notes (if available)
-        if let Some(notes_ctx) = NotesManager::format_notes_context(session) {
+        if let Some(notes_ctx) = session.format_notes_context() {
             parts.push(notes_ctx);
         }
 

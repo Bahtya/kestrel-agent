@@ -7,6 +7,7 @@
 use crate::compaction::{compact_session, CompactionConfig};
 use crate::context::ContextBuilder;
 use crate::hook::CompositeHook;
+use crate::notes::NotesManager;
 use crate::runner::AgentRunner;
 use anyhow::Result;
 use nanobot_bus::events::{AgentEvent, InboundMessage, OutboundMessage, StreamChunk};
@@ -202,6 +203,24 @@ impl AgentLoop {
             Ok(result) => {
                 // Add assistant response to session
                 session.add_assistant_message(result.content.clone());
+
+                // Auto-extract structured notes from the response
+                let extracted = NotesManager::extract_notes_from_response(
+                    &mut session,
+                    &result.content,
+                );
+                if extracted > 0 {
+                    info!(
+                        "Auto-extracted {} notes from agent response in session {}",
+                        extracted, session_key
+                    );
+                }
+
+                // Compact notes if they exceed the limit
+                if NotesManager::compact_if_needed(&mut session) {
+                    info!("Notes compacted for session {}", session_key);
+                }
+
                 self.session_manager.save_session(&session)?;
 
                 // Send outbound message

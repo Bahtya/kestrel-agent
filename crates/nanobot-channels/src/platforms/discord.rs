@@ -73,12 +73,29 @@ struct DiscordEmbedImage {
 // ─── Gateway WebSocket types ─────────────────────────────────
 
 /// Gateway opcode constants.
+#[allow(dead_code)] // RESUME/RECONNECT used in reconnection logic
 mod opcodes {
     pub const DISPATCH: i64 = 0;
     pub const HEARTBEAT: i64 = 1;
     pub const IDENTIFY: i64 = 2;
+    pub const INVALID_SESSION: i64 = 9;
     pub const HELLO: i64 = 10;
     pub const HEARTBEAT_ACK: i64 = 11;
+    pub const RESUME: i64 = 6;
+    pub const RECONNECT: i64 = 7;
+}
+
+/// Gateway intent bitflags.
+mod intents {
+    /// GUILD_MESSAGES = 1 << 9
+    pub const GUILD_MESSAGES: i64 = 1 << 9;
+    /// DIRECT_MESSAGES = 1 << 12
+    pub const DIRECT_MESSAGES: i64 = 1 << 12;
+    /// MESSAGE_CONTENT = 1 << 15
+    pub const MESSAGE_CONTENT: i64 = 1 << 15;
+    /// Combined intents for a text-based bot.
+    pub const TEXT_BOT: i64 =
+        GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT;
 }
 
 /// A generic Gateway payload.
@@ -307,7 +324,7 @@ impl DiscordChannel {
             "op": opcodes::IDENTIFY,
             "d": {
                 "token": token,
-                "intents": 512, // GuildMessages + MessageContent = 1 << 9 | 1 << 15 = 512 + 32768 = 33280
+                "intents": intents::TEXT_BOT,
                 "properties": {
                     "os": "linux",
                     "browser": "nanobot-rs",
@@ -320,18 +337,7 @@ impl DiscordChannel {
             return;
         }
 
-        // Spawn heartbeat task
-        let heartbeat_running = running.clone();
-        let hb_handle = tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_millis(heartbeat_interval));
-            // We can't send on the ws from here since it was moved.
-            // Instead we'll handle heartbeat inline below.
-            let _ = heartbeat_running;
-            loop {
-                interval.tick().await;
-            }
-        });
+        info!("Discord Gateway IDENTIFY sent (intents: {})", intents::TEXT_BOT);
 
         // Process events
         let mut last_sequence: Option<i64> = None;
@@ -365,16 +371,31 @@ impl DiscordChannel {
 
                             match payload.op {
                                 opcodes::DISPATCH => {
-                                    if payload.t.as_deref() == Some("MESSAGE_CREATE") {
-                                        if let Ok(msg_data) = serde_json::from_value::<GatewayMessage>(payload.d) {
-                                            Self::dispatch_message(&handler, &msg_data).await;
+                                    match payload.t.as_deref() {
+                                        Some("MESSAGE_CREATE") | Some("MESSAGE_UPDATE") => {
+                                            if let Ok(msg_data) =
+                                                serde_json::from_value::<GatewayMessage>(payload.d)
+                                            {
+                                                Self::dispatch_message(&handler, &msg_data).await;
+                                            }
                                         }
+                                        _ => {}
                                     }
                                 }
                                 opcodes::HEARTBEAT_ACK => {
                                     debug!("Discord heartbeat ACK");
                                 }
-                                _ => {}
+                                opcodes::INVALID_SESSION => {
+                                    warn!("Discord Gateway INVALID_SESSION — session no longer valid");
+                                    break;
+                                }
+                                opcodes::RECONNECT => {
+                                    warn!("Discord Gateway RECONNECT requested — reconnecting");
+                                    break;
+                                }
+                                _ => {
+                                    debug!("Discord Gateway op={} ignored", payload.op);
+                                }
                             }
                         }
                         Some(Ok(WsMessage::Close(_))) => {
@@ -395,7 +416,6 @@ impl DiscordChannel {
             }
         }
 
-        hb_handle.abort();
         info!("Discord Gateway listener stopped");
     }
 

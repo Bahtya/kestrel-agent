@@ -3,6 +3,8 @@
 //! Wires together: bus, channels, agent loop, session manager,
 //! provider registry, tool registry, heartbeat, and API server.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use nanobot_agent::AgentLoop;
 use nanobot_api::ApiServer;
@@ -47,9 +49,9 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
         }
     }
 
-    // ── Channel manager ───────────────────────────────────────
+    // ── Channel manager (wrapped in Arc for shared access) ────
     let channel_registry = ChannelRegistry::new();
-    let channel_manager = ChannelManager::new(channel_registry, bus.clone());
+    let channel_manager = Arc::new(ChannelManager::new(channel_registry, bus.clone()));
 
     // ── Agent loop ────────────────────────────────────────────
     let agent_loop = AgentLoop::new(
@@ -115,8 +117,9 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
         }
     });
 
+    let outbound_cm = channel_manager.clone();
     let outbound_handle = tokio::spawn(async move {
-        channel_manager.run_outbound_consumer().await;
+        outbound_cm.run_outbound_consumer().await;
     });
 
     let heartbeat_enabled = config.heartbeat.enabled;
@@ -158,6 +161,10 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
             info!("API server exited");
         }
     }
+
+    // ── Graceful shutdown ─────────────────────────────────────
+    info!("Stopping all channels...");
+    channel_manager.stop_all().await;
 
     info!("Gateway shutting down");
     Ok(())

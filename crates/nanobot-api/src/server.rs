@@ -2183,20 +2183,22 @@ mod tests {
         assert!(ct.contains("text/event-stream"));
 
         // Collect body — with cancel already fired, take_until immediately
-        // truncates, so we get 0 data events
+        // truncates, so we get only the [DONE] sentinel.
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         let data_count = body_str.matches("data:").count();
         assert_eq!(
-            data_count, 0,
-            "Expected 0 SSE events when cancel is pre-triggered, got {}: {}",
+            data_count, 1,
+            "Expected 1 SSE event ([DONE]) when cancel is pre-triggered, got {}: {}",
             data_count, body_str
         );
+        assert!(body_str.contains("[DONE]"), "Should contain [DONE] sentinel");
     }
 
     #[tokio::test]
     async fn test_sse_stream_normal_not_cancelled() {
-        // Verify normal SSE stream (not cancelled) emits all 3 events.
+        // Verify normal SSE stream (not cancelled) emits all 3 chunk events
+        // plus the [DONE] sentinel.
         let state = test_state_with_provider();
 
         let req = ChatCompletionRequest {
@@ -2231,9 +2233,10 @@ mod tests {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         let data_count = body_str.matches("data:").count();
         assert_eq!(
-            data_count, 3,
-            "Expected 3 SSE events without cancellation, got {}: {}",
+            data_count, 4,
+            "Expected 4 SSE events (3 chunks + [DONE]) without cancellation, got {}: {}",
             data_count, body_str
         );
+        assert!(body_str.contains("[DONE]"), "Should contain [DONE] sentinel");
     }
 }

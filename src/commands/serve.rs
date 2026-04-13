@@ -14,8 +14,11 @@ use nanobot_tools::builtins;
 use tracing::info;
 
 /// Run the API server.
-pub async fn run(config: Config, port: u16) -> Result<()> {
-    info!("Starting nanobot API server on port {}...", port);
+///
+/// `port_override`: when `Some`, overrides the port from `config.api.port`.
+pub async fn run(config: Config, port_override: Option<u16>) -> Result<()> {
+    let effective_port = port_override.unwrap_or(config.api.port);
+    info!("Starting nanobot API server on port {}...", effective_port);
 
     let bus = MessageBus::new();
     let home = nanobot_config::paths::get_nanobot_home()?;
@@ -52,7 +55,7 @@ pub async fn run(config: Config, port: u16) -> Result<()> {
         session_manager,
         provider_registry,
         tool_registry,
-        port,
+        port_override,
     );
     let api_handle = tokio::spawn(async move {
         if let Err(e) = server.run().await {
@@ -60,7 +63,7 @@ pub async fn run(config: Config, port: u16) -> Result<()> {
         }
     });
 
-    info!("API server running on port {}", port);
+    info!("API server running on port {}", effective_port);
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {

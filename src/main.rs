@@ -46,9 +46,9 @@ enum Commands {
 
     /// Start the OpenAI-compatible API server.
     Serve {
-        /// Port to listen on.
-        #[arg(short, long, default_value = "8080")]
-        port: u16,
+        /// Port to listen on. Overrides config.api.port.
+        #[arg(short, long)]
+        port: Option<u16>,
     },
 
     /// Start the heartbeat service (periodic task checking).

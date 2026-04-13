@@ -45,7 +45,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 /// Shared state for the API server.
 #[derive(Clone)]
@@ -65,6 +65,7 @@ pub struct AppState {
 /// The API server.
 pub struct ApiServer {
     state: AppState,
+    host: String,
     port: u16,
 }
 
@@ -101,12 +102,17 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
 
 impl ApiServer {
     /// Create a new API server with fresh registries.
+    ///
+    /// Reads `host` and `port` from `config.api`.  Pass `port_override` to
+    /// override the config port (e.g. from a CLI `--port` flag).
     pub fn new(
         config: Config,
         bus: MessageBus,
         session_manager: SessionManager,
-        port: u16,
+        port_override: Option<u16>,
     ) -> Self {
+        let host = config.api.host.clone();
+        let port = port_override.unwrap_or(config.api.port);
         let state = AppState {
             config: Arc::new(config),
             bus: Arc::new(bus),
@@ -117,18 +123,23 @@ impl ApiServer {
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
         };
-        Self { state, port }
+        Self { state, host, port }
     }
 
     /// Create with pre-built provider and tool registries.
+    ///
+    /// Reads `host` and `port` from `config.api`.  Pass `port_override` to
+    /// override the config port (e.g. from a CLI `--port` flag).
     pub fn with_registries(
         config: Config,
         bus: MessageBus,
         session_manager: SessionManager,
         provider_registry: ProviderRegistry,
         tool_registry: ToolRegistry,
-        port: u16,
+        port_override: Option<u16>,
     ) -> Self {
+        let host = config.api.host.clone();
+        let port = port_override.unwrap_or(config.api.port);
         let state = AppState {
             config: Arc::new(config),
             bus: Arc::new(bus),
@@ -139,7 +150,7 @@ impl ApiServer {
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
         };
-        Self { state, port }
+        Self { state, host, port }
     }
 
     /// Set an API key for bearer-token authentication.
@@ -170,6 +181,7 @@ impl ApiServer {
             .merge(protected_routes)
             .layer(DefaultBodyLimit::max(body_limit))
             .layer(middleware::from_fn(request_log_middleware))
+            .layer(middleware::from_fn(request_id_middleware))
             .layer(cors)
             .layer(TraceLayer::new_for_http())
             .with_state(self.state.clone())
@@ -183,7 +195,8 @@ impl ApiServer {
     /// connections and the server drains existing requests.
     pub async fn run(&self) -> anyhow::Result<()> {
         let app = self.router();
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.port));
+        let host: std::net::IpAddr = self.host.parse().unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+        let addr = std::net::SocketAddr::from((host, self.port));
         info!("API server listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -309,6 +322,35 @@ struct ErrorDetail {
 // ─── Auth helper ────────────────────────────────────────────
 
 // ─── Middleware ──────────────────────────────────────────────
+
+/// Request ID middleware — ensures every request has a unique `x-request-id`.
+///
+/// If the client sends an `x-request-id` header it is preserved; otherwise a
+/// new UUID v4 is generated. The ID is set on the response header and injected
+/// into the current tracing span for structured log correlation.
+async fn request_id_middleware(
+    req: Request<Body>,
+    next: Next,
+) -> impl IntoResponse {
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // Inject into tracing span so downstream log lines carry the request ID.
+    let span = tracing::info_span!("request", request_id = %request_id);
+    let response: axum::response::Response = next.run(req).instrument(span).await;
+
+    // Attach the request ID to the response.
+    let mut response = response;
+    if let Ok(val) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", val);
+    }
+
+    response
+}
 
 /// Request logging middleware — logs method, path, status code, and latency.
 /// Also intercepts 413 Payload Too Large responses and returns an OpenAI-format
@@ -658,10 +700,16 @@ async fn stream_completion(
                     }).to_string())),
                 ]);
 
-                // Wrap with cancellation: end the stream on shutdown signal.
-                // cancelled_owned() returns an owned future so we satisfy 'static.
-                let cancelled = events.take_until(cancel.cancelled_owned());
-                Box::pin(cancelled)
+                // On graceful shutdown, emit [DONE] then terminate.
+                // take_until truncates when the cancel token fires; chain appends
+                // the [DONE] sentinel so clients receive a clean end-of-stream signal.
+                let done_event = futures::stream::once(async move {
+                    Ok(Event::default().data("[DONE]"))
+                });
+                let stream = events
+                    .take_until(cancel.cancelled_owned())
+                    .chain(done_event);
+                Box::pin(stream)
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -1447,9 +1495,9 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
 
-        // Should contain 3 data events: role, content, stop
+        // Should contain 4 data events: role, content, stop, [DONE]
         let data_count = body_str.matches("data:").count();
-        assert_eq!(data_count, 3, "Expected 3 SSE data events, got {}: {}", data_count, body_str);
+        assert_eq!(data_count, 4, "Expected 4 SSE data events, got {}: {}", data_count, body_str);
 
         // First chunk should have role announcement
         assert!(body_str.contains("\"role\":\"assistant\"") || body_str.contains("\"role\": \"assistant\""),
@@ -1464,6 +1512,9 @@ mod tests {
 
         // Should contain usage info
         assert!(body_str.contains("\"prompt_tokens\""), "Final chunk should contain usage info");
+
+        // Should end with [DONE] sentinel
+        assert!(body_str.contains("data: [DONE]"), "SSE stream should end with [DONE] sentinel");
     }
 
     #[tokio::test]
@@ -1586,7 +1637,7 @@ mod tests {
         let bus = MessageBus::new();
         let tmp = tempfile::tempdir().unwrap();
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
-        let server = ApiServer::new(config, bus, session_manager, 8080);
+        let server = ApiServer::new(config, bus, session_manager, Some(8080));
         let _router = server.router();
     }
 
@@ -1598,7 +1649,7 @@ mod tests {
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
         let providers = ProviderRegistry::new();
         let tools = ToolRegistry::new();
-        let server = ApiServer::with_registries(config, bus, session_manager, providers, tools, 9090);
+        let server = ApiServer::with_registries(config, bus, session_manager, providers, tools, Some(9090));
         let _router = server.router();
     }
 
@@ -1608,7 +1659,7 @@ mod tests {
         let bus = MessageBus::new();
         let tmp = tempfile::tempdir().unwrap();
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
-        let server = ApiServer::new(config, bus, session_manager, 8080)
+        let server = ApiServer::new(config, bus, session_manager, Some(8080))
             .with_api_key("sk-test".to_string());
         assert_eq!(server.state.api_key, Some("sk-test".to_string()));
     }
@@ -1891,6 +1942,86 @@ mod tests {
         assert_eq!(allow_origin, "*");
     }
 
+    // ─── Request ID tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_request_id_generated_when_missing() {
+        let config = Config::default();
+        let state = AppState {
+            config: Arc::new(config),
+            bus: Arc::new(MessageBus::new()),
+            session_manager: {
+                let tmp = tempfile::tempdir().unwrap();
+                Arc::new(SessionManager::new(tmp.path().to_path_buf()).unwrap())
+            },
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            api_key: None,
+            cancel: CancellationToken::new(),
+            health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+        };
+
+        let cors = build_cors_layer(&state.config);
+        let body_limit = state.config.api.max_body_size;
+
+        let app = Router::new()
+            .route("/health", get(health))
+            .layer(DefaultBodyLimit::max(body_limit))
+            .layer(middleware::from_fn(request_log_middleware))
+            .layer(middleware::from_fn(request_id_middleware))
+            .layer(cors)
+            .with_state(state);
+
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let rid = resp.headers().get("x-request-id").expect("response should have x-request-id");
+        let rid_str = rid.to_str().unwrap();
+        // Should be a valid UUID
+        assert!(uuid::Uuid::parse_str(rid_str).is_ok(), "Generated request ID should be a valid UUID");
+    }
+
+    #[tokio::test]
+    async fn test_request_id_preserved_when_provided() {
+        let config = Config::default();
+        let state = AppState {
+            config: Arc::new(config),
+            bus: Arc::new(MessageBus::new()),
+            session_manager: {
+                let tmp = tempfile::tempdir().unwrap();
+                Arc::new(SessionManager::new(tmp.path().to_path_buf()).unwrap())
+            },
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            api_key: None,
+            cancel: CancellationToken::new(),
+            health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+        };
+
+        let cors = build_cors_layer(&state.config);
+        let body_limit = state.config.api.max_body_size;
+
+        let app = Router::new()
+            .route("/health", get(health))
+            .layer(DefaultBodyLimit::max(body_limit))
+            .layer(middleware::from_fn(request_log_middleware))
+            .layer(middleware::from_fn(request_id_middleware))
+            .layer(cors)
+            .with_state(state);
+
+        let req = Request::builder()
+            .uri("/health")
+            .header("x-request-id", "my-custom-id-123")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rid = resp.headers().get("x-request-id").expect("response should have x-request-id");
+        assert_eq!(rid.to_str().unwrap(), "my-custom-id-123");
+    }
+
     // ─── Body limit tests ──────────────────────────────────
 
     #[tokio::test]
@@ -1998,7 +2129,7 @@ mod tests {
                 let tmp = tempfile::tempdir().unwrap();
                 SessionManager::new(tmp.path().to_path_buf()).unwrap()
             },
-            0, // port 0 — not actually binding
+            Some(0), // port 0 — not actually binding
         );
 
         assert!(!server.state.cancel.is_cancelled());

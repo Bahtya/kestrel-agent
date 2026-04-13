@@ -20,7 +20,7 @@ pub use base::{CompletionRequest, CompletionResponse, LlmProvider};
 pub use middleware::{MiddlewareConfig, ProviderMiddleware};
 pub use rate_limit::{RateLimiter, TokenBucket};
 pub use registry::ProviderRegistry;
-pub use retry::RetryConfig;
+pub use retry::{CircuitBreaker, CircuitBreakerConfig, RetryConfig, RetryPolicy};
 
 /// Build a reqwest client with proper proxy handling.
 ///

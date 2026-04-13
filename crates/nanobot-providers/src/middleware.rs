@@ -26,20 +26,22 @@
 
 use crate::base::{BoxStream, CompletionRequest, CompletionResponse, LlmProvider};
 use crate::rate_limit::RateLimiter;
-use crate::retry::RetryConfig;
+use crate::retry::{CircuitBreaker, CircuitBreakerConfig, RetryConfig, RetryPolicy};
 use std::sync::Arc;
 use tracing::debug;
 
 /// Configuration for provider middleware.
 ///
-/// Combines retry policy and rate limiter into a single config that
-/// each provider can customize independently.
+/// Combines retry policy, rate limiter, and optional circuit breaker
+/// into a single config that each provider can customize independently.
 #[derive(Clone)]
 pub struct MiddlewareConfig {
     /// Retry policy — controls max retries and exponential backoff.
     pub retry: Arc<RetryConfig>,
     /// Rate limiter — controls request throughput.
     pub rate_limiter: Arc<dyn RateLimiter>,
+    /// Optional circuit breaker for fail-fast behavior.
+    pub circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
 
 impl std::fmt::Debug for MiddlewareConfig {
@@ -47,6 +49,7 @@ impl std::fmt::Debug for MiddlewareConfig {
         f.debug_struct("MiddlewareConfig")
             .field("retry", &self.retry)
             .field("rate_limiter", &"<dyn RateLimiter>")
+            .field("circuit_breaker", &self.circuit_breaker)
             .finish()
     }
 }
@@ -57,6 +60,7 @@ impl MiddlewareConfig {
         Self {
             retry: Arc::new(RetryConfig::default()),
             rate_limiter: Arc::new(crate::rate_limit::UnlimitedLimiter),
+            circuit_breaker: None,
         }
     }
 
@@ -65,6 +69,7 @@ impl MiddlewareConfig {
         Self {
             retry: Arc::new(RetryConfig::no_retries()),
             rate_limiter: Arc::new(crate::rate_limit::UnlimitedLimiter),
+            circuit_breaker: None,
         }
     }
 
@@ -73,6 +78,7 @@ impl MiddlewareConfig {
         Self {
             retry: Arc::new(retry),
             rate_limiter: Arc::new(crate::rate_limit::UnlimitedLimiter),
+            circuit_breaker: None,
         }
     }
 
@@ -88,6 +94,7 @@ impl MiddlewareConfig {
                 requests_per_minute,
                 Duration::from_secs(60),
             )),
+            circuit_breaker: None,
         }
     }
 
@@ -104,6 +111,36 @@ impl MiddlewareConfig {
                 requests_per_minute,
                 Duration::from_secs(60),
             )),
+            circuit_breaker: None,
+        }
+    }
+
+    /// Create with a circuit breaker using default config.
+    pub fn with_circuit_breaker(self) -> Self {
+        Self {
+            circuit_breaker: Some(Arc::new(CircuitBreaker::defaults())),
+            ..self
+        }
+    }
+
+    /// Create with a circuit breaker using custom config.
+    pub fn with_circuit_breaker_config(self, config: CircuitBreakerConfig) -> Self {
+        Self {
+            circuit_breaker: Some(Arc::new(CircuitBreaker::new(config))),
+            ..self
+        }
+    }
+
+    /// Create from a [`RetryPolicy`] with circuit breaker support.
+    ///
+    /// Converts the policy to a legacy [`RetryConfig`] and enables
+    /// a circuit breaker with default settings.
+    pub fn from_retry_policy(policy: RetryPolicy) -> Self {
+        let cb = Arc::new(CircuitBreaker::defaults());
+        Self {
+            retry: Arc::new(RetryConfig::from(policy)),
+            rate_limiter: Arc::new(crate::rate_limit::UnlimitedLimiter),
+            circuit_breaker: Some(cb),
         }
     }
 }
@@ -152,35 +189,79 @@ impl LlmProvider for ProviderMiddleware {
     }
 
     async fn complete(&self, request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
-        // 1. Rate limit: acquire a token (may block)
+        // 1. Circuit breaker check (fail-fast if open)
+        if let Some(ref cb) = self.config.circuit_breaker {
+            cb.allow_request().map_err(|e| anyhow::anyhow!(e))?;
+        }
+
+        // 2. Rate limit: acquire a token (may block)
         self.config.rate_limiter.acquire().await;
         debug!(provider = self.inner.name(), "Rate limit token acquired for complete()");
 
-        // 2. Retry with exponential backoff
+        // 3. Retry with exponential backoff + circuit breaker recording
         let inner = self.inner.clone();
         let retry_config = self.config.retry.clone();
+        let cb = self.config.circuit_breaker.clone();
         crate::retry::retry_with_backoff(&retry_config, move |_attempt| {
             let inner = inner.clone();
             let req = request.clone();
-            async move { inner.complete(req).await }
+            let cb = cb.clone();
+            async move {
+                let result = inner.complete(req).await;
+                match &result {
+                    Ok(_) => {
+                        if let Some(ref cb) = cb {
+                            cb.record_success();
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(ref cb) = cb {
+                            cb.record_failure();
+                        }
+                    }
+                }
+                result
+            }
         })
         .await
     }
 
     async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<BoxStream> {
-        // 1. Rate limit: acquire a token (may block)
+        // 1. Circuit breaker check (fail-fast if open)
+        if let Some(ref cb) = self.config.circuit_breaker {
+            cb.allow_request().map_err(|e| anyhow::anyhow!(e))?;
+        }
+
+        // 2. Rate limit: acquire a token (may block)
         self.config.rate_limiter.acquire().await;
         debug!(provider = self.inner.name(), "Rate limit token acquired for complete_stream()");
 
-        // 2. Retry with exponential backoff
+        // 3. Retry with exponential backoff + circuit breaker recording
         // Note: we only retry the initial HTTP connection/stream-open.
         // Once the stream is established, retries are not applicable.
         let inner = self.inner.clone();
         let retry_config = self.config.retry.clone();
+        let cb = self.config.circuit_breaker.clone();
         crate::retry::retry_with_backoff(&retry_config, move |_attempt| {
             let inner = inner.clone();
             let req = request.clone();
-            async move { inner.complete_stream(req).await }
+            let cb = cb.clone();
+            async move {
+                let result = inner.complete_stream(req).await;
+                match &result {
+                    Ok(_) => {
+                        if let Some(ref cb) = cb {
+                            cb.record_success();
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(ref cb) = cb {
+                            cb.record_failure();
+                        }
+                    }
+                }
+                result
+            }
         })
         .await
     }
@@ -357,6 +438,7 @@ mod tests {
         let config = MiddlewareConfig {
             retry: Arc::new(RetryConfig::no_retries()),
             rate_limiter: bucket.clone(),
+            circuit_breaker: None,
         };
         let middleware = ProviderMiddleware::from_arc(mock.clone(), config);
 
@@ -422,6 +504,7 @@ mod tests {
         let config = MiddlewareConfig {
             retry: Arc::new(RetryConfig::no_retries()),
             rate_limiter: bucket.clone(),
+            circuit_breaker: None,
         };
         let middleware = Arc::new(ProviderMiddleware::from_arc(mock.clone(), config));
 
@@ -442,5 +525,84 @@ mod tests {
         // Bucket should be empty now
         assert_eq!(bucket.available(), 0);
         assert_eq!(mock.call_count.load(Ordering::SeqCst), 5);
+    }
+
+    // -------------------------------------------------------------------
+    // Circuit breaker integration tests
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_middleware_circuit_breaker_trips() {
+        let mock = Arc::new(MockProvider::new());
+        mock.fail_n_times(100); // Always fail
+        let cb = Arc::new(CircuitBreaker::new(
+            CircuitBreakerConfig::default().with_failure_threshold(3),
+        ));
+        let config = MiddlewareConfig {
+            retry: Arc::new(RetryConfig::no_retries()),
+            rate_limiter: Arc::new(crate::rate_limit::UnlimitedLimiter),
+            circuit_breaker: Some(cb.clone()),
+        };
+        let middleware = ProviderMiddleware::from_arc(mock.clone(), config);
+
+        // Fail 3 times to trip the breaker
+        for _ in 0..3 {
+            let _ = middleware.complete(make_request()).await;
+        }
+        assert_eq!(cb.state_name(), "OPEN");
+        assert_eq!(mock.call_count.load(Ordering::SeqCst), 3);
+
+        // Next request should be rejected by circuit breaker (fail-fast)
+        let result = middleware.complete(make_request()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("OPEN"));
+        // Call count should NOT have increased (fail-fast, no actual call)
+        assert_eq!(mock.call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_middleware_circuit_breaker_success_resets() {
+        let mock = Arc::new(MockProvider::new());
+        let cb = Arc::new(CircuitBreaker::new(
+            CircuitBreakerConfig::default().with_failure_threshold(5),
+        ));
+        let config = MiddlewareConfig {
+            retry: Arc::new(RetryConfig::no_retries()),
+            rate_limiter: Arc::new(crate::rate_limit::UnlimitedLimiter),
+            circuit_breaker: Some(cb.clone()),
+        };
+        let middleware = ProviderMiddleware::from_arc(mock.clone(), config);
+
+        // Success
+        let result = middleware.complete(make_request()).await.unwrap();
+        assert!(result.content.is_some());
+        assert_eq!(cb.state_name(), "CLOSED");
+        assert_eq!(cb.failure_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_middleware_config_with_circuit_breaker() {
+        let config = MiddlewareConfig::default_unlimited()
+            .with_circuit_breaker();
+        assert!(config.circuit_breaker.is_some());
+        assert_eq!(config.circuit_breaker.as_ref().unwrap().state_name(), "CLOSED");
+    }
+
+    #[tokio::test]
+    async fn test_middleware_config_with_circuit_breaker_config() {
+        let cb_config = CircuitBreakerConfig::default()
+            .with_failure_threshold(10)
+            .with_reset_timeout(Duration::from_secs(60));
+        let config = MiddlewareConfig::default_unlimited()
+            .with_circuit_breaker_config(cb_config);
+        assert!(config.circuit_breaker.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_middleware_from_retry_policy() {
+        let policy = RetryPolicy::default().with_max_retries(5).with_jitter(false);
+        let config = MiddlewareConfig::from_retry_policy(policy);
+        assert_eq!(config.retry.max_retries, 5);
+        assert!(config.circuit_breaker.is_some());
     }
 }

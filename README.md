@@ -1,59 +1,94 @@
-# nanobot-rust
+<div align="center">
 
-A Rust rewrite of the Python [nanobot](https://github.com/ai-nanobot/nanobot) AI agent framework. Multi-platform, streaming-first, and built for production use.
+# nanobot-rs
+
+**A multi-platform AI agent framework built in Rust**
+
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Tests](https://img.shields.io/badge/tests-745%20passing-brightgreen)](./)
+[![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+[![Crates](https://img.shields.io/badge/crates-12-purple)](./crates)
+[![Clippy](https://img.shields.io/badge/clippy-0%20warnings-success)](./)
+
+Fast, streaming-first, and production-ready. Connect Telegram, Discord, and
+OpenAI-compatible clients to any LLM provider through a unified agent loop.
+
+</div>
+
+---
+
+## Features
+
+- **Multi-platform channels** — Telegram, Discord, OpenAI-compatible HTTP API
+- **Streaming responses** — SSE streaming for real-time token delivery
+- **Tool system** — shell, web, filesystem, cron, search, message, spawn
+- **Agent loop** — context management, memory, hooks, and context compaction
+- **Sub-agent spawning** — parallel agent tasks via tokio JoinSet
+- **Cron scheduling** — tick-based scheduler with JSON state persistence
+- **Health checks** — registry-based checks with auto-restart and exponential backoff
+- **Skill files** — markdown-based skill definitions with hot-reload
+- **Provider resilience** — automatic retry with exponential backoff on 429s
+- **SSRF protection** — network allowlist/denylist and URL validation
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      CLI (clap)                         │
-│  agent │ gateway │ serve │ heartbeat │ setup │ status    │
-└────┬────────┬────────┬──────────────────────────────────┘
-     │        │        │
-     ▼        ▼        ▼
-┌─────────────────────────────────────────────────────────┐
-│                    MessageBus                           │
-│          inbound (mpsc) │ outbound (mpsc)               │
-│          events (broadcast) │ stream (broadcast)        │
-└────┬──────────────────────────────────┬─────────────────┘
-     │                                  │
-     ▼                                  ▼
-┌──────────────┐               ┌────────────────┐
-│ Channel      │               │ Agent Loop     │
-│ Adapters     │               │ (runner +      │
-│              │               │  context)      │
-│ - Telegram   │               └───────┬────────┘
-│ - Discord    │                       │
-│ - API server │              ┌────────┴────────┐
-└──────────────┘              │                 │
-                        ┌─────┴─────┐    ┌──────┴──────┐
-                        │ Providers │    │   Tools     │
-                        │           │    │             │
-                        │ - OpenAI  │    │ - Shell     │
-                        │ - Anthropic│   │ - Web       │
-                        │ - DeepSeek│    │ - Filesystem│
-                        │ - Groq    │    │ - Search    │
-                        │ - Ollama  │    │ - Cron      │
-                        └───────────┘    │ - Message   │
-                                         └─────────────┘
+                          ┌──────────────────────────────┐
+                          │         CLI (clap)           │
+                          │  agent · gateway · serve ·   │
+                          │  heartbeat · setup · status  │
+                          └──────────────┬───────────────┘
+                                         │
+                 ┌───────────────────────┼───────────────────────┐
+                 │                       │                       │
+         ┌───────▼──────┐    ┌──────────▼──────────┐   ┌───────▼──────┐
+         │   Telegram   │    │      Gateway        │   │  API Server  │
+         │  (polling)   │    │  (ChannelManager)   │   │   (Axum)     │
+         └───────┬──────┘    └──────────┬──────────┘   └───────┬──────┘
+         ┌───────┴──────┐              │                       │
+         │   Discord    │              │                       │
+         │ (WebSocket)  │              │                       │
+         └───────┬──────┘              │                       │
+                 │                     │                       │
+                 └─────────┬───────────┘───────────────────────┘
+                           │
+                  InboundMessage │ Bus (tokio broadcast)
+                           │
+                  ┌────────▼────────┐
+                  │    Agent Loop    │
+                  │  ┌────────────┐ │
+                  │  │  Context   │ │
+                  │  │  Memory    │ │
+                  │  │  Skills    │ │
+                  │  │  Hooks     │ │
+                  │  └─────┬──────┘ │
+                  └────────┼────────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+      ┌───────▼──────┐ ┌──▼───────┐ ┌──▼────────────┐
+      │  Providers   │ │  Tools   │ │  Sub-agents   │
+      │              │ │          │ │               │
+      │  · OpenAI    │ │  · shell │ │  · parallel   │
+      │  · Anthropic │ │  · web   │ │    spawning   │
+      │  · DeepSeek  │ │  · fs    │ │  · isolated   │
+      │  · Groq      │ │  · cron  │ │    contexts   │
+      │  · Ollama    │ │  · search│ │               │
+      └──────────────┘ │  · spawn │ └───────────────┘
+                       └──────────┘
+                           │
+                  OutboundMessage │ Bus
+                           │
+                  ┌────────▼────────┐
+                  │   Channel →     │
+                  │   User Response │
+                  └─────────────────┘
+
+  ── Foundation Layer ──────────────────────────────────
+  nanobot-core · nanobot-config · nanobot-bus
+  nanobot-session · nanobot-security · nanobot-providers
+  nanobot-cron · nanobot-heartbeat
 ```
-
-## Crates
-
-| Crate | Description |
-|---|---|
-| `nanobot-core` | Shared types, constants, error types |
-| `nanobot-config` | YAML config loading with env var expansion |
-| `nanobot-bus` | Async message bus (mpsc + broadcast) |
-| `nanobot-session` | Session management with DashMap + JSONL |
-| `nanobot-security` | SSRF protection, URL validation |
-| `nanobot-providers` | LLM provider trait + OpenAI/Anthropic SSE streaming |
-| `nanobot-tools` | Tool registry + builtins (shell, web, fs, search, cron) |
-| `nanobot-agent` | Agent loop, runner, context builder, memory, hooks |
-| `nanobot-cron` | Tick-based cron scheduler with JSON persistence |
-| `nanobot-heartbeat` | LLM-based periodic task checking |
-| `nanobot-channels` | Telegram (long-polling) + Discord (REST + Gateway WebSocket) |
-| `nanobot-api` | OpenAI-compatible HTTP API (Axum) |
 
 ## Quick Start
 
@@ -66,19 +101,45 @@ cargo build --release
 ### Configure
 
 ```bash
-nanobot setup
-# Edit ~/.nanobot/config.yaml with your API keys
+nanobot-rs setup
+# Edit ~/.nanobot-rs/config.yaml with your API keys
 ```
 
-Example config:
+### Run
+
+```bash
+# Interactive agent (one-shot)
+nanobot-rs agent "Summarize the latest commits"
+
+# Start gateway (Telegram + Discord)
+nanobot-rs gateway
+
+# Start API server
+nanobot-rs serve --port 8080
+
+# Periodic health checking
+nanobot-rs heartbeat
+
+# Show system status
+nanobot-rs status
+```
+
+Environment variable `NANOBOT_RS_HOME` overrides the default config directory
+(`~/.nanobot-rs`).
+
+## Configuration
 
 ```yaml
+# ~/.nanobot-rs/config.yaml
+
 providers:
   openai:
     api_key: ${OPENAI_API_KEY}
     model: gpt-4o
+    base_url: https://api.openai.com/v1   # optional: point to any OpenAI-compatible API
   anthropic:
     api_key: ${ANTHROPIC_API_KEY}
+    model: claude-sonnet-4-6
 
 channels:
   telegram:
@@ -93,63 +154,77 @@ agent:
   temperature: 0.7
   max_tokens: 4096
   streaming: true
+
+security:
+  network:
+    deny:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
 ```
 
-### Run
+## CLI Commands
 
-```bash
-# Interactive agent (one-shot)
-nanobot agent "What is the weather in Tokyo?"
+| Command | Description |
+|---------|-------------|
+| `agent` | Interactive agent — send a message and get a response |
+| `gateway` | Start the gateway — connect to Telegram, Discord, etc. |
+| `serve` | OpenAI-compatible HTTP API server (Axum) |
+| `heartbeat` | Periodic health checking with auto-restart |
+| `health` | Show health check status |
+| `cron list` | List all cron jobs |
+| `cron status` | Show status of a specific cron job |
+| `config validate` | Validate the config.yaml schema |
+| `config migrate` | Migrate Python nanobot config to nanobot-rs format |
+| `setup` | Interactive configuration wizard |
+| `status` | Show current configuration and system status |
 
-# Start gateway (Telegram + Discord + API)
-nanobot gateway
+## Crates
 
-# Start API server only
-nanobot serve --port 8080
+| Crate | Description |
+|-------|-------------|
+| [`nanobot-core`](./crates/nanobot-core) | Error types, constants, core types (`MessageType`, `Platform`) |
+| [`nanobot-config`](./crates/nanobot-config) | YAML config loading, schema validation, path resolution |
+| [`nanobot-bus`](./crates/nanobot-bus) | Tokio broadcast-based async message bus |
+| [`nanobot-session`](./crates/nanobot-session) | SQLite-backed session and conversation store |
+| [`nanobot-security`](./crates/nanobot-security) | Network allowlist/denylist, command approval, SSRF protection |
+| [`nanobot-providers`](./crates/nanobot-providers) | LLM provider trait — OpenAI-compatible and Anthropic SSE streaming |
+| [`nanobot-tools`](./crates/nanobot-tools) | Tool registry + builtins (shell, web, fs, search, cron, spawn, message) |
+| [`nanobot-agent`](./crates/nanobot-agent) | Agent loop, context builder, memory, skills, hooks, sub-agents |
+| [`nanobot-cron`](./crates/nanobot-cron) | Tick-based cron scheduler with JSON state persistence |
+| [`nanobot-heartbeat`](./crates/nanobot-heartbeat) | Health check registry, periodic task monitoring, auto-restart |
+| [`nanobot-channels`](./crates/nanobot-channels) | Platform adapters — Telegram, Discord — via `ChannelManager` |
+| [`nanobot-api`](./crates/nanobot-api) | OpenAI-compatible HTTP API server (Axum) |
 
-# Periodic task checking
-nanobot heartbeat
+## Stats
 
-# Show status
-nanobot status
-```
-
-## API Server
-
-The `serve` command exposes an OpenAI-compatible API:
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
+| Metric | Value |
+|--------|-------|
+| Rust source files | 97 |
+| Lines of Rust code | 72,566 |
+| Tests | 745 passing |
+| Crates | 12 |
+| Clippy warnings | 0 |
 
 ## Development
 
 ```bash
-# Build
+# Build everything
 cargo build --workspace
 
-# Test (unit + integration)
+# Run all tests
 cargo test --workspace
 
-# Lint
+# Lint (must pass with 0 warnings)
 cargo clippy --workspace -- -D warnings
 
-# Format
+# Format check
 cargo fmt --all --check
+
+# Quick compile check
+cargo check
 ```
-
-## Stats
-
-- **80 Rust source files** across 12 crates + binary
-- **272 tests** (unit + integration)
-- Zero clippy warnings
-- Zero unsafe code
 
 ## License
 
-MIT
+[MIT](./LICENSE)

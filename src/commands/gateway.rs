@@ -101,14 +101,13 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
     );
 
     // ── API server (with registries for direct agent access) ──
-    let api_port: u16 = 8080;
     let api_server = ApiServer::with_registries(
         config.clone(),
         bus.clone(),
         session_manager,
         provider_registry,
         tool_registry,
-        api_port,
+        None,
     );
 
     // ── Spawn background tasks ────────────────────────────────
@@ -163,7 +162,7 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
         }
     });
 
-    info!("Gateway is running (API on port {})", api_port);
+    info!("Gateway is running (API on port {})", config.api.port);
     info!("Press Ctrl+C to stop");
 
     // ── Wait for shutdown signal ──────────────────────────────

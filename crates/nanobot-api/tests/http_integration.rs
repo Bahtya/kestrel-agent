@@ -55,7 +55,7 @@ fn make_app() -> axum::Router {
     let providers = ProviderRegistry::new();
     let tools = ToolRegistry::new();
 
-    let server = ApiServer::with_registries(config, bus, session_manager, providers, tools, 8080);
+    let server = ApiServer::with_registries(config, bus, session_manager, providers, tools, Some(8080));
     server.router()
 }
 
@@ -70,7 +70,7 @@ fn make_app_with_provider() -> axum::Router {
     reg.set_default("mock");
     let tools = ToolRegistry::new();
 
-    let server = ApiServer::with_registries(config, bus, session_manager, reg, tools, 8080);
+    let server = ApiServer::with_registries(config, bus, session_manager, reg, tools, Some(8080));
     server.router()
 }
 
@@ -339,9 +339,9 @@ async fn test_chat_completions_streaming_three_chunks() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let body_str = String::from_utf8(body.to_vec()).unwrap();
 
-    // Should have exactly 3 SSE data events
+    // Should have exactly 4 SSE data events: role, content, stop, [DONE]
     let data_count = body_str.matches("data:").count();
-    assert_eq!(data_count, 3, "Expected 3 SSE chunks, got {}: {}", data_count, body_str);
+    assert_eq!(data_count, 4, "Expected 4 SSE chunks, got {}: {}", data_count, body_str);
 
     // First chunk: role announcement
     assert!(body_str.contains("\"role\":\"assistant\"") || body_str.contains("\"role\": \"assistant\""));
@@ -352,6 +352,9 @@ async fn test_chat_completions_streaming_three_chunks() {
     // Third chunk: finish_reason + usage
     assert!(body_str.contains("\"finish_reason\":\"stop\"") || body_str.contains("\"finish_reason\": \"stop\""));
     assert!(body_str.contains("\"prompt_tokens\""));
+
+    // Fourth event: [DONE] sentinel
+    assert!(body_str.contains("data: [DONE]"), "SSE stream should end with [DONE]");
 }
 
 #[tokio::test]

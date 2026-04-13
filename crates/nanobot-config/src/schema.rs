@@ -544,6 +544,14 @@ pub struct SecurityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ApiConfig {
+    /// Bind host. Default: `"0.0.0.0"`.
+    #[serde(default = "default_api_host")]
+    pub host: String,
+
+    /// Bind port. Default: `8080`.
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+
     /// CORS allowed origins. Default: `["*"]` (allow all).
     #[serde(default = "default_api_allowed_origins")]
     pub allowed_origins: Vec<String>,
@@ -551,6 +559,14 @@ pub struct ApiConfig {
     /// Maximum request body size in bytes. Default: 10 MB.
     #[serde(default = "default_api_max_body_size")]
     pub max_body_size: usize,
+}
+
+fn default_api_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+const fn default_api_port() -> u16 {
+    8080
 }
 
 /// Default CORS allowed origins: allow all.
@@ -566,6 +582,8 @@ const fn default_api_max_body_size() -> usize {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
+            host: default_api_host(),
+            port: default_api_port(),
             allowed_origins: default_api_allowed_origins(),
             max_body_size: default_api_max_body_size(),
         }

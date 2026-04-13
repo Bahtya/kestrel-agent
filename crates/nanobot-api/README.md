@@ -35,7 +35,7 @@ use nanobot_api::ApiServer;
 
 let server = ApiServer::with_registries(
     config, bus, session_manager,
-    provider_registry, tool_registry, 8080,
+    provider_registry, tool_registry, Some(8080),
 );
 
 server.run().await?;

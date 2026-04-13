@@ -1,7 +1,9 @@
-//! Heartbeat health check types and status tracking.
+//! Heartbeat health check types, HealthCheck trait, and status tracking.
 
+use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Status of an individual health check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,103 @@ pub struct HeartbeatState {
     /// When the service was last stopped.
     #[serde(default)]
     pub stopped_at: Option<DateTime<Local>>,
+    /// Per-component failure tracking.
+    #[serde(default)]
+    pub component_failures: Vec<ComponentFailureState>,
+}
+
+/// Per-component consecutive failure tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentFailureState {
+    /// Component name.
+    pub component: String,
+    /// Number of consecutive failures.
+    pub consecutive_failures: usize,
+    /// Total failures for this component.
+    pub total_failures: usize,
+    /// Whether a restart has been requested (and not yet resolved).
+    pub restart_pending: bool,
+    /// Current backoff delay in seconds (doubles on each restart).
+    pub backoff_secs: u64,
+    /// When the last failure occurred.
+    pub last_failure_at: Option<DateTime<Local>>,
+    /// When the last restart was requested.
+    pub last_restart_at: Option<DateTime<Local>>,
+}
+
+// ── HealthCheck trait ─────────────────────────────────────────
+
+/// Trait for components that can report their health status.
+///
+/// Each component (provider, bus, session store, etc.) implements this
+/// to provide async health checking. The HeartbeatService polls all
+/// registered components periodically.
+#[async_trait]
+pub trait HealthCheck: Send + Sync {
+    /// The component name (e.g. "provider", "bus", "session_store").
+    fn component_name(&self) -> &str;
+
+    /// Perform the health check and return the result.
+    async fn report_health(&self) -> HealthCheckResult;
+}
+
+/// Registry for health-checkable components.
+pub struct HealthCheckRegistry {
+    checks: Vec<Arc<dyn HealthCheck>>,
+}
+
+impl HealthCheckRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            checks: Vec::new(),
+        }
+    }
+
+    /// Register a health check component.
+    pub fn register(&mut self, check: Arc<dyn HealthCheck>) {
+        let name = check.component_name().to_string();
+        // Prevent duplicates
+        if let Some(_existing) = self.checks.iter().find(|c| c.component_name() == name) {
+            tracing::warn!(
+                "Health check '{}' already registered, replacing",
+                name
+            );
+            self.checks.retain(|c| c.component_name() != name);
+        }
+        self.checks.push(check);
+    }
+
+    /// Deregister a health check component by name.
+    pub fn deregister(&mut self, name: &str) {
+        self.checks.retain(|c| c.component_name() != name);
+    }
+
+    /// Get all registered health checks.
+    pub fn checks(&self) -> &[Arc<dyn HealthCheck>] {
+        &self.checks
+    }
+
+    /// Get a health check by name.
+    pub fn get(&self, name: &str) -> Option<&Arc<dyn HealthCheck>> {
+        self.checks.iter().find(|c| c.component_name() == name)
+    }
+
+    /// Number of registered checks.
+    pub fn len(&self) -> usize {
+        self.checks.len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.checks.is_empty()
+    }
+}
+
+impl Default for HealthCheckRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +251,7 @@ mod tests {
         assert_eq!(state.total_checks, 0);
         assert_eq!(state.total_failures, 0);
         assert_eq!(state.restarts_requested, 0);
+        assert!(state.component_failures.is_empty());
     }
 
     #[test]
@@ -166,5 +266,159 @@ mod tests {
         let back: HealthSnapshot = serde_json::from_str(&json).unwrap();
         assert!(back.healthy);
         assert_eq!(back.checks.len(), 1);
+    }
+
+    #[test]
+    fn test_component_failure_state_construction() {
+        let state = ComponentFailureState {
+            component: "provider".to_string(),
+            consecutive_failures: 3,
+            total_failures: 10,
+            restart_pending: true,
+            backoff_secs: 120,
+            last_failure_at: Some(Local::now()),
+            last_restart_at: None,
+        };
+        assert_eq!(state.component, "provider");
+        assert_eq!(state.consecutive_failures, 3);
+        assert!(state.restart_pending);
+        assert_eq!(state.backoff_secs, 120);
+    }
+
+    #[test]
+    fn test_component_failure_state_serde_roundtrip() {
+        let state = ComponentFailureState {
+            component: "test".to_string(),
+            consecutive_failures: 2,
+            total_failures: 5,
+            restart_pending: false,
+            backoff_secs: 30,
+            last_failure_at: None,
+            last_restart_at: Some(Local::now()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: ComponentFailureState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.component, "test");
+        assert_eq!(back.consecutive_failures, 2);
+        assert_eq!(back.backoff_secs, 30);
+    }
+
+    // === HealthCheckRegistry ===
+
+    struct DummyCheck {
+        name: String,
+        healthy: bool,
+    }
+
+    #[async_trait]
+    impl HealthCheck for DummyCheck {
+        fn component_name(&self) -> &str {
+            &self.name
+        }
+
+        async fn report_health(&self) -> HealthCheckResult {
+            HealthCheckResult {
+                component: self.name.clone(),
+                status: if self.healthy {
+                    CheckStatus::Healthy
+                } else {
+                    CheckStatus::Unhealthy
+                },
+                message: if self.healthy {
+                    "ok".to_string()
+                } else {
+                    "failing".to_string()
+                },
+                timestamp: Local::now(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_registry_new() {
+        let reg = HealthCheckRegistry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn test_registry_default() {
+        let reg = HealthCheckRegistry::default();
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn test_registry_register() {
+        let mut reg = HealthCheckRegistry::new();
+        reg.register(Arc::new(DummyCheck {
+            name: "comp_a".to_string(),
+            healthy: true,
+        }));
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("comp_a").is_some());
+        assert!(reg.get("comp_b").is_none());
+    }
+
+    #[test]
+    fn test_registry_register_replaces_duplicate() {
+        let mut reg = HealthCheckRegistry::new();
+        reg.register(Arc::new(DummyCheck {
+            name: "comp".to_string(),
+            healthy: true,
+        }));
+        reg.register(Arc::new(DummyCheck {
+            name: "comp".to_string(),
+            healthy: false,
+        }));
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn test_registry_deregister() {
+        let mut reg = HealthCheckRegistry::new();
+        reg.register(Arc::new(DummyCheck {
+            name: "a".to_string(),
+            healthy: true,
+        }));
+        reg.register(Arc::new(DummyCheck {
+            name: "b".to_string(),
+            healthy: true,
+        }));
+        assert_eq!(reg.len(), 2);
+
+        reg.deregister("a");
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("a").is_none());
+        assert!(reg.get("b").is_some());
+    }
+
+    #[test]
+    fn test_registry_deregister_missing() {
+        let mut reg = HealthCheckRegistry::new();
+        reg.deregister("nope"); // Should not panic
+        assert!(reg.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_registry_check_reports_health() {
+        let _reg = HealthCheckRegistry::new();
+        let check = DummyCheck {
+            name: "test".to_string(),
+            healthy: true,
+        };
+        let result = check.report_health().await;
+        assert_eq!(result.component, "test");
+        assert_eq!(result.status, CheckStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn test_registry_check_reports_unhealthy() {
+        let check = DummyCheck {
+            name: "broken".to_string(),
+            healthy: false,
+        };
+        let result = check.report_health().await;
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+        assert_eq!(result.message, "failing");
     }
 }

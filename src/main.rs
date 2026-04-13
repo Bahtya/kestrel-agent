@@ -54,6 +54,9 @@ enum Commands {
     /// Start the heartbeat service (periodic task checking).
     Heartbeat,
 
+    /// Show health check status from the heartbeat service.
+    Health,
+
     /// Cron job management commands.
     Cron {
         #[command(subcommand)]
@@ -128,6 +131,9 @@ async fn main() -> Result<()> {
         }
         Commands::Heartbeat => {
             commands::heartbeat::run(config).await?;
+        }
+        Commands::Health => {
+            commands::health::check(&config)?;
         }
         Commands::Cron { subcommand } => match subcommand {
             CronSubcommand::List => {

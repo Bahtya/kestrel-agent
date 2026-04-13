@@ -10,7 +10,6 @@ nanobot-bus = { path = "../nanobot-bus" }
 nanobot-providers = { path = "../nanobot-providers" }
 nanobot-session = { path = "../nanobot-session" }
 nanobot-tools = { path = "../nanobot-tools" }
-nanobot-agent = { path = "../nanobot-agent" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

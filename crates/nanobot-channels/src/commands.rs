@@ -1006,4 +1006,164 @@ providers:
         // Should not panic, result is some valid string.
         assert!(!result.is_empty());
     }
+
+    // -- /reset tests ---------------------------------------------------------
+
+    #[test]
+    fn test_handle_reset_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let mgr = SessionManager::new(data_dir).unwrap();
+        let mut session = mgr.get_or_create("telegram:123", None);
+        session.add_user_message("hello".to_string());
+        session.add_assistant_message("hi".to_string());
+        mgr.save_session(&session).unwrap();
+
+        // Verify session has messages.
+        assert!(!mgr.get_or_create("telegram:123", None).messages.is_empty());
+
+        // Need to set NANOBOT_RS_HOME so handle_reset finds the data dir.
+        std::env::set_var("NANOBOT_RS_HOME", dir.path());
+        let result = handle_reset("telegram:123");
+        assert!(result.contains("cleared") || result.contains("reset"));
+    }
+
+    #[test]
+    fn test_handle_reset_no_session() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("NANOBOT_RS_HOME", dir.path());
+        // Resetting a nonexistent session should succeed (idempotent).
+        let result = handle_reset("telegram:99999");
+        assert!(result.contains("cleared") || result.contains("reset") || result.contains("ok"));
+    }
+
+    // -- /help includes /reset ------------------------------------------------
+
+    #[test]
+    fn test_handle_help_includes_reset() {
+        let result = handle_help();
+        assert!(result.contains("/reset"));
+    }
+
+    // -- handle_callback tests ------------------------------------------------
+
+    #[test]
+    fn test_handle_callback_unknown() {
+        assert!(handle_callback("unknown:action").is_none());
+        assert!(handle_callback("").is_none());
+        assert!(handle_callback("foo:bar:baz").is_none());
+    }
+
+    #[test]
+    fn test_handle_callback_history_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let mgr = SessionManager::new(data_dir.clone()).unwrap();
+        let mut session = mgr.get_or_create("telegram:456", None);
+        session.add_user_message("hello".to_string());
+        mgr.save_session(&session).unwrap();
+
+        std::env::set_var("NANOBOT_RS_HOME", dir.path());
+        let resp = handle_callback("history:page:0").unwrap();
+        assert!(resp.text.contains("History"));
+    }
+
+    #[test]
+    fn test_handle_callback_settings_model_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+agent:
+  model: "gpt-4o"
+  streaming: true
+"#;
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, yaml).unwrap();
+        std::env::set_var("NANOBOT_RS_HOME", dir.path());
+
+        let resp = handle_callback("settings:model:switch").unwrap();
+        assert!(resp.text.contains("Model:"));
+        assert!(resp.keyboard.is_some());
+        // Model should have cycled from gpt-4o to next in list.
+        assert!(!resp.text.contains("gpt-4o") || MODEL_CYCLE.len() == 1);
+    }
+
+    #[test]
+    fn test_handle_callback_settings_streaming_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+agent:
+  model: "gpt-4o"
+  streaming: true
+"#;
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, yaml).unwrap();
+        std::env::set_var("NANOBOT_RS_HOME", dir.path());
+
+        let resp = handle_callback("settings:streaming:toggle").unwrap();
+        assert!(resp.text.contains("Streaming: off"));
+        assert!(resp.keyboard.is_some());
+
+        // Toggle back.
+        let resp2 = handle_callback("settings:streaming:toggle").unwrap();
+        assert!(resp2.text.contains("Streaming: on"));
+    }
+
+    #[test]
+    fn test_handle_callback_settings_unknown_action() {
+        assert!(handle_callback("settings:unknown:foo").is_none());
+    }
+
+    #[test]
+    fn test_model_cycle_constants() {
+        assert!(!MODEL_CYCLE.is_empty());
+        // All entries should be unique.
+        let mut seen = std::collections::HashSet::new();
+        for m in MODEL_CYCLE {
+            assert!(seen.insert(*m), "duplicate model in MODEL_CYCLE: {m}");
+        }
+    }
+
+    // -- rebuild_callback_data (via telegram tests) ---------------------------
+
+    #[test]
+    fn test_rebuild_callback_data_with_payload() {
+        use crate::platforms::telegram::{
+            rebuild_callback_data, CallbackAction, CallbackContext,
+        };
+        let ctx = CallbackContext {
+            chat_id: "123".to_string(),
+            message_id: "456".to_string(),
+            sender_id: "789".to_string(),
+            callback_query_id: "abc".to_string(),
+            action: CallbackAction {
+                prefix: "history".to_string(),
+                action: "page".to_string(),
+                payload: Some("2".to_string()),
+            },
+        };
+        assert_eq!(rebuild_callback_data(&ctx), "history:page:2");
+    }
+
+    #[test]
+    fn test_rebuild_callback_data_without_payload() {
+        use crate::platforms::telegram::{
+            rebuild_callback_data, CallbackAction, CallbackContext,
+        };
+        let ctx = CallbackContext {
+            chat_id: "123".to_string(),
+            message_id: "456".to_string(),
+            sender_id: "789".to_string(),
+            callback_query_id: "abc".to_string(),
+            action: CallbackAction {
+                prefix: "settings".to_string(),
+                action: "model".to_string(),
+                payload: None,
+            },
+        };
+        assert_eq!(rebuild_callback_data(&ctx), "settings:model");
+    }
 }

@@ -759,8 +759,32 @@ impl DiscordChannel {
                                             if let Ok(msg_data) =
                                                 serde_json::from_value::<GatewayMessage>(payload.d)
                                             {
-                                                // Check for built-in commands before forwarding to the bus.
-                                                if let Some(response) =
+                                                // /reset needs the session key, so handle it separately.
+                                                if crate::commands::matches_command(
+                                                    &msg_data.content,
+                                                    "reset",
+                                                ) {
+                                                    let session_key =
+                                                        format!("discord:{}", msg_data.channel_id);
+                                                    let response =
+                                                        crate::commands::handle_reset(&session_key);
+                                                    Self::send_direct_reply(
+                                                        &rest.client,
+                                                        &rest.api_base,
+                                                        &rest.auth_header,
+                                                        &msg_data.channel_id,
+                                                        &response,
+                                                    )
+                                                    .await;
+                                                    Self::send_read_receipt(
+                                                        &rest.client,
+                                                        &rest.api_base,
+                                                        &rest.auth_header,
+                                                        &msg_data.channel_id,
+                                                        &msg_data.id,
+                                                    )
+                                                    .await;
+                                                } else if let Some(response) =
                                                     crate::commands::try_handle_command(
                                                         &msg_data.content,
                                                     )

@@ -771,7 +771,25 @@ impl TelegramChannel {
 
                 if let Some(msg) = update.message {
                     let text = msg.text.as_deref().unwrap_or("");
-                    if let Some(response) = crate::commands::try_handle_command(text) {
+                    // /reset needs the session key, so handle it separately.
+                    if crate::commands::matches_command(text, "reset") {
+                        let session_key = format!("telegram:{}", msg.chat.id);
+                        let response = crate::commands::handle_reset(&session_key);
+                        Self::send_direct_reply(
+                            &client,
+                            &base_url,
+                            msg.chat.id,
+                            &response,
+                        )
+                        .await;
+                        Self::send_read_receipt(
+                            &client,
+                            &base_url,
+                            msg.chat.id,
+                            msg.message_id,
+                        )
+                        .await;
+                    } else if let Some(response) = crate::commands::try_handle_command(text) {
                         // Built-in command matched — reply directly, skip bus.
                         if let Some(ref keyboard) = response.keyboard {
                             Self::send_direct_reply_with_keyboard(
@@ -1793,7 +1811,7 @@ impl TelegramChannel {
 // ---------------------------------------------------------------------------
 
 /// Reconstruct the original callback_data string from a parsed CallbackContext.
-fn rebuild_callback_data(ctx: &CallbackContext) -> String {
+pub(crate) fn rebuild_callback_data(ctx: &CallbackContext) -> String {
     match &ctx.action.payload {
         Some(p) => format!(
             "{}:{}:{}",

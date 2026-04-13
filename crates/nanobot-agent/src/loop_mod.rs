@@ -15,6 +15,7 @@ use crate::heartbeat::{
 use crate::hook::CompositeHook;
 use crate::notes::NotesManager;
 use crate::runner::AgentRunner;
+use crate::subagent::SubAgentManager;
 use anyhow::Result;
 use nanobot_bus::events::{AgentEvent, InboundMessage, OutboundMessage, StreamChunk};
 use nanobot_bus::MessageBus;
@@ -43,6 +44,8 @@ pub struct AgentLoop {
     connected_channels: Arc<parking_lot::RwLock<HashSet<String>>>,
     /// Shared last-activity timestamp for the agent loop health check.
     agent_activity: Arc<parking_lot::RwLock<Option<chrono::DateTime<chrono::Local>>>>,
+    /// Optional sub-agent manager for spawning background tasks.
+    subagent_manager: Option<Arc<SubAgentManager>>,
 }
 
 impl AgentLoop {
@@ -76,6 +79,7 @@ impl AgentLoop {
             compaction_config,
             connected_channels,
             agent_activity,
+            subagent_manager: None,
         }
     }
 
@@ -427,6 +431,20 @@ impl AgentLoop {
     pub fn with_compaction_config(mut self, config: CompactionConfig) -> Self {
         self.compaction_config = config;
         self
+    }
+
+    /// Attach a [`SubAgentManager`] to this agent loop.
+    ///
+    /// When set, the spawn tool in the tool registry will delegate to this
+    /// manager for actual sub-agent creation. Call this before [`run()`](Self::run).
+    pub fn with_subagent_manager(mut self, manager: Arc<SubAgentManager>) -> Self {
+        self.subagent_manager = Some(manager);
+        self
+    }
+
+    /// Get the sub-agent manager, if one has been attached.
+    pub fn subagent_manager(&self) -> Option<&Arc<SubAgentManager>> {
+        self.subagent_manager.as_ref()
     }
 }
 

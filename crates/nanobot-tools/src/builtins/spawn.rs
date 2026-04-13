@@ -1,34 +1,30 @@
-//! Spawn tool — create background subagent tasks.
+//! Spawn tool — create background subagent tasks via the SubAgentSpawner trait.
 
-use crate::trait_def::{Tool, ToolError};
+use crate::trait_def::{SubAgentSpawner, Tool, ToolError};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// Callback type for spawning a subagent task.
+/// Tool for spawning background sub-agent tasks.
 ///
-/// The first argument is the task name, the second is the task description.
-/// Returns a string result (typically a task ID or status message).
-type SpawnCallback = dyn Fn(String, String) -> String + Send + Sync;
-
-/// Tool for spawning background subagent tasks.
+/// When wired with a [`SubAgentSpawner`], the tool delegates to it for actual
+/// task creation and tracking. Without a spawner, it returns a best-effort
+/// acknowledgement string.
 pub struct SpawnTool {
-    spawn_callback: Option<Arc<SpawnCallback>>,
+    spawner: Option<Arc<dyn SubAgentSpawner>>,
 }
 
 impl SpawnTool {
+    /// Create a new SpawnTool without a backing spawner (returns acknowledgement strings).
     pub fn new() -> Self {
-        Self {
-            spawn_callback: None,
-        }
+        Self { spawner: None }
     }
 
-    /// Provide a callback that will be invoked to spawn a subagent.
+    /// Wire this tool to a concrete [`SubAgentSpawner`] implementation.
     ///
-    /// The callback receives `(name, task_description)` and should return a
-    /// status string (e.g. the spawned task ID).
-    pub fn with_spawn_callback(mut self, cb: Arc<SpawnCallback>) -> Self {
-        self.spawn_callback = Some(cb);
+    /// When set, `execute` delegates to the spawner and returns the real task ID.
+    pub fn with_spawner(mut self, spawner: Arc<dyn SubAgentSpawner>) -> Self {
+        self.spawner = Some(spawner);
         self
     }
 }
@@ -55,6 +51,7 @@ impl Tool for SpawnTool {
             "properties": {
                 "task": { "type": "string", "description": "Description of the task to perform" },
                 "name": { "type": "string", "description": "Name for the subagent" },
+                "context": { "type": "string", "description": "Optional extra context to inject before the task prompt" },
             },
             "required": ["task"],
         })
@@ -66,12 +63,18 @@ impl Tool for SpawnTool {
             .ok_or_else(|| ToolError::Validation("Missing 'task'".to_string()))?;
 
         let name = args["name"].as_str().unwrap_or("unnamed").to_string();
+        let context = args["context"].as_str().map(String::from);
 
-        if let Some(ref cb) = self.spawn_callback {
-            let result = cb(name, task.to_string());
-            Ok(result)
+        if let Some(ref spawner) = self.spawner {
+            match spawner.spawn(&name, task, context).await {
+                Ok(task_id) => Ok(format!(
+                    "Spawned sub-agent '{}' (id: {}). Use status('{}') to check progress.",
+                    name, task_id, task_id
+                )),
+                Err(e) => Err(ToolError::Execution(format!("Failed to spawn task: {}", e))),
+            }
         } else {
-            Ok(format!("Spawned background task: {}", task))
+            Ok(format!("Spawned background task '{}' (no spawner wired): {}", name, task))
         }
     }
 }
@@ -79,6 +82,7 @@ impl Tool for SpawnTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trait_def::SpawnStatus;
 
     #[test]
     fn test_spawn_tool_metadata() {
@@ -88,7 +92,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_spawn_tool_execute() {
+    async fn test_spawn_tool_execute_no_spawner() {
         let tool = SpawnTool::new();
         let result = tool
             .execute(serde_json::json!({
@@ -96,7 +100,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(result.contains("Spawned background task"));
+        assert!(result.contains("no spawner wired"));
         assert!(result.contains("research topic X"));
     }
 
@@ -114,34 +118,67 @@ mod tests {
         assert_eq!(tool.name(), "spawn");
     }
 
-    #[tokio::test]
-    async fn test_spawn_tool_with_callback() {
-        let cb = Arc::new(|name: String, task: String| -> String {
-            format!("Task '{}' spawned with id task-001: {}", name, task)
-        });
+    /// Minimal mock spawner for testing the wiring.
+    struct MockSpawner {
+        status_response: SpawnStatus,
+    }
 
-        let tool = SpawnTool::new().with_spawn_callback(cb);
+    impl MockSpawner {
+        fn new() -> Self {
+            Self {
+                status_response: SpawnStatus::Running,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SubAgentSpawner for MockSpawner {
+        async fn spawn(
+            &self,
+            name: &str,
+            prompt: &str,
+            context: Option<String>,
+        ) -> anyhow::Result<String> {
+            let id = format!("mock-{}-{}", name, prompt.len());
+            let _ = context; // accepted but ignored in mock
+            Ok(id)
+        }
+
+        async fn status(&self, _task_id: &str) -> Option<SpawnStatus> {
+            Some(self.status_response.clone())
+        }
+
+        async fn cancel(&self, _task_id: &str) -> bool {
+            true
+        }
+
+        async fn list(&self) -> Vec<(String, String, SpawnStatus)> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_tool_with_spawner() {
+        let spawner = Arc::new(MockSpawner::new());
+        let tool = SpawnTool::new().with_spawner(spawner);
 
         let result = tool
             .execute(serde_json::json!({
                 "task": "research topic X",
-                "name": "researcher"
+                "name": "researcher",
+                "context": "Focus on recent papers"
             }))
             .await
             .unwrap();
 
-        assert!(result.contains("task-001"));
-        assert!(result.contains("researcher"));
-        assert!(result.contains("research topic X"));
+        assert!(result.contains("mock-researcher"));
+        assert!(result.contains("Spawned sub-agent"));
     }
 
     #[tokio::test]
-    async fn test_spawn_tool_with_callback_no_name() {
-        let cb = Arc::new(|name: String, task: String| -> String {
-            format!("name={}, task={}", name, task)
-        });
-
-        let tool = SpawnTool::new().with_spawn_callback(cb);
+    async fn test_spawn_tool_with_spawner_no_name() {
+        let spawner = Arc::new(MockSpawner::new());
+        let tool = SpawnTool::new().with_spawner(spawner);
 
         let result = tool
             .execute(serde_json::json!({
@@ -150,6 +187,54 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result, "name=unnamed, task=do something");
+        assert!(result.contains("unnamed"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_tool_spawner_error() {
+        struct FailingSpawner;
+        #[async_trait]
+        impl SubAgentSpawner for FailingSpawner {
+            async fn spawn(
+                &self,
+                _name: &str,
+                _prompt: &str,
+                _context: Option<String>,
+            ) -> anyhow::Result<String> {
+                Err(anyhow::anyhow!("no capacity"))
+            }
+            async fn status(&self, _task_id: &str) -> Option<SpawnStatus> {
+                None
+            }
+            async fn cancel(&self, _task_id: &str) -> bool {
+                false
+            }
+            async fn list(&self) -> Vec<(String, String, SpawnStatus)> {
+                vec![]
+            }
+        }
+
+        let tool = SpawnTool::new().with_spawner(Arc::new(FailingSpawner));
+        let result = tool
+            .execute(serde_json::json!({ "task": "fail me" }))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no capacity"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_tool_with_context_param() {
+        let spawner = Arc::new(MockSpawner::new());
+        let tool = SpawnTool::new().with_spawner(spawner);
+
+        let result = tool
+            .execute(serde_json::json!({
+                "task": "summarize",
+                "context": "Previous conversation about Rust"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.contains("Spawned sub-agent"));
     }
 }

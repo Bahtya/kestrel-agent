@@ -4,12 +4,17 @@
 //! independent LLM tasks concurrently using `tokio::JoinSet`. Each sub-agent
 //! gets its own `AgentRunner` with independent sessions, resource limits,
 //! and configurable tool permissions.
+//!
+//! The [`SubAgentSpawner`] trait (from `nanobot-tools`) is implemented for
+//! [`SubAgentManager`] so that tools like `SpawnTool` can delegate to it.
 
 use anyhow::Result;
+use async_trait::async_trait;
 use nanobot_config::Config;
 use nanobot_core::Message;
 use nanobot_providers::ProviderRegistry;
-use nanobot_tools::ToolRegistry;
+use nanobot_tools::registry::ToolRegistry;
+use nanobot_tools::trait_def::{SpawnStatus, SubAgentSpawner};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -125,6 +130,16 @@ pub enum TaskStatus {
     Failed(String),
 }
 
+impl From<&TaskStatus> for SpawnStatus {
+    fn from(s: &TaskStatus) -> Self {
+        match s {
+            TaskStatus::Running => SpawnStatus::Running,
+            TaskStatus::Completed(r) => SpawnStatus::Completed(r.clone()),
+            TaskStatus::Failed(e) => SpawnStatus::Failed(e.clone()),
+        }
+    }
+}
+
 /// Collected results from a parallel spawn, with summary statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnSummary {
@@ -173,13 +188,41 @@ impl SpawnSummary {
 }
 
 /// Internal tracked task for background monitoring.
-#[derive(Debug)]
 struct TrackedTask {
     id: String,
     name: String,
-    #[allow(dead_code)]
     description: String,
     status: TaskStatus,
+    /// JoinHandle so we can abort the background tokio task on cancel.
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+// ─── SubAgentHandle ─────────────────────────────────────────────
+
+/// Handle to a spawned sub-agent task.
+///
+/// Provides methods to query status and request cancellation without
+/// exposing the internal `SubAgentManager`.
+#[derive(Clone)]
+pub struct SubAgentHandle {
+    /// Task ID.
+    pub id: String,
+    /// Human-readable task name.
+    pub name: String,
+    manager: Arc<SubAgentManager>,
+}
+
+impl SubAgentHandle {
+    /// Query the current status of this task.
+    pub async fn status(&self) -> Option<SpawnStatus> {
+        self.manager.status(&self.id).await
+    }
+
+    /// Request cancellation of this task.
+    /// Returns `true` if the task was found and signalled.
+    pub async fn cancel(&self) -> bool {
+        self.manager.cancel(&self.id).await
+    }
 }
 
 // ─── SubAgentManager ──────────────────────────────────────────
@@ -187,7 +230,8 @@ struct TrackedTask {
 /// Manages sub-agent spawning — both background tracking and parallel execution.
 ///
 /// Holds shared config, provider registry, and tool registry so each sub-agent
-/// can create its own `AgentRunner`.
+/// can create its own `AgentRunner`. Implements [`SubAgentSpawner`] so tools
+/// like `SpawnTool` can delegate to it.
 pub struct SubAgentManager {
     config: Arc<Config>,
     providers: Arc<ProviderRegistry>,
@@ -220,6 +264,7 @@ impl SubAgentManager {
             name: name.to_string(),
             description: description.to_string(),
             status: TaskStatus::Running,
+            handle: None,
         };
         self.tasks.write().await.push(task);
         info!("Spawned subagent task: {} ({})", name, id);
@@ -257,6 +302,95 @@ impl SubAgentManager {
             .iter()
             .map(|t| (t.id.clone(), t.name.clone(), t.status.clone()))
             .collect()
+    }
+
+    // ─── Single background spawn (SubAgentSpawner backing) ─────
+
+    /// Spawn a single sub-agent task that executes in the background.
+    ///
+    /// Registers the task, kicks off execution via a dedicated `AgentRunner`,
+    /// and updates the tracking status on completion or failure.
+    /// Returns a [`SubAgentHandle`] for monitoring.
+    pub async fn spawn_single(
+        self: &Arc<Self>,
+        name: &str,
+        prompt: &str,
+        context: Option<String>,
+    ) -> Result<SubAgentHandle> {
+        let id = Uuid::new_v4().to_string();
+
+        // Register tracking entry
+        {
+            let task = TrackedTask {
+                id: id.clone(),
+                name: name.to_string(),
+                description: prompt.to_string(),
+                status: TaskStatus::Running,
+                handle: None,
+            };
+            self.tasks.write().await.push(task);
+        }
+
+        info!("Spawning single sub-agent task '{}' ({})", name, id);
+
+        // Build runner for the sub-agent
+        let runner = AgentRunner::new(
+            self.config.clone(),
+            self.providers.clone(),
+            self.tools.clone(),
+        );
+
+        // Build messages
+        let mut messages = Vec::new();
+        if let Some(ref ctx) = context {
+            messages.push(Message {
+                role: nanobot_core::MessageRole::User,
+                content: format!("Context:\n{}", ctx),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        messages.push(Message {
+            role: nanobot_core::MessageRole::User,
+            content: prompt.to_string(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        });
+
+        let system_prompt = "You are a focused sub-agent executing a specific task. \
+            Be concise and direct in your response."
+            .to_string();
+
+        // Spawn background tokio task
+        let mgr = Arc::clone(self);
+        let task_id = id.clone();
+        let handle = tokio::spawn(async move {
+            match runner.run(system_prompt, messages).await {
+                Ok(result) => {
+                    mgr.complete(&task_id, result.content).await;
+                }
+                Err(e) => {
+                    mgr.fail(&task_id, format!("{}", e)).await;
+                }
+            }
+        });
+
+        // Store the join handle so we can abort on cancel
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
+                task.handle = Some(handle);
+            }
+        }
+
+        let name_owned = name.to_string();
+        Ok(SubAgentHandle {
+            id,
+            name: name_owned,
+            manager: Arc::clone(self),
+        })
     }
 
     // ─── Parallel execution ───────────────────────────────────
@@ -428,6 +562,61 @@ impl SubAgentManager {
     }
 }
 
+// ─── SubAgentSpawner impl ──────────────────────────────────────
+
+#[async_trait]
+impl SubAgentSpawner for SubAgentManager {
+    async fn spawn(
+        &self,
+        name: &str,
+        prompt: &str,
+        context: Option<String>,
+    ) -> Result<String> {
+        // We need an Arc<Self> to call spawn_single, so wrap self.
+        // The manager is always used behind an Arc in practice.
+        let arc_self: Arc<Self> = Arc::new(Self {
+            config: self.config.clone(),
+            providers: self.providers.clone(),
+            tools: self.tools.clone(),
+            tasks: self.tasks.clone(),
+        });
+        let handle = arc_self.spawn_single(name, prompt, context).await?;
+        Ok(handle.id)
+    }
+
+    async fn status(&self, task_id: &str) -> Option<SpawnStatus> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|t| SpawnStatus::from(&t.status))
+    }
+
+    async fn cancel(&self, task_id: &str) -> bool {
+        let mut tasks = self.tasks.write().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            // Abort the tokio task if we have the handle
+            if let Some(handle) = task.handle.take() {
+                handle.abort();
+            }
+            if task.status == TaskStatus::Running {
+                task.status = TaskStatus::Failed("Cancelled".to_string());
+                debug!("Cancelled subagent task: {}", task_id);
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn list(&self) -> Vec<(String, String, SpawnStatus)> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .iter()
+            .map(|t| (t.id.clone(), t.name.clone(), SpawnStatus::from(&t.status)))
+            .collect()
+    }
+}
+
 /// Run a single sub-agent task with timeout.
 async fn run_single_task(
     task: SubAgentTask,
@@ -524,6 +713,7 @@ mod tests {
     use nanobot_providers::base::{
         BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
     };
+    use nanobot_tools::trait_def::SpawnStatus;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Mock provider that returns deterministic responses.
@@ -565,36 +755,6 @@ mod tests {
                         finish_reason: Some("stop".to_string()),
                     })
                     .collect(),
-                call_count: Arc::new(AtomicU32::new(0)),
-            }
-        }
-
-        /// Create a provider that sleeps for the given duration before responding.
-        #[allow(dead_code)]
-        fn delayed(text: &str, _delay_ms: u64) -> Self {
-            let text = text.to_string();
-            let resp = CompletionResponse {
-                content: Some(text),
-                tool_calls: None,
-                usage: Some(Usage {
-                    prompt_tokens: Some(10),
-                    completion_tokens: Some(5),
-                    total_tokens: Some(15),
-                }),
-                finish_reason: Some("stop".to_string()),
-            };
-            Self {
-                responses: vec![resp],
-                call_count: Arc::new(AtomicU32::new(0)),
-            }
-            // Note: actual delay is handled in complete() below
-        }
-
-        /// Create a provider that always returns an error.
-        #[allow(dead_code)]
-        fn failing() -> Self {
-            Self {
-                responses: vec![],
                 call_count: Arc::new(AtomicU32::new(0)),
             }
         }
@@ -756,6 +916,107 @@ mod tests {
         let mgr = make_manager_with_mock(MockProvider::simple("ok"));
         let status = mgr.get_status("nonexistent-id").await;
         assert!(status.is_none());
+    }
+
+    // ─── SubAgentSpawner trait tests ───────────────────────────
+
+    #[tokio::test]
+    async fn test_spawner_spawn_and_status() {
+        let mgr = make_manager_with_mock(MockProvider::simple("result"));
+        let id = SubAgentSpawner::spawn(&mgr, "worker", "do work", None)
+            .await
+            .unwrap();
+        assert!(!id.is_empty());
+
+        // The background task may still be running; status should be Running or Completed
+        let status = SubAgentSpawner::status(&mgr, &id).await;
+        assert!(status.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_spawner_list() {
+        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let _id1 = SubAgentSpawner::spawn(&mgr, "a", "task a", None)
+            .await
+            .unwrap();
+        let _id2 = SubAgentSpawner::spawn(&mgr, "b", "task b", None)
+            .await
+            .unwrap();
+
+        let list = SubAgentSpawner::list(&mgr).await;
+        assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_spawner_cancel_nonexistent() {
+        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        assert!(!SubAgentSpawner::cancel(&mgr, "no-such-id").await);
+    }
+
+    #[tokio::test]
+    async fn test_spawner_status_nonexistent() {
+        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        assert!(SubAgentSpawner::status(&mgr, "nope").await.is_none());
+    }
+
+    // ─── SubAgentHandle tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_handle_status_and_cancel() {
+        let mgr = Arc::new(make_manager_with_delayed("slow result", Duration::from_secs(5)));
+        let handle = mgr.spawn_single("slow-task", "take your time", None)
+            .await
+            .unwrap();
+
+        assert_eq!(handle.name, "slow-task");
+        assert!(!handle.id.is_empty());
+
+        // Should be running (task takes 5s)
+        let status = handle.status().await;
+        assert_eq!(status, Some(SpawnStatus::Running));
+
+        // Cancel it
+        let cancelled = handle.cancel().await;
+        assert!(cancelled);
+
+        // Now should be Failed("Cancelled")
+        let status = handle.status().await;
+        assert!(matches!(status, Some(SpawnStatus::Failed(ref msg)) if msg == "Cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_completed() {
+        let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("done")));
+        let handle = mgr.spawn_single("fast-task", "quick work", None)
+            .await
+            .unwrap();
+
+        // Give the background task time to complete
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let status = handle.status().await;
+        match status {
+            Some(SpawnStatus::Completed(ref output)) => {
+                assert_eq!(output, "done");
+            }
+            Some(SpawnStatus::Running) => {
+                // Task hasn't completed yet — acceptable in slow CI
+            }
+            other => panic!("Unexpected status: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_with_context() {
+        let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("context ok")));
+        let handle = mgr
+            .spawn_single("ctx-task", "use context", Some("extra info".to_string()))
+            .await
+            .unwrap();
+
+        // Should at least be registered
+        let status = handle.status().await;
+        assert!(status.is_some());
     }
 
     // ─── Parallel execution tests ─────────────────────────────

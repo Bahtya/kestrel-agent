@@ -4,6 +4,7 @@
 //! older messages are replaced with a compact summary. This keeps the agent functional
 //! in long-running sessions without losing essential context.
 
+use crate::notes::extract_compaction_notes;
 use anyhow::Result;
 use nanobot_core::{
     COMPACTION_KEEP_RECENT, COMPACTION_THRESHOLD_RATIO, DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -153,7 +154,19 @@ fn compact_summarize(
     }
 
     // Build summary from old messages (excluding initial system message)
-    let summary = build_summary(&session.messages[summary_start..split_point]);
+    let old_messages = session.messages[summary_start..split_point].to_vec();
+    let summary = build_summary(&old_messages);
+
+    // Extract structured notes from old messages before discarding them.
+    // This preserves key information (decisions, action items, questions)
+    // as persistent notes that survive compaction.
+    let notes_extracted = extract_compaction_notes(session, &old_messages);
+    if notes_extracted > 0 {
+        info!(
+            "Extracted {} structured notes during compaction of session '{}'",
+            notes_extracted, session.key
+        );
+    }
 
     // Rebuild message list
     let mut new_messages = Vec::new();

@@ -1,7 +1,8 @@
-//! Tool trait definition.
+//! Tool trait definition and sub-agent spawner interface.
 
 use async_trait::async_trait;
 use nanobot_core::FunctionDefinition;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -67,6 +68,47 @@ pub trait Tool: Send + Sync {
     }
 }
 
+// ─── Sub-agent spawner trait ────────────────────────────────────
+
+/// Status of a spawned sub-agent task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpawnStatus {
+    /// Task is currently executing.
+    Running,
+    /// Task completed successfully with the given output.
+    Completed(String),
+    /// Task failed with the given error message.
+    Failed(String),
+}
+
+/// Trait for spawning and managing sub-agent tasks.
+///
+/// Implementors provide the concrete mechanism for creating sub-agents,
+/// tracking their status, and cancelling them. `SpawnTool` delegates to
+/// whichever `SubAgentSpawner` is injected at wiring time.
+#[async_trait]
+pub trait SubAgentSpawner: Send + Sync {
+    /// Spawn a new sub-agent task with the given name, prompt, and optional
+    /// context. Returns a unique task ID on success.
+    async fn spawn(
+        &self,
+        name: &str,
+        prompt: &str,
+        context: Option<String>,
+    ) -> anyhow::Result<String>;
+
+    /// Query the current status of a spawned task.
+    /// Returns `None` if the task ID is unknown.
+    async fn status(&self, task_id: &str) -> Option<SpawnStatus>;
+
+    /// Request cancellation of a running task.
+    /// Returns `true` if the task was found and signalled for cancellation.
+    async fn cancel(&self, task_id: &str) -> bool;
+
+    /// List all tracked tasks as `(id, name, status)` tuples.
+    async fn list(&self) -> Vec<(String, String, SpawnStatus)>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +135,29 @@ mod tests {
     fn test_tool_error_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ToolError>();
+    }
+
+    #[test]
+    fn test_spawn_status_serde_roundtrip() {
+        let statuses = vec![
+            SpawnStatus::Running,
+            SpawnStatus::Completed("done".to_string()),
+            SpawnStatus::Failed("oops".to_string()),
+        ];
+        for s in &statuses {
+            let json = serde_json::to_string(s).unwrap();
+            let back: SpawnStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, s);
+        }
+    }
+
+    #[test]
+    fn test_spawn_status_equality() {
+        assert_eq!(SpawnStatus::Running, SpawnStatus::Running);
+        assert_ne!(SpawnStatus::Running, SpawnStatus::Completed("".into()));
+        assert_eq!(
+            SpawnStatus::Completed("ok".into()),
+            SpawnStatus::Completed("ok".into())
+        );
     }
 }

@@ -12,6 +12,7 @@ nanobot-agent = { path = "../nanobot-agent" }
 nanobot-providers = { path = "../nanobot-providers" }
 nanobot-tools = { path = "../nanobot-tools" }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

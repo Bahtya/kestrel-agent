@@ -61,6 +61,10 @@ pub struct Config {
     /// MCP server configurations.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+
+    /// API server configuration.
+    #[serde(default)]
+    pub api: ApiConfig,
 }
 
 impl Default for Config {
@@ -79,6 +83,7 @@ impl Default for Config {
             workspace: None,
             custom_providers: Vec::new(),
             mcp_servers: HashMap::new(),
+            api: ApiConfig::default(),
         }
     }
 }
@@ -533,6 +538,38 @@ pub struct SecurityConfig {
     /// Additional blocked networks.
     #[serde(default)]
     pub blocked_networks: Vec<String>,
+}
+
+/// API server configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ApiConfig {
+    /// CORS allowed origins. Default: `["*"]` (allow all).
+    #[serde(default = "default_api_allowed_origins")]
+    pub allowed_origins: Vec<String>,
+
+    /// Maximum request body size in bytes. Default: 10 MB.
+    #[serde(default = "default_api_max_body_size")]
+    pub max_body_size: usize,
+}
+
+/// Default CORS allowed origins: allow all.
+fn default_api_allowed_origins() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+/// Default max body size: 10 MB.
+const fn default_api_max_body_size() -> usize {
+    10 * 1024 * 1024
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: default_api_allowed_origins(),
+            max_body_size: default_api_max_body_size(),
+        }
+    }
 }
 
 /// Custom provider configuration for non-standard endpoints.

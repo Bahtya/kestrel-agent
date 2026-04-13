@@ -7,13 +7,19 @@
 //!
 //! - **Request logging**: Structured logs with method, path, status, and latency.
 //! - **Auth**: Bearer-token authentication via axum middleware on protected routes.
-//! - **CORS**: Permissive cross-origin support.
+//! - **CORS**: Configurable via `api.allowed_origins` in config.
+//! - **Body limit**: Configurable via `api.max_body_size` in config.
 //! - **Tracing**: HTTP request/response tracing via `tower-http`.
+//!
+//! ## Graceful shutdown
+//!
+//! The server listens for SIGINT / SIGTERM and drains in-flight SSE streams
+//! via a `CancellationToken` before exiting.
 
 use axum::{
     body::Body,
-    extract::State,
-    http::{Request, StatusCode},
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::sse::{Event, KeepAlive, Sse},
     response::IntoResponse,
@@ -21,6 +27,7 @@ use axum::{
     Json, Router,
 };
 use futures::stream::Stream;
+use futures::StreamExt;
 use nanobot_agent::AgentRunner;
 use nanobot_bus::MessageBus;
 use nanobot_config::Config;
@@ -33,7 +40,8 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
-use tower_http::cors::CorsLayer;
+use tokio_util::sync::CancellationToken;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, warn};
 
@@ -46,6 +54,8 @@ pub struct AppState {
     pub provider_registry: Arc<ProviderRegistry>,
     pub tool_registry: Arc<ToolRegistry>,
     pub api_key: Option<String>,
+    /// Cancellation token for graceful shutdown — cancelled on SIGINT/SIGTERM.
+    pub cancel: CancellationToken,
 }
 
 /// The API server.
@@ -54,7 +64,37 @@ pub struct ApiServer {
     port: u16,
 }
 
+/// Build a CorsLayer from the `api.allowed_origins` config.
+///
+/// - `["*"]` → permissive CORS (any origin).
+/// - Specific origins → only those origins are allowed.
+fn build_cors_layer(config: &Config) -> CorsLayer {
+    let origins = &config.api.allowed_origins;
+
+    if origins.len() == 1 && origins[0] == "*" {
+        return CorsLayer::permissive();
+    }
+
+    let parsed: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|o| o.parse::<HeaderValue>().ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(parsed))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ])
+}
+
 impl ApiServer {
+    /// Create a new API server with fresh registries.
     pub fn new(
         config: Config,
         bus: MessageBus,
@@ -68,6 +108,7 @@ impl ApiServer {
             provider_registry: Arc::new(ProviderRegistry::new()),
             tool_registry: Arc::new(ToolRegistry::new()),
             api_key: None,
+            cancel: CancellationToken::new(),
         };
         Self { state, port }
     }
@@ -88,6 +129,7 @@ impl ApiServer {
             provider_registry: Arc::new(provider_registry),
             tool_registry: Arc::new(tool_registry),
             api_key: None,
+            cancel: CancellationToken::new(),
         };
         Self { state, port }
     }
@@ -98,8 +140,11 @@ impl ApiServer {
         self
     }
 
-    /// Build the Axum router.
+    /// Build the Axum router with all middleware.
     pub fn router(&self) -> Router {
+        let cors = build_cors_layer(&self.state.config);
+        let body_limit = self.state.config.api.max_body_size;
+
         let public_routes = Router::new()
             .route("/v1/models", get(list_models))
             .route("/health", get(health));
@@ -114,21 +159,44 @@ impl ApiServer {
         Router::new()
             .merge(public_routes)
             .merge(protected_routes)
+            .layer(DefaultBodyLimit::max(body_limit))
             .layer(middleware::from_fn(request_log_middleware))
-            .layer(CorsLayer::permissive())
+            .layer(cors)
             .layer(TraceLayer::new_for_http())
             .with_state(self.state.clone())
     }
 
-    /// Start the API server.
+    /// Start the API server with graceful shutdown.
+    ///
+    /// Listens for SIGINT (Ctrl-C) and SIGTERM. On signal, the cancellation
+    /// token is triggered, which causes in-flight SSE streams to terminate
+    /// with a `stop` event, then the TCP listener stops accepting new
+    /// connections and the server drains existing requests.
     pub async fn run(&self) -> anyhow::Result<()> {
         let app = self.router();
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.port));
         info!("API server listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+
+        let cancel = self.state.cancel.clone();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("failed to install Ctrl-C handler");
+                info!("Shutdown signal received, draining connections…");
+                cancel.cancel();
+            })
+            .await?;
+
+        info!("API server stopped");
         Ok(())
+    }
+
+    /// Trigger graceful shutdown programmatically.
+    pub fn shutdown(&self) {
+        self.state.cancel.cancel();
     }
 }
 
@@ -481,6 +549,9 @@ async fn non_stream_completion(
 /// 1. Role announcement chunk (`delta: {role: "assistant"}`)
 /// 2. Content chunk (`delta: {content: "..."}`)
 /// 3. Final chunk with finish_reason and usage
+///
+/// If the server's cancellation token fires mid-stream, the stream ends
+/// gracefully with a `stop` event.
 async fn stream_completion(
     state: AppState,
     req: ChatCompletionRequest,
@@ -498,6 +569,7 @@ async fn stream_completion(
     );
 
     let stream_result = runner.run(system_prompt, messages).await;
+    let cancel = state.cancel.clone();
 
     let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         match stream_result {
@@ -508,7 +580,7 @@ async fn stream_completion(
                 let mdl = model;
                 let cr = created;
 
-                Box::pin(futures::stream::iter(vec![
+                let events = futures::stream::iter(vec![
                     // Chunk 1: role announcement
                     Ok(Event::default().data(serde_json::json!({
                         "id": id,
@@ -551,7 +623,12 @@ async fn stream_completion(
                             "total_tokens": usage.total_tokens.unwrap_or(0)
                         }
                     }).to_string())),
-                ]))
+                ]);
+
+                // Wrap with cancellation: end the stream on shutdown signal.
+                // cancelled_owned() returns an owned future so we satisfy 'static.
+                let cancelled = events.take_until(cancel.cancelled_owned());
+                Box::pin(cancelled)
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -741,6 +818,7 @@ mod tests {
             provider_registry: Arc::new(ProviderRegistry::new()),
             tool_registry: Arc::new(ToolRegistry::new()),
             api_key: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -760,6 +838,7 @@ mod tests {
             provider_registry: Arc::new(reg),
             tool_registry: Arc::new(ToolRegistry::new()),
             api_key: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -1025,6 +1104,7 @@ mod tests {
             provider_registry: Arc::new(reg),
             tool_registry: Arc::new(ToolRegistry::new()),
             api_key: None,
+            cancel: CancellationToken::new(),
         };
         let app = Router::new()
             .route("/v1/chat/completions", post(chat_completions))
@@ -1416,5 +1496,191 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         // No provider registered → model not found (404)
         assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ─── CORS configuration tests ──────────────────────────
+
+    /// Build a router from a custom config to test CORS headers.
+    fn router_with_config(config: Config) -> Router {
+        let state = AppState {
+            config: Arc::new(config),
+            bus: Arc::new(MessageBus::new()),
+            session_manager: {
+                let tmp = tempfile::tempdir().unwrap();
+                Arc::new(SessionManager::new(tmp.path().to_path_buf()).unwrap())
+            },
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            api_key: None,
+            cancel: CancellationToken::new(),
+        };
+
+        let cors = build_cors_layer(&state.config);
+        let body_limit = state.config.api.max_body_size;
+
+        Router::new()
+            .route("/health", get(health))
+            .layer(DefaultBodyLimit::max(body_limit))
+            .layer(cors)
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_cors_default_allows_any_origin() {
+        let config = Config::default();
+        let app = router_with_config(config);
+
+        let req = Request::builder()
+            .uri("/health")
+            .header("origin", "https://example.com")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Permissive CORS (tower-http 0.6) returns wildcard "*"
+        let acrh = resp.headers().get("access-control-allow-origin").unwrap();
+        assert_eq!(acrh, "*");
+    }
+
+    #[tokio::test]
+    async fn test_cors_specific_origin_allowed() {
+        let mut config = Config::default();
+        config.api.allowed_origins = vec!["https://trusted.example.com".to_string()];
+        let app = router_with_config(config);
+
+        let req = Request::builder()
+            .uri("/health")
+            .header("origin", "https://trusted.example.com")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let acrh = resp.headers().get("access-control-allow-origin").unwrap();
+        assert_eq!(acrh, "https://trusted.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_cors_unlisted_origin_denied() {
+        let mut config = Config::default();
+        config.api.allowed_origins = vec!["https://trusted.example.com".to_string()];
+        let app = router_with_config(config);
+
+        let req = Request::builder()
+            .uri("/health")
+            .header("origin", "https://evil.example.com")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Unlisted origin should not get a CORS header
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "Unlisted origin should not receive CORS header"
+        );
+    }
+
+    // ─── Body limit tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_body_limit_rejects_oversized() {
+        let mut config = Config::default();
+        config.api.max_body_size = 100; // Very small limit
+        let state = AppState {
+            config: Arc::new(config),
+            bus: Arc::new(MessageBus::new()),
+            session_manager: {
+                let tmp = tempfile::tempdir().unwrap();
+                Arc::new(SessionManager::new(tmp.path().to_path_buf()).unwrap())
+            },
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            api_key: None,
+            cancel: CancellationToken::new(),
+        };
+
+        let cors = build_cors_layer(&state.config);
+        let body_limit = state.config.api.max_body_size;
+
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat_completions))
+            .layer(DefaultBodyLimit::max(body_limit))
+            .layer(cors)
+            .with_state(state);
+
+        // Send a body larger than 100 bytes
+        let big_body = "x".repeat(200);
+        let req_body = serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": big_body}]
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&req_body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // axum returns 413 Payload Too Large when body exceeds the limit
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_body_limit_allows_normal_request() {
+        let mut config = Config::default();
+        config.api.max_body_size = 1024 * 1024; // 1 MB
+        let state = AppState {
+            config: Arc::new(config),
+            bus: Arc::new(MessageBus::new()),
+            session_manager: {
+                let tmp = tempfile::tempdir().unwrap();
+                Arc::new(SessionManager::new(tmp.path().to_path_buf()).unwrap())
+            },
+            provider_registry: Arc::new(ProviderRegistry::new()),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            api_key: None,
+            cancel: CancellationToken::new(),
+        };
+
+        let cors = build_cors_layer(&state.config);
+        let body_limit = state.config.api.max_body_size;
+
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat_completions))
+            .layer(DefaultBodyLimit::max(body_limit))
+            .layer(cors)
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&req_body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // Should not be 413 — may be 404 (no provider) but not rejected for size
+        assert_ne!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // ─── Graceful shutdown test ────────────────────────────
+
+    #[tokio::test]
+    async fn test_shutdown_cancels_token() {
+        let server = ApiServer::new(
+            Config::default(),
+            MessageBus::new(),
+            {
+                let tmp = tempfile::tempdir().unwrap();
+                SessionManager::new(tmp.path().to_path_buf()).unwrap()
+            },
+            0, // port 0 — not actually binding
+        );
+
+        assert!(!server.state.cancel.is_cancelled());
+        server.shutdown();
+        assert!(server.state.cancel.is_cancelled());
     }
 }

@@ -17,8 +17,9 @@
 //! - **Cross-field** — model ↔ provider matching
 
 use crate::schema::{
-    AgentDefaults, ChannelsConfig, Config, CronConfig, CustomProviderConfig, DiscordConfig,
-    DreamConfig, HeartbeatConfig, McpServerConfig, ProvidersConfig, SecurityConfig, TelegramConfig,
+    AgentDefaults, ApiConfig, ChannelsConfig, Config, CronConfig, CustomProviderConfig,
+    DiscordConfig, DreamConfig, HeartbeatConfig, McpServerConfig, ProvidersConfig,
+    SecurityConfig, TelegramConfig,
 };
 use std::fmt;
 
@@ -147,6 +148,7 @@ pub fn validate(config: &Config) -> ValidationReport {
     validate_cron(&config.cron, &mut report);
     validate_security(&config.security, &mut report);
     validate_mcp_servers(&config.mcp_servers, &mut report);
+    validate_api(&config.api, &mut report);
     validate_cross_field(&config.providers, &config.custom_providers, &config.agent, &mut report);
 
     report
@@ -717,6 +719,19 @@ const MODEL_KEYWORD_MAP: &[(&str, &str)] = &[
     ("qwen", "ollama"),
     ("codestral", "ollama"),
 ];
+
+// ---------------------------------------------------------------------------
+// API server validation
+// ---------------------------------------------------------------------------
+
+fn validate_api(api: &ApiConfig, report: &mut ValidationReport) {
+    if api.max_body_size == 0 {
+        report.error("api.max_body_size", "Max body size must be > 0");
+    }
+    if api.allowed_origins.is_empty() {
+        report.warning("api.allowed_origins", "No CORS origins configured — API may reject browser requests");
+    }
+}
 
 fn validate_cross_field(
     providers: &ProvidersConfig,

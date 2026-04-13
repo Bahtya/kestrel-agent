@@ -197,6 +197,190 @@ struct SetMessageReactionBody {
 }
 
 // ---------------------------------------------------------------------------
+// Inline keyboard builder
+// ---------------------------------------------------------------------------
+
+/// A single inline keyboard button.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InlineKeyboardButton {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// An inline keyboard attached to a message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InlineKeyboardMarkup {
+    pub inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
+}
+
+/// Builder for constructing inline keyboards row-by-row.
+///
+/// # Examples
+///
+/// ```
+/// use nanobot_channels::platforms::telegram::InlineKeyboardBuilder;
+///
+/// let keyboard = InlineKeyboardBuilder::new()
+///     .row_pair("Yes", "confirm:yes", "No", "confirm:no")
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct InlineKeyboardBuilder {
+    rows: Vec<Vec<InlineKeyboardButton>>,
+    current_row: Vec<InlineKeyboardButton>,
+}
+
+impl InlineKeyboardBuilder {
+    /// Create a new, empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a button to the current row.
+    pub fn button(mut self, text: &str, callback_data: &str) -> Self {
+        self.current_row.push(InlineKeyboardButton {
+            text: text.to_string(),
+            callback_data: Some(callback_data.to_string()),
+            url: None,
+        });
+        self
+    }
+
+    /// Add a URL button to the current row.
+    pub fn url_button(mut self, text: &str, url: &str) -> Self {
+        self.current_row.push(InlineKeyboardButton {
+            text: text.to_string(),
+            callback_data: None,
+            url: Some(url.to_string()),
+        });
+        self
+    }
+
+    /// Flush the current row and start a new one.
+    pub fn new_row(mut self) -> Self {
+        if !self.current_row.is_empty() {
+            self.rows.push(std::mem::take(&mut self.current_row));
+        }
+        self
+    }
+
+    /// Convenience: add a two-button row (common confirm/cancel pattern)
+    /// and flush it.
+    pub fn row_pair(
+        mut self,
+        left_text: &str,
+        left_data: &str,
+        right_text: &str,
+        right_data: &str,
+    ) -> Self {
+        self.rows.push(vec![
+            InlineKeyboardButton {
+                text: left_text.to_string(),
+                callback_data: Some(left_data.to_string()),
+                url: None,
+            },
+            InlineKeyboardButton {
+                text: right_text.to_string(),
+                callback_data: Some(right_data.to_string()),
+                url: None,
+            },
+        ]);
+        self
+    }
+
+    /// Build a confirm/cancel keyboard (convenience shortcut).
+    pub fn confirm_cancel(prefix: &str) -> Self {
+        Self::new().row_pair(
+            "✅ Confirm",
+            &format!("{prefix}:confirm"),
+            "❌ Cancel",
+            &format!("{prefix}:cancel"),
+        )
+    }
+
+    /// Build a pagination keyboard with previous/next buttons.
+    pub fn pagination(prefix: &str, page: usize, total_pages: usize) -> Self {
+        let mut builder = Self::new();
+        let mut row = Vec::new();
+        if page > 0 {
+            row.push(InlineKeyboardButton {
+                text: "◀ Prev".to_string(),
+                callback_data: Some(format!("{prefix}:page:{}", page - 1)),
+                url: None,
+            });
+        }
+        row.push(InlineKeyboardButton {
+            text: format!("{}/{}", page + 1, total_pages),
+            callback_data: Some(format!("{prefix}:page:{page}")),
+            url: None,
+        });
+        if page + 1 < total_pages {
+            row.push(InlineKeyboardButton {
+                text: "Next ▶".to_string(),
+                callback_data: Some(format!("{prefix}:page:{}", page + 1)),
+                url: None,
+            });
+        }
+        builder.rows.push(row);
+        builder
+    }
+
+    /// Finalise: flush any pending row and return the markup.
+    pub fn build(mut self) -> InlineKeyboardMarkup {
+        if !self.current_row.is_empty() {
+            self.rows.push(std::mem::take(&mut self.current_row));
+        }
+        InlineKeyboardMarkup {
+            inline_keyboard: self.rows,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Callback action routing
+// ---------------------------------------------------------------------------
+
+/// Parsed callback action extracted from `callback_data`.
+///
+/// The expected format is `{prefix}:{action}` or `{prefix}:{action}:{payload}`.
+/// For example `confirm:yes`, `page:3`, `menu:settings`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallbackAction {
+    /// The prefix/namespace (everything before the first `:`).
+    pub prefix: String,
+    /// The action name (between first and optional second `:`).
+    pub action: String,
+    /// Optional trailing payload (everything after the second `:`).
+    pub payload: Option<String>,
+}
+
+impl CallbackAction {
+    /// Parse a `callback_data` string into a `CallbackAction`.
+    ///
+    /// Returns `None` if the string is empty or has no `:` separator.
+    pub fn parse(data: &str) -> Option<Self> {
+        if data.is_empty() {
+            return None;
+        }
+        let mut parts = data.splitn(3, ':');
+        let prefix = parts.next()?.to_string();
+        let action = parts.next()?.to_string();
+        let payload = parts.next().map(|s| s.to_string());
+        if prefix.is_empty() || action.is_empty() {
+            return None;
+        }
+        Some(Self {
+            prefix,
+            action,
+            payload,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TelegramChannel
 // ---------------------------------------------------------------------------
 
@@ -1115,6 +1299,106 @@ impl TelegramChannel {
             })
         }
     }
+
+    /// Send a message with an inline keyboard attached.
+    pub async fn send_message_with_keyboard(
+        &self,
+        chat_id: &str,
+        text: &str,
+        keyboard: &InlineKeyboardMarkup,
+        reply_to: Option<&str>,
+    ) -> Result<SendResult> {
+        debug!("Sending message with keyboard to chat {}", chat_id);
+
+        let chat_id_num: i64 = match chat_id.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                return Ok(SendResult {
+                    success: false,
+                    message_id: None,
+                    error: Some(format!("invalid chat_id: {chat_id}")),
+                    retryable: false,
+                });
+            }
+        };
+
+        let reply_to_id = reply_to.and_then(|r| r.parse::<i64>().ok());
+
+        #[derive(Debug, Serialize)]
+        struct SendMessageWithKeyboardBody {
+            chat_id: i64,
+            text: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_to_message_id: Option<i64>,
+            reply_markup: InlineKeyboardMarkup,
+        }
+
+        let body = SendMessageWithKeyboardBody {
+            chat_id: chat_id_num,
+            text: text.to_string(),
+            reply_to_message_id: reply_to_id,
+            reply_markup: keyboard.clone(),
+        };
+
+        let url = self.api_url("sendMessage");
+        let resp = match self.client.post(&url).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(SendResult {
+                    success: false,
+                    message_id: None,
+                    error: Some(format!("HTTP request failed: {e}")),
+                    retryable: true,
+                });
+            }
+        };
+
+        let tg_resp: TgResponse<TgSentMessage> = match resp.json().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(SendResult {
+                    success: false,
+                    message_id: None,
+                    error: Some(format!("failed to parse response: {e}")),
+                    retryable: false,
+                });
+            }
+        };
+
+        if tg_resp.ok {
+            Ok(SendResult {
+                success: true,
+                message_id: tg_resp.result.map(|m| m.message_id.to_string()),
+                error: None,
+                retryable: false,
+            })
+        } else {
+            Ok(SendResult {
+                success: false,
+                message_id: None,
+                error: tg_resp.description,
+                retryable: false,
+            })
+        }
+    }
+
+    /// Answer a callback query, optionally showing a short toast notification.
+    pub async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: Option<&str>,
+    ) -> Result<()> {
+        debug!("Answering callback query {}", callback_query_id);
+        let body = AnswerCallbackQueryBody {
+            callback_query_id: callback_query_id.to_string(),
+            text: text.map(|s| s.to_string()),
+        };
+        let url = self.api_url("answerCallbackQuery");
+        if let Err(e) = self.client.post(&url).json(&body).send().await {
+            warn!("Failed to answer callback query: {e}");
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1792,5 +2076,252 @@ mod tests {
         let json = serde_json::to_value(&rt).unwrap();
         assert_eq!(json["type"], "emoji");
         assert_eq!(json["emoji"], "👍");
+    }
+
+    // -----------------------------------------------------------------------
+    // InlineKeyboardBuilder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_builder_empty() {
+        let kb = InlineKeyboardBuilder::new().build();
+        assert!(kb.inline_keyboard.is_empty());
+    }
+
+    #[test]
+    fn test_builder_single_button() {
+        let kb = InlineKeyboardBuilder::new()
+            .button("Click me", "action:click")
+            .new_row()
+            .build();
+        assert_eq!(kb.inline_keyboard.len(), 1);
+        assert_eq!(kb.inline_keyboard[0].len(), 1);
+        assert_eq!(kb.inline_keyboard[0][0].text, "Click me");
+        assert_eq!(
+            kb.inline_keyboard[0][0].callback_data,
+            Some("action:click".to_string())
+        );
+    }
+
+    #[test]
+    fn test_builder_row_pair() {
+        let kb = InlineKeyboardBuilder::new()
+            .row_pair("Yes", "confirm:yes", "No", "confirm:no")
+            .build();
+        assert_eq!(kb.inline_keyboard.len(), 1);
+        assert_eq!(kb.inline_keyboard[0].len(), 2);
+        assert_eq!(kb.inline_keyboard[0][0].text, "Yes");
+        assert_eq!(kb.inline_keyboard[0][1].text, "No");
+    }
+
+    #[test]
+    fn test_builder_multiple_rows() {
+        let kb = InlineKeyboardBuilder::new()
+            .button("A", "a")
+            .button("B", "b")
+            .new_row()
+            .button("C", "c")
+            .new_row()
+            .build();
+        assert_eq!(kb.inline_keyboard.len(), 2);
+        assert_eq!(kb.inline_keyboard[0].len(), 2);
+        assert_eq!(kb.inline_keyboard[1].len(), 1);
+    }
+
+    #[test]
+    fn test_builder_auto_flush_without_new_row() {
+        // build() flushes pending buttons even without new_row().
+        let kb = InlineKeyboardBuilder::new()
+            .button("X", "x")
+            .button("Y", "y")
+            .build();
+        assert_eq!(kb.inline_keyboard.len(), 1);
+        assert_eq!(kb.inline_keyboard[0].len(), 2);
+    }
+
+    #[test]
+    fn test_builder_url_button() {
+        let kb = InlineKeyboardBuilder::new()
+            .url_button("Open", "https://example.com")
+            .new_row()
+            .build();
+        assert_eq!(kb.inline_keyboard[0][0].url, Some("https://example.com".to_string()));
+        assert_eq!(kb.inline_keyboard[0][0].callback_data, None);
+    }
+
+    #[test]
+    fn test_builder_confirm_cancel() {
+        let kb = InlineKeyboardBuilder::confirm_cancel("del").build();
+        assert_eq!(kb.inline_keyboard.len(), 1);
+        assert_eq!(kb.inline_keyboard[0].len(), 2);
+        assert_eq!(kb.inline_keyboard[0][0].text, "✅ Confirm");
+        assert_eq!(
+            kb.inline_keyboard[0][0].callback_data,
+            Some("del:confirm".to_string())
+        );
+        assert_eq!(kb.inline_keyboard[0][1].text, "❌ Cancel");
+        assert_eq!(
+            kb.inline_keyboard[0][1].callback_data,
+            Some("del:cancel".to_string())
+        );
+    }
+
+    #[test]
+    fn test_builder_pagination_first_page() {
+        let kb = InlineKeyboardBuilder::pagination("list", 0, 5).build();
+        assert_eq!(kb.inline_keyboard.len(), 1);
+        let row = &kb.inline_keyboard[0];
+        // First page: no "Prev", just "1/5" and "Next"
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0].text, "1/5");
+        assert_eq!(row[1].text, "Next ▶");
+        assert_eq!(row[1].callback_data, Some("list:page:1".to_string()));
+    }
+
+    #[test]
+    fn test_builder_pagination_last_page() {
+        let kb = InlineKeyboardBuilder::pagination("list", 4, 5).build();
+        let row = &kb.inline_keyboard[0];
+        // Last page: "Prev" and "5/5", no "Next"
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0].text, "◀ Prev");
+        assert_eq!(row[1].text, "5/5");
+    }
+
+    #[test]
+    fn test_builder_pagination_middle_page() {
+        let kb = InlineKeyboardBuilder::pagination("items", 2, 10).build();
+        let row = &kb.inline_keyboard[0];
+        assert_eq!(row.len(), 3);
+        assert_eq!(row[0].text, "◀ Prev");
+        assert_eq!(row[0].callback_data, Some("items:page:1".to_string()));
+        assert_eq!(row[1].text, "3/10");
+        assert_eq!(row[2].text, "Next ▶");
+        assert_eq!(row[2].callback_data, Some("items:page:3".to_string()));
+    }
+
+    #[test]
+    fn test_builder_pagination_single_page() {
+        let kb = InlineKeyboardBuilder::pagination("x", 0, 1).build();
+        let row = &kb.inline_keyboard[0];
+        // Only one page: just "1/1"
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].text, "1/1");
+    }
+
+    #[test]
+    fn test_inline_keyboard_serialisation() {
+        let kb = InlineKeyboardBuilder::new()
+            .row_pair("OK", "ok", "Cancel", "cancel")
+            .build();
+        let json = serde_json::to_value(&kb).unwrap();
+        let buttons = json["inline_keyboard"][0].as_array().unwrap();
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0]["text"], "OK");
+        assert_eq!(buttons[0]["callback_data"], "ok");
+        assert_eq!(buttons[1]["text"], "Cancel");
+        assert_eq!(buttons[1]["callback_data"], "cancel");
+    }
+
+    #[test]
+    fn test_inline_keyboard_roundtrip_serde() {
+        let kb = InlineKeyboardBuilder::new()
+            .row_pair("A", "a", "B", "b")
+            .button("C", "c")
+            .new_row()
+            .build();
+        let json = serde_json::to_string(&kb).unwrap();
+        let parsed: InlineKeyboardMarkup = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, kb);
+    }
+
+    #[test]
+    fn test_inline_keyboard_button_equality() {
+        let a = InlineKeyboardButton {
+            text: "Click".to_string(),
+            callback_data: Some("cb".to_string()),
+            url: None,
+        };
+        let b = InlineKeyboardButton {
+            text: "Click".to_string(),
+            callback_data: Some("cb".to_string()),
+            url: None,
+        };
+        assert_eq!(a, b);
+    }
+
+    // -----------------------------------------------------------------------
+    // CallbackAction parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_callback_action_parse_simple() {
+        let ca = CallbackAction::parse("confirm:yes").unwrap();
+        assert_eq!(ca.prefix, "confirm");
+        assert_eq!(ca.action, "yes");
+        assert_eq!(ca.payload, None);
+    }
+
+    #[test]
+    fn test_callback_action_parse_with_payload() {
+        let ca = CallbackAction::parse("page:goto:5").unwrap();
+        assert_eq!(ca.prefix, "page");
+        assert_eq!(ca.action, "goto");
+        assert_eq!(ca.payload, Some("5".to_string()));
+    }
+
+    #[test]
+    fn test_callback_action_parse_complex_payload() {
+        let ca = CallbackAction::parse("menu:select:settings:advanced").unwrap();
+        assert_eq!(ca.prefix, "menu");
+        assert_eq!(ca.action, "select");
+        // payload is everything after the second ':'
+        assert_eq!(ca.payload, Some("settings:advanced".to_string()));
+    }
+
+    #[test]
+    fn test_callback_action_parse_empty() {
+        assert!(CallbackAction::parse("").is_none());
+    }
+
+    #[test]
+    fn test_callback_action_parse_no_colon() {
+        assert!(CallbackAction::parse("nocolon").is_none());
+    }
+
+    #[test]
+    fn test_callback_action_parse_trailing_colon() {
+        // "action:" → action is empty → returns None
+        assert!(CallbackAction::parse("action:").is_none());
+    }
+
+    #[test]
+    fn test_callback_action_parse_leading_colon() {
+        // ":action" → prefix is empty → returns None
+        assert!(CallbackAction::parse(":action").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // send_message_with_keyboard and answer_callback_query error cases
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_send_message_with_keyboard_invalid_chat_id() {
+        let channel = TelegramChannel::new();
+        let kb = InlineKeyboardBuilder::confirm_cancel("test").build();
+        let result = channel
+            .send_message_with_keyboard("bad_id", "Pick one", &kb, None)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_answer_callback_query_no_server() {
+        let channel = TelegramChannel::new();
+        // Will fail to connect but should not panic.
+        let result = channel.answer_callback_query("cb123", Some("Done!")).await;
+        assert!(result.is_ok());
     }
 }

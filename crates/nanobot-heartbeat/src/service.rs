@@ -192,13 +192,11 @@ impl HeartbeatService {
         let snapshot = HealthSnapshot::from_checks(checks);
 
         // Detect state transitions and emit HealthStatusChanged event
-        let previous_status = {
+        let previous_snapshot = {
             let state = self.state.lock();
-            state
-                .last_snapshot
-                .as_ref()
-                .map(Self::aggregate_status)
+            state.last_snapshot.clone()
         };
+        let previous_status = previous_snapshot.as_ref().map(Self::aggregate_status);
         let current_status = Self::aggregate_status(&snapshot);
 
         // Update persistent state and track failures
@@ -223,6 +221,34 @@ impl HeartbeatService {
                         failed_count: snapshot.failed_count(),
                         degraded_count: snapshot.degraded_count(),
                     });
+                }
+            }
+        }
+
+        // Detect per-component status transitions and emit events
+        // Only compare when we have a previous snapshot (skip on first check)
+        if let Some(ref prev_snap) = previous_snapshot {
+            for check in &snapshot.checks {
+                let prev_status = prev_snap
+                    .checks
+                    .iter()
+                    .find(|c| c.component == check.component)
+                    .map(|c| format!("{:?}", c.status))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let curr_status = format!("{:?}", check.status);
+                if prev_status != curr_status {
+                    debug!(
+                        "Component '{}' status changed: {} → {}",
+                        check.component, prev_status, curr_status
+                    );
+                    if let Some(bus) = &self.bus {
+                        bus.emit_event(AgentEvent::ComponentStatusChanged {
+                            component: check.component.clone(),
+                            from: prev_status,
+                            to: curr_status,
+                            message: check.message.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -1146,6 +1172,103 @@ mod tests {
             }
         }
         assert_eq!(change_count, 0, "Should not emit change when status unchanged");
+    }
+
+    // === ComponentStatusChanged events ===
+
+    #[tokio::test]
+    async fn test_component_status_changed_on_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = MessageBus::new();
+        let mut events_rx = bus.subscribe_events();
+        let mut svc = make_service(dir.path());
+        svc.set_bus(bus);
+
+        let check = Arc::new(ToggleCheck::new("comp", true));
+        svc.register_check(check.clone());
+
+        // First check — healthy (no previous, so no ComponentStatusChanged)
+        svc.run_checks().await.unwrap();
+
+        // Fail the component
+        check.set_healthy(false);
+        svc.run_checks().await.unwrap();
+
+        // Should receive ComponentStatusChanged event
+        let mut got_component_change = false;
+        for _ in 0..10 {
+            let event = tokio::time::timeout(Duration::from_millis(100), events_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::ComponentStatusChanged { component, from, to, .. } = &event {
+                if component == "comp" && from == "Healthy" && to == "Unhealthy" {
+                    got_component_change = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_component_change, "Expected ComponentStatusChanged event");
+    }
+
+    #[tokio::test]
+    async fn test_component_status_no_change_when_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = MessageBus::new();
+        let mut events_rx = bus.subscribe_events();
+        let mut svc = make_service(dir.path());
+        svc.set_bus(bus);
+
+        svc.register_check(Arc::new(MockCheck {
+            name: "comp".to_string(),
+            healthy: true,
+        }));
+
+        svc.run_checks().await.unwrap();
+        svc.run_checks().await.unwrap();
+
+        let mut component_changes = 0;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_millis(100), events_rx.recv()).await {
+                Ok(Ok(AgentEvent::ComponentStatusChanged { .. })) => component_changes += 1,
+                _ => break,
+            }
+        }
+        assert_eq!(component_changes, 0, "Should not emit ComponentStatusChanged when stable");
+    }
+
+    #[tokio::test]
+    async fn test_component_recovery_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = MessageBus::new();
+        let mut events_rx = bus.subscribe_events();
+        let mut svc = make_service(dir.path());
+        svc.set_bus(bus);
+
+        let check = Arc::new(ToggleCheck::new("comp", false));
+        svc.register_check(check.clone());
+
+        // Start unhealthy
+        svc.run_checks().await.unwrap();
+
+        // Recover
+        check.set_healthy(true);
+        svc.run_checks().await.unwrap();
+
+        let mut got_recovery = false;
+        for _ in 0..10 {
+            let event = tokio::time::timeout(Duration::from_millis(100), events_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::ComponentStatusChanged { component, from, to, .. } = &event {
+                if component == "comp" && from == "Unhealthy" && to == "Healthy" {
+                    got_recovery = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_recovery, "Expected ComponentStatusChanged recovery event");
     }
 
     // === Full health report ===

@@ -194,6 +194,18 @@ pub enum AgentEvent {
         /// Number of messages removed.
         messages_removed: usize,
     },
+
+    /// A single component's health status changed.
+    ComponentStatusChanged {
+        /// Component name (e.g. "provider", "bus").
+        component: String,
+        /// Previous status string.
+        from: String,
+        /// New status string.
+        to: String,
+        /// Human-readable detail message.
+        message: String,
+    },
 }
 
 #[cfg(test)]

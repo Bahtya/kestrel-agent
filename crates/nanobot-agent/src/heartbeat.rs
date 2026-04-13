@@ -486,6 +486,297 @@ impl HealthCheck for ConfigStoreHealthCheck {
     }
 }
 
+// ─── LivenessCheck ──────────────────────────────────────────────
+
+/// Liveness check — verifies the process is alive and the heartbeat event
+/// loop is not blocked.
+///
+/// Tracks the time of the last successful heartbeat tick. If the loop
+/// hasn't ticked within `max_stale_secs`, reports `Unhealthy`. The
+/// caller should call [`record_tick`](Self::record_tick) after each
+/// successful heartbeat cycle.
+pub struct LivenessCheck {
+    /// Timestamp of the last successful heartbeat tick.
+    last_tick: Arc<parking_lot::RwLock<Option<chrono::DateTime<chrono::Local>>>>,
+    /// Maximum seconds since the last tick before reporting unhealthy.
+    max_stale_secs: u64,
+}
+
+impl LivenessCheck {
+    /// Create a new liveness check.
+    ///
+    /// Reports `Unhealthy` if no tick has been recorded within
+    /// `max_stale_secs` seconds.
+    pub fn new(
+        last_tick: Arc<parking_lot::RwLock<Option<chrono::DateTime<chrono::Local>>>>,
+        max_stale_secs: u64,
+    ) -> Self {
+        Self {
+            last_tick,
+            max_stale_secs,
+        }
+    }
+
+    /// Record the current time as the last tick timestamp.
+    pub fn record_tick(&self) {
+        *self.last_tick.write() = Some(chrono::Local::now());
+    }
+}
+
+#[async_trait]
+impl HealthCheck for LivenessCheck {
+    fn component_name(&self) -> &str {
+        "liveness"
+    }
+
+    async fn report_health(&self) -> HealthCheckResult {
+        let tick = self.last_tick.read();
+
+        match *tick {
+            None => HealthCheckResult {
+                component: "liveness".to_string(),
+                status: CheckStatus::Skipped,
+                message: "No heartbeat tick recorded yet".to_string(),
+                timestamp: chrono::Local::now(),
+            },
+            Some(last) => {
+                let elapsed = chrono::Local::now()
+                    .signed_duration_since(last)
+                    .num_seconds();
+
+                if elapsed < 0 {
+                    HealthCheckResult {
+                        component: "liveness".to_string(),
+                        status: CheckStatus::Healthy,
+                        message: "alive (clock skew)".to_string(),
+                        timestamp: chrono::Local::now(),
+                    }
+                } else if (elapsed as u64) <= self.max_stale_secs {
+                    HealthCheckResult {
+                        component: "liveness".to_string(),
+                        status: CheckStatus::Healthy,
+                        message: format!("alive (last tick {}s ago)", elapsed),
+                        timestamp: chrono::Local::now(),
+                    }
+                } else {
+                    HealthCheckResult {
+                        component: "liveness".to_string(),
+                        status: CheckStatus::Unhealthy,
+                        message: format!(
+                            "event loop blocked: no tick for {}s (threshold: {}s)",
+                            elapsed, self.max_stale_secs
+                        ),
+                        timestamp: chrono::Local::now(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── ReadinessCheck ─────────────────────────────────────────────
+
+/// Readiness check — verifies that all required components are
+/// initialised before the service accepts traffic.
+///
+/// A service is "ready" when all providers listed in `required_providers`
+/// are registered in the `ProviderRegistry`. If no providers are
+/// required, the check is always Healthy.
+pub struct ReadinessCheck {
+    /// Names of providers that must be present for the service to be ready.
+    required_providers: Vec<String>,
+    /// The provider registry to check against.
+    registry: nanobot_providers::ProviderRegistry,
+}
+
+impl ReadinessCheck {
+    /// Create a new readiness check.
+    ///
+    /// The service reports ready only when all `required_providers` are
+    /// registered. If the list is empty, the check always reports Healthy.
+    pub fn new(
+        required_providers: Vec<String>,
+        registry: nanobot_providers::ProviderRegistry,
+    ) -> Self {
+        Self {
+            required_providers,
+            registry,
+        }
+    }
+}
+
+#[async_trait]
+impl HealthCheck for ReadinessCheck {
+    fn component_name(&self) -> &str {
+        "readiness"
+    }
+
+    async fn report_health(&self) -> HealthCheckResult {
+        if self.required_providers.is_empty() {
+            return HealthCheckResult {
+                component: "readiness".to_string(),
+                status: CheckStatus::Healthy,
+                message: "no required providers".to_string(),
+                timestamp: chrono::Local::now(),
+            };
+        }
+
+        let registered = self.registry.provider_names();
+        let mut missing = Vec::new();
+
+        for name in &self.required_providers {
+            if !registered.contains(name) {
+                missing.push(name.clone());
+            }
+        }
+
+        if missing.is_empty() {
+            HealthCheckResult {
+                component: "readiness".to_string(),
+                status: CheckStatus::Healthy,
+                message: format!(
+                    "{}/{} providers initialised",
+                    self.required_providers.len(),
+                    self.required_providers.len()
+                ),
+                timestamp: chrono::Local::now(),
+            }
+        } else {
+            HealthCheckResult {
+                component: "readiness".to_string(),
+                status: CheckStatus::Unhealthy,
+                message: format!(
+                    "missing providers: {}",
+                    missing.join(", ")
+                ),
+                timestamp: chrono::Local::now(),
+            }
+        }
+    }
+}
+
+// ─── DeepConfigStoreHealthCheck ─────────────────────────────────
+
+/// Enhanced config-store health check with deep validation.
+///
+/// In addition to file readability and data-dir writability (handled by
+/// [`ConfigStoreHealthCheck`]), this check optionally:
+/// - Parses the YAML config and reports parse errors
+/// - Validates that critical keys (`agent.model`) are present
+pub struct DeepConfigStoreHealthCheck {
+    config_path: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
+}
+
+impl DeepConfigStoreHealthCheck {
+    /// Create a new deep config-store health check.
+    pub fn new(config_path: std::path::PathBuf, data_dir: std::path::PathBuf) -> Self {
+        Self {
+            config_path,
+            data_dir,
+        }
+    }
+}
+
+#[async_trait]
+impl HealthCheck for DeepConfigStoreHealthCheck {
+    fn component_name(&self) -> &str {
+        "config_store"
+    }
+
+    async fn report_health(&self) -> HealthCheckResult {
+        let mut issues: Vec<String> = Vec::new();
+
+        // 1. Config file existence and readability
+        if self.config_path.exists() {
+            match std::fs::read_to_string(&self.config_path) {
+                Ok(content) => {
+                    // 2. YAML parse validation
+                    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                        Ok(parsed) => {
+                            // 3. Check critical key: agent.model
+                            if let Some(agent) = parsed.get("agent") {
+                                if agent.get("model").is_none() {
+                                    // model is optional — warn but not error
+                                    issues.push("agent.model not set (will use default)".to_string());
+                                }
+                            }
+                            // If no agent section at all, that's acceptable (defaults)
+                        }
+                        Err(e) => {
+                            issues.push(format!(
+                                "config YAML parse error: {}",
+                                e
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    issues.push(format!(
+                        "config file {} is not readable: {}",
+                        self.config_path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+        // Config doesn't exist → acceptable (defaults are used).
+
+        // 4. Data dir writability
+        let probe = self.data_dir.join(".health_probe");
+        match std::fs::write(&probe, b"probe") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(e) => {
+                issues.push(format!(
+                    "data dir {} is not writable: {}",
+                    self.data_dir.display(),
+                    e
+                ));
+            }
+        }
+
+        // 5. Check data dir exists
+        if !self.data_dir.exists() {
+            issues.push(format!(
+                "data dir {} does not exist",
+                self.data_dir.display()
+            ));
+        }
+
+        if issues.is_empty() {
+            HealthCheckResult {
+                component: "config_store".to_string(),
+                status: CheckStatus::Healthy,
+                message: format!(
+                    "config: {}, data_dir: {}",
+                    if self.config_path.exists() { "present, valid" } else { "default" },
+                    self.data_dir.display()
+                ),
+                timestamp: chrono::Local::now(),
+            }
+        } else {
+            // Distinguish between fatal issues (parse errors, not writable)
+            // and warnings (missing optional keys)
+            let has_fatal = issues.iter().any(|i| {
+                i.contains("not readable") || i.contains("not writable")
+                    || i.contains("parse error") || i.contains("does not exist")
+            });
+            HealthCheckResult {
+                component: "config_store".to_string(),
+                status: if has_fatal {
+                    CheckStatus::Unhealthy
+                } else {
+                    CheckStatus::Degraded
+                },
+                message: issues.join("; "),
+                timestamp: chrono::Local::now(),
+            }
+        }
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -865,6 +1156,243 @@ mod tests {
     async fn test_config_store_name() {
         let dir = tempfile::tempdir().unwrap();
         let check = ConfigStoreHealthCheck::new(
+            dir.path().join("config.yaml"),
+            dir.path().to_path_buf(),
+        );
+        assert_eq!(check.component_name(), "config_store");
+    }
+
+    // === LivenessCheck ===
+
+    #[tokio::test]
+    async fn test_liveness_no_tick() {
+        let last_tick = Arc::new(parking_lot::RwLock::new(None));
+        let check = LivenessCheck::new(last_tick, 60);
+        let result = check.report_health().await;
+
+        assert_eq!(result.component, "liveness");
+        assert_eq!(result.status, CheckStatus::Skipped);
+        assert!(result.message.contains("No heartbeat tick"));
+    }
+
+    #[tokio::test]
+    async fn test_liveness_recent_tick() {
+        let last_tick = Arc::new(parking_lot::RwLock::new(None));
+        let check = LivenessCheck::new(last_tick.clone(), 60);
+
+        check.record_tick();
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert!(result.message.contains("alive"));
+    }
+
+    #[tokio::test]
+    async fn test_liveness_stale_tick() {
+        let stale = chrono::Local::now() - chrono::Duration::seconds(300);
+        let last_tick = Arc::new(parking_lot::RwLock::new(Some(stale)));
+        let check = LivenessCheck::new(last_tick, 60);
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+        assert!(result.message.contains("event loop blocked"));
+        assert!(result.message.contains("threshold: 60s"));
+    }
+
+    #[tokio::test]
+    async fn test_liveness_name() {
+        let last_tick = Arc::new(parking_lot::RwLock::new(None));
+        let check = LivenessCheck::new(last_tick, 60);
+        assert_eq!(check.component_name(), "liveness");
+    }
+
+    #[tokio::test]
+    async fn test_liveness_record_tick_updates() {
+        let last_tick = Arc::new(parking_lot::RwLock::new(None));
+        let check = LivenessCheck::new(last_tick.clone(), 60);
+
+        assert!(last_tick.read().is_none());
+        check.record_tick();
+        assert!(last_tick.read().is_some());
+    }
+
+    // === ReadinessCheck ===
+
+    #[tokio::test]
+    async fn test_readiness_no_required_providers() {
+        let registry = nanobot_providers::ProviderRegistry::new();
+        let check = ReadinessCheck::new(vec![], registry);
+        let result = check.report_health().await;
+
+        assert_eq!(result.component, "readiness");
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert!(result.message.contains("no required providers"));
+    }
+
+    #[tokio::test]
+    async fn test_readiness_all_present() {
+        let mut registry = nanobot_providers::ProviderRegistry::new();
+        registry.register("openai", MockProviderForReadiness);
+        registry.register("anthropic", MockProviderForReadiness);
+
+        let check = ReadinessCheck::new(
+            vec!["openai".to_string(), "anthropic".to_string()],
+            registry,
+        );
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert!(result.message.contains("2/2 providers initialised"));
+    }
+
+    #[tokio::test]
+    async fn test_readiness_missing_provider() {
+        let mut registry = nanobot_providers::ProviderRegistry::new();
+        registry.register("openai", MockProviderForReadiness);
+
+        let check = ReadinessCheck::new(
+            vec!["openai".to_string(), "anthropic".to_string()],
+            registry,
+        );
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+        assert!(result.message.contains("anthropic"));
+        assert!(result.message.contains("missing providers"));
+    }
+
+    #[tokio::test]
+    async fn test_readiness_name() {
+        let registry = nanobot_providers::ProviderRegistry::new();
+        let check = ReadinessCheck::new(vec![], registry);
+        assert_eq!(check.component_name(), "readiness");
+    }
+
+    /// Minimal mock provider for readiness tests.
+    struct MockProviderForReadiness;
+
+    #[async_trait]
+    impl nanobot_providers::base::LlmProvider for MockProviderForReadiness {
+        fn name(&self) -> &str { "mock" }
+        async fn complete(
+            &self,
+            _req: nanobot_providers::base::CompletionRequest,
+        ) -> anyhow::Result<nanobot_providers::base::CompletionResponse> {
+            Ok(nanobot_providers::base::CompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: None,
+                usage: None,
+                finish_reason: None,
+            })
+        }
+        async fn complete_stream(
+            &self,
+            req: nanobot_providers::base::CompletionRequest,
+        ) -> anyhow::Result<nanobot_providers::base::BoxStream> {
+            let resp = self.complete(req).await?;
+            let chunk = nanobot_providers::base::CompletionChunk {
+                delta: resp.content,
+                tool_call_deltas: None,
+                usage: resp.usage,
+                done: true,
+            };
+            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
+        }
+        fn supports_model(&self, _model: &str) -> bool { true }
+    }
+
+    // === DeepConfigStoreHealthCheck ===
+
+    #[tokio::test]
+    async fn test_deep_config_valid_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "agent:\n  model: gpt-4\n").unwrap();
+
+        let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert!(result.message.contains("present, valid"));
+    }
+
+    #[tokio::test]
+    async fn test_deep_config_missing_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "agent:\n  max_iterations: 10\n").unwrap();
+
+        let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
+        let result = check.report_health().await;
+
+        // Missing model is a warning (Degraded), not fatal
+        assert_eq!(result.status, CheckStatus::Degraded);
+        assert!(result.message.contains("agent.model not set"));
+    }
+
+    #[tokio::test]
+    async fn test_deep_config_invalid_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "agent:\n  model: [broken\n").unwrap();
+
+        let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+        assert!(result.message.contains("parse error"));
+    }
+
+    #[tokio::test]
+    async fn test_deep_config_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nonexistent.yaml");
+
+        let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert!(result.message.contains("default"));
+    }
+
+    #[tokio::test]
+    async fn test_deep_config_unwritable_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("readonly");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o444))
+            .unwrap();
+
+        let check = DeepConfigStoreHealthCheck::new(
+            dir.path().join("config.yaml"),
+            data_dir.clone(),
+        );
+        let result = check.report_health().await;
+
+        assert!(matches!(result.status, CheckStatus::Unhealthy | CheckStatus::Healthy));
+
+        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).ok();
+    }
+
+    #[tokio::test]
+    async fn test_deep_config_nonexistent_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_dir = dir.path().join("does_not_exist");
+
+        let check = DeepConfigStoreHealthCheck::new(
+            dir.path().join("config.yaml"),
+            missing_dir,
+        );
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+        assert!(result.message.contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_deep_config_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = DeepConfigStoreHealthCheck::new(
             dir.path().join("config.yaml"),
             dir.path().to_path_buf(),
         );

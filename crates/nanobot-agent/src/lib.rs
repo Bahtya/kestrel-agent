@@ -21,7 +21,8 @@ pub use context_budget::{
 };
 pub use heartbeat::{
     AgentLoopHealthCheck, BusHealthCheck, ChannelHealthCheck, ConfigStoreHealthCheck,
-    ProviderHealthCheck, SessionStoreHealthCheck,
+    DeepConfigStoreHealthCheck, LivenessCheck, ProviderHealthCheck, ReadinessCheck,
+    SessionStoreHealthCheck,
 };
 pub use hook::{AgentHook, CompositeHook};
 pub use loop_mod::{AgentLoop, HeartbeatHandle};

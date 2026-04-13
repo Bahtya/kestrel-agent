@@ -244,7 +244,7 @@ mod tests {
         let store = SessionStore::new(tmp.path().to_path_buf()).unwrap();
 
         // Write an old-style JSONL file (no meta header, just entries)
-        let path = tmp.path().join("sessions").join("test_old.jsonl");
+        let path = tmp.path().join("test_old.jsonl");
         let old_content = r#"{"role":"user","content":"hello from old format","timestamp":"2026-01-01T00:00:00+00:00"}
 {"role":"assistant","content":"hi","timestamp":"2026-01-01T00:00:01+00:00"}
 "#;

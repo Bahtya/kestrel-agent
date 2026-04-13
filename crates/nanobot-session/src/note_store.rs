@@ -290,11 +290,12 @@ mod tests {
 
         let results = store.search_notes("rest").unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "session:a");
+        // safe_key("session:a") → "session_a" (the key stored on disk)
+        assert_eq!(results[0].0, "session_a");
 
         let results = store.search_notes("postgresql").unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "session:b");
+        assert_eq!(results[0].0, "session_b");
     }
 
     #[test]

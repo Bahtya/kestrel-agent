@@ -397,6 +397,28 @@ impl HeartbeatService {
         self.state.lock().last_snapshot.clone()
     }
 
+    /// Generate a comprehensive health report.
+    ///
+    /// Runs all registered health checks and produces a [`FullHealthReport`]
+    /// that aggregates per-component status with failure history. Useful for
+    /// HTTP endpoints and diagnostic tooling.
+    ///
+    /// Returns an error if the check cycle itself fails (should be rare).
+    pub async fn generate_full_report(&self) -> Result<FullHealthReport> {
+        let snapshot = self.run_checks().await?;
+        let state = self.state.lock().clone();
+        Ok(FullHealthReport::from_snapshot(&snapshot, &state))
+    }
+
+    /// Generate a report from the last cached snapshot without re-running checks.
+    ///
+    /// Returns `None` if no checks have been run yet.
+    pub fn cached_full_report(&self) -> Option<FullHealthReport> {
+        let state = self.state.lock();
+        let snapshot = state.last_snapshot.as_ref()?;
+        Some(FullHealthReport::from_snapshot(snapshot, &state))
+    }
+
     /// Persist state to disk.
     fn persist_state(&self) -> Result<()> {
         let state = self.state.lock();
@@ -1124,5 +1146,86 @@ mod tests {
             }
         }
         assert_eq!(change_count, 0, "Should not emit change when status unchanged");
+    }
+
+    // === Full health report ===
+
+    #[tokio::test]
+    async fn test_generate_full_report_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        svc.register_check(Arc::new(MockCheck {
+            name: "comp_a".to_string(),
+            healthy: true,
+        }));
+        svc.register_check(Arc::new(MockCheck {
+            name: "comp_b".to_string(),
+            healthy: true,
+        }));
+
+        let report = svc.generate_full_report().await.unwrap();
+        assert_eq!(report.overall_status, "healthy");
+        assert_eq!(report.total_components, 2);
+        assert_eq!(report.healthy_count, 2);
+        assert_eq!(report.failed_count, 0);
+        assert_eq!(report.components.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_generate_full_report_unhealthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        svc.register_check(Arc::new(MockCheck {
+            name: "healthy_comp".to_string(),
+            healthy: true,
+        }));
+        svc.register_check(Arc::new(MockCheck {
+            name: "broken_comp".to_string(),
+            healthy: false,
+        }));
+
+        let report = svc.generate_full_report().await.unwrap();
+        assert_eq!(report.overall_status, "unhealthy");
+        assert_eq!(report.healthy_count, 1);
+        assert_eq!(report.failed_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cached_full_report_none_initially() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        assert!(svc.cached_full_report().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cached_full_report_after_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        svc.register_check(Arc::new(MockCheck {
+            name: "comp".to_string(),
+            healthy: true,
+        }));
+
+        svc.run_checks().await.unwrap();
+        let report = svc.cached_full_report();
+        assert!(report.is_some());
+        assert_eq!(report.unwrap().overall_status, "healthy");
+    }
+
+    #[tokio::test]
+    async fn test_full_report_tracks_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        svc.register_check(Arc::new(MockCheck {
+            name: "comp".to_string(),
+            healthy: true,
+        }));
+
+        // Run checks twice
+        svc.run_checks().await.unwrap();
+        svc.run_checks().await.unwrap();
+
+        let report = svc.generate_full_report().await.unwrap();
+        assert_eq!(report.total_checks_run, 3); // 2 from run_checks + 1 from generate_full_report
     }
 }

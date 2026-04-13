@@ -895,6 +895,24 @@ impl SubAgentSpawner for SubAgentManager {
         Ok(handle.id)
     }
 
+    async fn spawn_with_timeout(
+        &self,
+        name: &str,
+        prompt: &str,
+        context: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<String> {
+        let arc_self: Arc<Self> = Arc::new(Self {
+            config: self.config.clone(),
+            providers: self.providers.clone(),
+            tools: self.tools.clone(),
+            tasks: self.tasks.clone(),
+            manager_config: self.manager_config.clone(),
+        });
+        let handle = arc_self.spawn_single(name, prompt, context, timeout_secs).await?;
+        Ok(handle.id)
+    }
+
     async fn status(&self, task_id: &str) -> Option<SpawnStatus> {
         let tasks = self.tasks.read().await;
         tasks
@@ -2021,5 +2039,40 @@ mod tests {
         };
         assert_eq!(config.max_tasks, 10);
         assert_eq!(config.default_timeout_secs, 300);
+    }
+
+    // ─── spawn_with_timeout tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_spawn_with_custom_timeout() {
+        let mgr = make_manager_with_mock(MockProvider::simple("hello"));
+        let arc = Arc::new(mgr);
+
+        // Use spawn_with_timeout via the SubAgentSpawner trait
+        let spawner: Arc<dyn SubAgentSpawner> = arc.clone();
+        let id = spawner
+            .spawn_with_timeout("timeout-test", "Say hello", None, Some(5))
+            .await
+            .unwrap();
+
+        // Task should be tracked
+        let status = spawner.status(&id).await.unwrap();
+        assert!(matches!(status, SpawnStatus::Running | SpawnStatus::Completed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_default_timeout() {
+        let mgr = make_manager_with_mock(MockProvider::simple("hello"));
+        let arc = Arc::new(mgr);
+
+        let spawner: Arc<dyn SubAgentSpawner> = arc.clone();
+        // None = use default from config (120s)
+        let id = spawner
+            .spawn_with_timeout("default-timeout", "Say hi", None, None)
+            .await
+            .unwrap();
+
+        let status = spawner.status(&id).await;
+        assert!(status.is_some());
     }
 }

@@ -140,7 +140,11 @@ impl AgentLoop {
     /// Process a single inbound message.
     pub async fn process_message(&self, msg: InboundMessage) -> Result<()> {
         let session_key = msg.session_key();
-        info!("Processing message from session: {}", session_key);
+        info!(
+            session_key = %session_key,
+            channel = %msg.channel,
+            "Processing message"
+        );
 
         // Emit started event
         let started_event = AgentEvent::Started {
@@ -170,8 +174,10 @@ impl AgentLoop {
                 Ok(result) => {
                     if result.messages_after < result.messages_before {
                         info!(
-                            "Context compacted: {} → {} messages",
-                            result.messages_before, result.messages_after
+                            session_key = %session_key,
+                            before = result.messages_before,
+                            after = result.messages_after,
+                            "Context compacted"
                         );
                     }
                 }
@@ -184,9 +190,10 @@ impl AgentLoop {
         self.session_manager.save_session(&session)?;
 
         // Build context
-        let context_builder = ContextBuilder::new(&self.config);
-        let system_prompt =
-            context_builder.build_system_prompt(&msg, &session, &self.tool_registry)?;
+        let system_prompt = {
+            let context_builder = ContextBuilder::new(&self.config);
+            context_builder.build_system_prompt(&msg, &session, &self.tool_registry)?
+        };
 
         // Set up event callback for this session
         let bus_for_stream = self.bus.clone();
@@ -312,6 +319,7 @@ impl AgentLoop {
 
     /// Stop the agent loop.
     pub async fn stop(&self) {
+        info!("Stopping agent loop");
         *self.running.write().await = false;
     }
 

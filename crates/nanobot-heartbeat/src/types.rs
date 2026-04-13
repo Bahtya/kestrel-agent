@@ -224,6 +224,120 @@ impl Default for HealthCheckRegistry {
     }
 }
 
+// ─── FullHealthReport ─────────────────────────────────────────
+
+/// A comprehensive health report that aggregates all component checks
+/// with categorised breakdowns and failure history.
+///
+/// Produced by [`HeartbeatService::generate_full_report`](crate::HeartbeatService::generate_full_report).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullHealthReport {
+    /// Aggregate status: `"healthy"`, `"degraded"`, or `"unhealthy"`.
+    pub overall_status: String,
+    /// When this report was generated.
+    pub generated_at: DateTime<Local>,
+    /// Total number of checks registered.
+    pub total_components: usize,
+    /// Number of healthy components.
+    pub healthy_count: usize,
+    /// Number of degraded components.
+    pub degraded_count: usize,
+    /// Number of unhealthy components.
+    pub failed_count: usize,
+    /// Number of skipped components.
+    pub skipped_count: usize,
+    /// Details of each component check.
+    pub components: Vec<ComponentReport>,
+    /// Total checks performed since service start.
+    pub total_checks_run: usize,
+    /// Total failures seen since service start.
+    pub total_failures_seen: usize,
+    /// Number of restarts requested since service start.
+    pub restarts_requested: usize,
+}
+
+/// Per-component detail within a [`FullHealthReport`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentReport {
+    /// Component name.
+    pub name: String,
+    /// Check status string.
+    pub status: String,
+    /// Human-readable status message.
+    pub message: String,
+    /// Consecutive failures (0 if healthy).
+    pub consecutive_failures: usize,
+    /// Whether a restart is pending for this component.
+    pub restart_pending: bool,
+}
+
+impl FullHealthReport {
+    /// Build a full report from a snapshot and heartbeat state.
+    pub fn from_snapshot(snapshot: &HealthSnapshot, state: &HeartbeatState) -> Self {
+        let mut healthy = 0;
+        let mut degraded = 0;
+        let mut failed = 0;
+        let mut skipped = 0;
+
+        let components: Vec<ComponentReport> = snapshot
+            .checks
+            .iter()
+            .map(|c| {
+                match c.status {
+                    CheckStatus::Healthy => healthy += 1,
+                    CheckStatus::Degraded => degraded += 1,
+                    CheckStatus::Unhealthy => failed += 1,
+                    CheckStatus::Skipped => skipped += 1,
+                }
+
+                let failure = state
+                    .component_failures
+                    .iter()
+                    .find(|f| f.component == c.component);
+
+                ComponentReport {
+                    name: c.component.clone(),
+                    status: match c.status {
+                        CheckStatus::Healthy => "healthy".to_string(),
+                        CheckStatus::Degraded => "degraded".to_string(),
+                        CheckStatus::Unhealthy => "unhealthy".to_string(),
+                        CheckStatus::Skipped => "skipped".to_string(),
+                    },
+                    message: c.message.clone(),
+                    consecutive_failures: failure
+                        .map(|f| f.consecutive_failures)
+                        .unwrap_or(0),
+                    restart_pending: failure
+                        .map(|f| f.restart_pending)
+                        .unwrap_or(false),
+                }
+            })
+            .collect();
+
+        let overall_status = if !snapshot.healthy {
+            "unhealthy".to_string()
+        } else if snapshot.degraded {
+            "degraded".to_string()
+        } else {
+            "healthy".to_string()
+        };
+
+        Self {
+            overall_status,
+            generated_at: Local::now(),
+            total_components: snapshot.checks.len(),
+            healthy_count: healthy,
+            degraded_count: degraded,
+            failed_count: failed,
+            skipped_count: skipped,
+            components,
+            total_checks_run: state.total_checks,
+            total_failures_seen: state.total_failures,
+            restarts_requested: state.restarts_requested,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +657,103 @@ mod tests {
         let result = check.report_health().await;
         assert_eq!(result.status, CheckStatus::Unhealthy);
         assert_eq!(result.message, "failing");
+    }
+
+    // === FullHealthReport ===
+
+    #[test]
+    fn test_full_health_report_all_healthy() {
+        let snapshot = HealthSnapshot::from_checks(vec![
+            HealthCheckResult {
+                component: "a".to_string(),
+                status: CheckStatus::Healthy,
+                message: "ok".to_string(),
+                timestamp: Local::now(),
+            },
+            HealthCheckResult {
+                component: "b".to_string(),
+                status: CheckStatus::Skipped,
+                message: "n/a".to_string(),
+                timestamp: Local::now(),
+            },
+        ]);
+        let state = HeartbeatState {
+            total_checks: 5,
+            total_failures: 0,
+            ..Default::default()
+        };
+        let report = FullHealthReport::from_snapshot(&snapshot, &state);
+        assert_eq!(report.overall_status, "healthy");
+        assert_eq!(report.healthy_count, 1);
+        assert_eq!(report.skipped_count, 1);
+        assert_eq!(report.failed_count, 0);
+        assert_eq!(report.total_components, 2);
+        assert_eq!(report.total_checks_run, 5);
+    }
+
+    #[test]
+    fn test_full_health_report_mixed() {
+        let snapshot = HealthSnapshot::from_checks(vec![
+            HealthCheckResult {
+                component: "a".to_string(),
+                status: CheckStatus::Healthy,
+                message: "ok".to_string(),
+                timestamp: Local::now(),
+            },
+            HealthCheckResult {
+                component: "b".to_string(),
+                status: CheckStatus::Degraded,
+                message: "partial".to_string(),
+                timestamp: Local::now(),
+            },
+            HealthCheckResult {
+                component: "c".to_string(),
+                status: CheckStatus::Unhealthy,
+                message: "down".to_string(),
+                timestamp: Local::now(),
+            },
+        ]);
+        let state = HeartbeatState {
+            total_checks: 10,
+            total_failures: 3,
+            restarts_requested: 1,
+            component_failures: vec![ComponentFailureState {
+                component: "c".to_string(),
+                consecutive_failures: 3,
+                total_failures: 3,
+                restart_pending: true,
+                backoff_secs: 60,
+                last_failure_at: Some(Local::now()),
+                last_restart_at: None,
+            }],
+            ..Default::default()
+        };
+        let report = FullHealthReport::from_snapshot(&snapshot, &state);
+        assert_eq!(report.overall_status, "unhealthy");
+        assert_eq!(report.healthy_count, 1);
+        assert_eq!(report.degraded_count, 1);
+        assert_eq!(report.failed_count, 1);
+        assert_eq!(report.restarts_requested, 1);
+
+        // Component "c" should show failure details
+        let comp_c = report.components.iter().find(|c| c.name == "c").unwrap();
+        assert_eq!(comp_c.consecutive_failures, 3);
+        assert!(comp_c.restart_pending);
+    }
+
+    #[test]
+    fn test_full_health_report_serde_roundtrip() {
+        let snapshot = HealthSnapshot::from_checks(vec![HealthCheckResult {
+            component: "test".to_string(),
+            status: CheckStatus::Healthy,
+            message: "ok".to_string(),
+            timestamp: Local::now(),
+        }]);
+        let state = HeartbeatState::default();
+        let report = FullHealthReport::from_snapshot(&snapshot, &state);
+        let json = serde_json::to_string(&report).unwrap();
+        let back: FullHealthReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.overall_status, "healthy");
+        assert_eq!(back.total_components, 1);
     }
 }

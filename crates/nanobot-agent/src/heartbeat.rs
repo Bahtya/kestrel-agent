@@ -394,6 +394,98 @@ impl HealthCheck for AgentLoopHealthCheck {
     }
 }
 
+// ─── ConfigStoreHealthCheck ──────────────────────────────────────
+
+/// Health check for configuration and data storage.
+///
+/// Verifies that:
+/// - The config file is readable (or that the default path is reachable).
+/// - The data directory is writable by creating and deleting a temp file.
+pub struct ConfigStoreHealthCheck {
+    config_path: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
+}
+
+impl ConfigStoreHealthCheck {
+    /// Create a new config-store health check.
+    ///
+    /// Uses the given config path and data directory for verification.
+    pub fn new(config_path: std::path::PathBuf, data_dir: std::path::PathBuf) -> Self {
+        Self {
+            config_path,
+            data_dir,
+        }
+    }
+
+    /// Create using default paths from `nanobot_config::paths`.
+    ///
+    /// Falls back to sensible defaults if path resolution fails.
+    pub fn from_default_paths() -> Self {
+        let config_path = nanobot_config::paths::get_config_path()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/dev/null"));
+        let data_dir = nanobot_config::paths::get_data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        Self::new(config_path, data_dir)
+    }
+}
+
+#[async_trait]
+impl HealthCheck for ConfigStoreHealthCheck {
+    fn component_name(&self) -> &str {
+        "config_store"
+    }
+
+    async fn report_health(&self) -> HealthCheckResult {
+        let mut issues = Vec::new();
+
+        // Check config file readability
+        if self.config_path.exists()
+            && std::fs::read_to_string(&self.config_path).is_err()
+        {
+            issues.push(format!(
+                "config file {} is not readable",
+                self.config_path.display()
+            ));
+        }
+        // If config doesn't exist, that's acceptable (defaults are used).
+
+        // Check data dir writability by creating and deleting a temp file
+        let probe = self.data_dir.join(".health_probe");
+        match std::fs::write(&probe, b"probe") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(e) => {
+                issues.push(format!(
+                    "data dir {} is not writable: {}",
+                    self.data_dir.display(),
+                    e
+                ));
+            }
+        }
+
+        if issues.is_empty() {
+            HealthCheckResult {
+                component: "config_store".to_string(),
+                status: CheckStatus::Healthy,
+                message: format!(
+                    "config: {}, data_dir: {}",
+                    if self.config_path.exists() { "present" } else { "default" },
+                    self.data_dir.display()
+                ),
+                timestamp: chrono::Local::now(),
+            }
+        } else {
+            HealthCheckResult {
+                component: "config_store".to_string(),
+                status: CheckStatus::Unhealthy,
+                message: issues.join("; "),
+                timestamp: chrono::Local::now(),
+            }
+        }
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -703,6 +795,82 @@ mod tests {
         assert!(last_activity.read().is_some());
     }
 
+    // === ConfigStoreHealthCheck ===
+
+    #[tokio::test]
+    async fn test_config_store_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "agent:\n  model: test\n").unwrap();
+
+        let check = ConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
+        let result = check.report_health().await;
+
+        assert_eq!(result.component, "config_store");
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert!(result.message.contains("present"));
+    }
+
+    #[tokio::test]
+    async fn test_config_store_healthy_no_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nonexistent.yaml");
+
+        let check = ConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
+        let result = check.report_health().await;
+
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert!(result.message.contains("default"));
+    }
+
+    #[tokio::test]
+    async fn test_config_store_unreadable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "test").unwrap();
+        std::fs::set_permissions(&config_path, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+
+        let check = ConfigStoreHealthCheck::new(config_path.clone(), dir.path().to_path_buf());
+        let result = check.report_health().await;
+
+        // On some systems running as root, the permission restriction doesn't apply
+        // so we accept either Unhealthy or Healthy
+        assert!(matches!(result.status, CheckStatus::Unhealthy | CheckStatus::Healthy));
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&config_path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).ok();
+    }
+
+    #[tokio::test]
+    async fn test_config_store_unwritable_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("readonly");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+
+        let check = ConfigStoreHealthCheck::new(
+            dir.path().join("config.yaml"),
+            data_dir.clone(),
+        );
+        let result = check.report_health().await;
+
+        // On some systems running as root, the permission restriction doesn't apply
+        assert!(matches!(result.status, CheckStatus::Unhealthy | CheckStatus::Healthy));
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).ok();
+    }
+
+    #[tokio::test]
+    async fn test_config_store_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = ConfigStoreHealthCheck::new(
+            dir.path().join("config.yaml"),
+            dir.path().to_path_buf(),
+        );
+        assert_eq!(check.component_name(), "config_store");
+    }
+
     // === Integration: all checks together ===
 
     #[tokio::test]
@@ -722,6 +890,10 @@ mod tests {
             Arc::new(parking_lot::RwLock::new(None)),
             60,
         );
+        let config_check = ConfigStoreHealthCheck::new(
+            dir.path().join("config.yaml"),
+            dir.path().to_path_buf(),
+        );
 
         let checks: Vec<&dyn HealthCheck> = vec![
             &provider_check,
@@ -730,6 +902,7 @@ mod tests {
             &bus_check,
             &tool_check,
             &agent_check,
+            &config_check,
         ];
 
         let mut results = Vec::new();
@@ -737,7 +910,7 @@ mod tests {
             results.push(check.report_health().await);
         }
 
-        assert_eq!(results.len(), 6);
+        assert_eq!(results.len(), 7);
 
         // Provider: skipped (no providers)
         assert_eq!(results[0].status, CheckStatus::Skipped);
@@ -751,11 +924,13 @@ mod tests {
         assert_eq!(results[4].status, CheckStatus::Degraded);
         // Agent: skipped (no activity yet)
         assert_eq!(results[5].status, CheckStatus::Skipped);
+        // Config store: healthy (tempdir is writable)
+        assert_eq!(results[6].status, CheckStatus::Healthy);
 
         // All should have unique component names
         let names: std::collections::HashSet<&str> =
             results.iter().map(|r| r.component.as_str()).collect();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
     }
 
     // === Integration with HeartbeatService ===

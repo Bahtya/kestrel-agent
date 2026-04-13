@@ -191,12 +191,40 @@ impl HeartbeatService {
 
         let snapshot = HealthSnapshot::from_checks(checks);
 
+        // Detect state transitions and emit HealthStatusChanged event
+        let previous_status = {
+            let state = self.state.lock();
+            state
+                .last_snapshot
+                .as_ref()
+                .map(Self::aggregate_status)
+        };
+        let current_status = Self::aggregate_status(&snapshot);
+
         // Update persistent state and track failures
         {
             let mut state = self.state.lock();
             state.total_checks += 1;
             state.total_failures += snapshot.failed_count();
             state.last_snapshot = Some(snapshot.clone());
+        }
+
+        // Emit state change notification if status transitioned
+        if let Some(ref prev) = previous_status {
+            if prev != &current_status {
+                info!(
+                    "Health status changed: {} → {}",
+                    prev, current_status
+                );
+                if let Some(bus) = &self.bus {
+                    bus.emit_event(AgentEvent::HealthStatusChanged {
+                        from: prev.clone(),
+                        to: current_status.clone(),
+                        failed_count: snapshot.failed_count(),
+                        degraded_count: snapshot.degraded_count(),
+                    });
+                }
+            }
         }
 
         // Process failures and trigger restarts if needed
@@ -213,6 +241,17 @@ impl HeartbeatService {
 
         let _ = self.persist_state();
         Ok(snapshot)
+    }
+
+    /// Compute an aggregate status string from a snapshot.
+    fn aggregate_status(snapshot: &HealthSnapshot) -> String {
+        if !snapshot.healthy {
+            "unhealthy".to_string()
+        } else if snapshot.degraded {
+            "degraded".to_string()
+        } else {
+            "healthy".to_string()
+        }
     }
 
     /// Process check results, track consecutive failures, and trigger restarts.
@@ -351,6 +390,11 @@ impl HeartbeatService {
             .iter()
             .find(|f| f.component == name)
             .cloned()
+    }
+
+    /// Get the latest health snapshot, if one has been taken.
+    pub fn last_snapshot(&self) -> Option<HealthSnapshot> {
+        self.state.lock().last_snapshot.clone()
     }
 
     /// Persist state to disk.
@@ -958,5 +1002,127 @@ mod tests {
         let svc = HeartbeatService::with_data_dir(config, dir.path().to_path_buf())
             .with_failures_before_restart(0);
         assert_eq!(svc.failures_before_restart, 1);
+    }
+
+    // === Health status change notifications ===
+
+    #[tokio::test]
+    async fn test_health_status_changed_healthy_to_unhealthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = MessageBus::new();
+        let mut events_rx = bus.subscribe_events();
+        let mut svc = make_service(dir.path());
+        svc.set_bus(bus);
+
+        let check = Arc::new(ToggleCheck::new("comp", true));
+        svc.register_check(check.clone());
+
+        // First check — healthy (no previous, no change event)
+        svc.run_checks().await.unwrap();
+
+        // Now fail
+        check.set_healthy(false);
+        svc.run_checks().await.unwrap();
+
+        // Should receive: 2 HeartbeatCheck + 1 HealthStatusChanged = 3 events
+        let mut got_change = false;
+        for _ in 0..5 {
+            let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::HealthStatusChanged { from, to, .. } = &event {
+                assert_eq!(from, "healthy");
+                assert_eq!(to, "unhealthy");
+                got_change = true;
+                break;
+            }
+        }
+        assert!(got_change, "Expected HealthStatusChanged event");
+    }
+
+    #[tokio::test]
+    async fn test_health_status_changed_unhealthy_to_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = MessageBus::new();
+        let mut events_rx = bus.subscribe_events();
+        let mut svc = make_service(dir.path());
+        svc.set_bus(bus);
+
+        let check = Arc::new(ToggleCheck::new("comp", false));
+        svc.register_check(check.clone());
+
+        // Start unhealthy
+        svc.run_checks().await.unwrap();
+
+        // Now recover
+        check.set_healthy(true);
+        svc.run_checks().await.unwrap();
+
+        let mut got_change = false;
+        for _ in 0..5 {
+            let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::HealthStatusChanged { from, to, .. } = &event {
+                assert_eq!(from, "unhealthy");
+                assert_eq!(to, "healthy");
+                got_change = true;
+                break;
+            }
+        }
+        assert!(got_change, "Expected HealthStatusChanged event on recovery");
+    }
+
+    #[tokio::test]
+    async fn test_no_change_event_on_first_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = MessageBus::new();
+        let mut events_rx = bus.subscribe_events();
+        let mut svc = make_service(dir.path());
+        svc.set_bus(bus);
+
+        svc.register_check(Arc::new(MockCheck {
+            name: "comp".to_string(),
+            healthy: true,
+        }));
+
+        svc.run_checks().await.unwrap();
+
+        // Should only get HeartbeatCheck, no HealthStatusChanged
+        let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, AgentEvent::HeartbeatCheck { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_no_change_event_when_status_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = MessageBus::new();
+        let mut events_rx = bus.subscribe_events();
+        let mut svc = make_service(dir.path());
+        svc.set_bus(bus);
+
+        svc.register_check(Arc::new(MockCheck {
+            name: "comp".to_string(),
+            healthy: true,
+        }));
+
+        // Two checks, both healthy
+        svc.run_checks().await.unwrap();
+        svc.run_checks().await.unwrap();
+
+        // Should only get HeartbeatCheck events, no HealthStatusChanged
+        let mut change_count = 0;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_millis(100), events_rx.recv()).await {
+                Ok(Ok(AgentEvent::HealthStatusChanged { .. })) => change_count += 1,
+                _ => break,
+            }
+        }
+        assert_eq!(change_count, 0, "Should not emit change when status unchanged");
     }
 }

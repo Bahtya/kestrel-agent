@@ -170,6 +170,18 @@ pub enum AgentEvent {
     GatewayReidentify {
         platform: String,
     },
+
+    /// Health status changed (transition between healthy/degraded/unhealthy).
+    HealthStatusChanged {
+        /// Previous aggregate status.
+        from: String,
+        /// New aggregate status.
+        to: String,
+        /// Number of checks that are unhealthy.
+        failed_count: usize,
+        /// Number of checks that are degraded.
+        degraded_count: usize,
+    },
 }
 
 #[cfg(test)]

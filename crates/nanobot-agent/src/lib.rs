@@ -16,8 +16,8 @@ pub mod subagent;
 pub use compaction::{compact_session, CompactionConfig, CompactionResult, CompactionStrategy};
 pub use context::ContextBuilder;
 pub use heartbeat::{
-    AgentLoopHealthCheck, BusHealthCheck, ChannelHealthCheck, ProviderHealthCheck,
-    SessionStoreHealthCheck,
+    AgentLoopHealthCheck, BusHealthCheck, ChannelHealthCheck, ConfigStoreHealthCheck,
+    ProviderHealthCheck, SessionStoreHealthCheck,
 };
 pub use hook::{AgentHook, CompositeHook};
 pub use loop_mod::{AgentLoop, HeartbeatHandle};

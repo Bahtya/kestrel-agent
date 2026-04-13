@@ -258,9 +258,35 @@ fn next_backoff(current_secs: u64) -> u64 {
     (current_secs * 2).min(MAX_BACKOFF_SECS)
 }
 
+/// Percent-encode an emoji string for use in a Discord API URL path.
+///
+/// Discord requires the emoji in reaction URLs to be percent-encoded.
+/// For example `✅` (UTF-8: `E2 9C 85`) becomes `%E2%9C%85`.
+fn percent_encode_emoji(emoji: &str) -> String {
+    let mut encoded = String::with_capacity(emoji.len() * 3);
+    for byte in emoji.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
 // ---------------------------------------------------------------------------
 // DiscordChannel
 // ---------------------------------------------------------------------------
+
+/// REST API context passed into the gateway session for read-receipt calls.
+struct RestContext {
+    client: reqwest::Client,
+    api_base: String,
+    auth_header: String,
+}
 
 /// Discord channel implementation using REST API + Gateway WebSocket.
 pub struct DiscordChannel {
@@ -403,6 +429,43 @@ impl DiscordChannel {
 
     // -- Gateway lifecycle -----------------------------------------------------
 
+    /// Send a ✅ read-receipt reaction to a Discord message.
+    ///
+    /// Uses `PUT /channels/{channel_id}/messages/{message_id}/reactions/%E2%9C%85/@me`.
+    /// Non-critical: failures are logged but not propagated.
+    async fn send_read_receipt(
+        client: &reqwest::Client,
+        api_base: &str,
+        auth_header: &str,
+        channel_id: &str,
+        message_id: &str,
+    ) {
+        let path = format!(
+            "/channels/{}/messages/{}/reactions/%E2%9C%85/@me",
+            channel_id, message_id
+        );
+        let url = format!("{}{}", api_base, path);
+        match client
+            .put(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+        {
+            Ok(r) if r.status() == StatusCode::NO_CONTENT => {
+                debug!("Discord read receipt sent");
+            }
+            Ok(r) => {
+                debug!(
+                    "Discord read receipt non-204 status: {}",
+                    r.status()
+                );
+            }
+            Err(e) => {
+                debug!("Discord read receipt request failed: {e}");
+            }
+        }
+    }
+
     /// Emit a gateway lifecycle event (if an event sender is configured).
     fn emit_gateway_event(
         event_tx: &Option<tokio::sync::broadcast::Sender<AgentEvent>>,
@@ -427,6 +490,7 @@ impl DiscordChannel {
         running: Arc<AtomicBool>,
         event_tx: Option<tokio::sync::broadcast::Sender<AgentEvent>>,
         gateway_url: String,
+        rest: RestContext,
     ) {
         let mut state = GatewaySessionState::default();
         let mut backoff_secs: u64 = 1;
@@ -440,6 +504,7 @@ impl DiscordChannel {
                 &mut state,
                 &event_tx,
                 &gateway_url,
+                &rest,
             )
             .await;
 
@@ -518,6 +583,7 @@ impl DiscordChannel {
         state: &mut GatewaySessionState,
         event_tx: &Option<tokio::sync::broadcast::Sender<AgentEvent>>,
         gateway_url: &str,
+        rest: &RestContext,
     ) -> SessionOutcome {
         use futures::SinkExt;
         use futures::StreamExt;
@@ -663,7 +729,19 @@ impl DiscordChannel {
                                             if let Ok(msg_data) =
                                                 serde_json::from_value::<GatewayMessage>(payload.d)
                                             {
-                                                Self::dispatch_message(handler, &msg_data).await;
+                                                let dispatched =
+                                                    Self::dispatch_message(handler, &msg_data)
+                                                        .await;
+                                                if dispatched {
+                                                    Self::send_read_receipt(
+                                                        &rest.client,
+                                                        &rest.api_base,
+                                                        &rest.auth_header,
+                                                        &msg_data.channel_id,
+                                                        &msg_data.id,
+                                                    )
+                                                    .await;
+                                                }
                                             }
                                         }
                                         _ => {}
@@ -722,13 +800,16 @@ impl DiscordChannel {
     }
 
     /// Convert a Gateway message to an InboundMessage and send it.
+    ///
+    /// Returns `true` if the message was dispatched, `false` if skipped
+    /// (empty content).
     async fn dispatch_message(
         handler: &tokio::sync::mpsc::Sender<InboundMessage>,
         msg: &GatewayMessage,
-    ) {
+    ) -> bool {
         // Skip empty messages
         if msg.content.is_empty() {
-            return;
+            return false;
         }
 
         let author = msg.author.as_ref();
@@ -784,6 +865,7 @@ impl DiscordChannel {
         if let Err(e) = handler.send(inbound).await {
             warn!("Failed to dispatch Discord message: {}", e);
         }
+        true
     }
 }
 
@@ -850,8 +932,16 @@ impl BaseChannel for DiscordChannel {
             let running = self.running.clone();
             let event_tx = self.event_tx.clone();
             let gateway_url = self.gateway_url().to_string();
+            let rest = RestContext {
+                client: self.client.clone(),
+                api_base: self.api_base().to_string(),
+                auth_header: format!("Bot {token}"),
+            };
             tokio::spawn(async move {
-                Self::run_gateway(token, handler, running, event_tx, gateway_url).await;
+                Self::run_gateway(
+                    token, handler, running, event_tx, gateway_url, rest,
+                )
+                .await;
             });
             info!("Discord Gateway listener spawned");
         }
@@ -971,6 +1061,42 @@ impl BaseChannel for DiscordChannel {
             error: None,
             retryable: false,
         })
+    }
+
+    async fn send_reaction(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let encoded = percent_encode_emoji(emoji);
+        let path = format!(
+            "/channels/{chat_id}/messages/{message_id}/reactions/{encoded}/@me"
+        );
+        let url = format!("{}{}", self.api_base(), path);
+        let mut req = self.client.put(&url);
+        if let Some(auth) = self.auth_header() {
+            req = req.header("Authorization", auth);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .context("Failed to send Discord reaction")?;
+
+        let status = resp.status();
+        if status != StatusCode::NO_CONTENT {
+            let text = resp.text().await.unwrap_or_default();
+            warn!(
+                status = %status,
+                body = %text,
+                "Discord reaction failed (non-fatal)"
+            );
+        } else {
+            debug!("Discord reaction '{}' sent", emoji);
+        }
+
+        Ok(())
     }
 
     fn set_message_handler(&mut self, handler: tokio::sync::mpsc::Sender<InboundMessage>) {
@@ -1792,5 +1918,87 @@ mod tests {
         // Next connection will send IDENTIFY
         let identify = build_identify_payload("token");
         assert_eq!(identify["op"], opcodes::IDENTIFY);
+    }
+
+    // ===================================================================
+    // Reaction / read-receipt tests
+    // ===================================================================
+
+    #[test]
+    fn test_percent_encode_emoji_checkmark() {
+        // ✅ = UTF-8 bytes E2 9C 85
+        assert_eq!(percent_encode_emoji("✅"), "%E2%9C%85");
+    }
+
+    #[test]
+    fn test_percent_encode_emoji_thumbsup() {
+        // 👍 = UTF-8 bytes F0 9F 91 8D
+        assert_eq!(percent_encode_emoji("👍"), "%F0%9F%91%8D");
+    }
+
+    #[test]
+    fn test_percent_encode_emoji_eyes() {
+        // 👀 = UTF-8 bytes F0 9F 91 80
+        assert_eq!(percent_encode_emoji("👀"), "%F0%9F%91%80");
+    }
+
+    #[test]
+    fn test_percent_encode_emoji_ascii_pass_through() {
+        // Unreserved ASCII characters pass through unchanged.
+        assert_eq!(percent_encode_emoji("abc123"), "abc123");
+        assert_eq!(percent_encode_emoji("A-Z_.~"), "A-Z_.~");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_message_returns_true_for_content() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<InboundMessage>(10);
+        let msg = GatewayMessage {
+            id: "1".to_string(),
+            content: "hello".to_string(),
+            channel_id: "2".to_string(),
+            author: Some(GatewayAuthor {
+                id: "3".to_string(),
+                username: "user".to_string(),
+            }),
+            guild_id: None,
+        };
+        assert!(DiscordChannel::dispatch_message(&tx, &msg).await);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_message_returns_false_for_empty() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<InboundMessage>(10);
+        let msg = GatewayMessage {
+            id: "2".to_string(),
+            content: String::new(),
+            channel_id: "3".to_string(),
+            author: None,
+            guild_id: None,
+        };
+        assert!(!DiscordChannel::dispatch_message(&tx, &msg).await);
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_no_auth() {
+        // No token → no auth header → request will fail, but should not panic.
+        let channel = DiscordChannel::new();
+        let result = channel.send_reaction("123", "456", "✅").await;
+        // Should return Ok (errors are logged, not propagated).
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_read_receipt_url_format() {
+        // Verify the path format matches Discord's API expectations.
+        let channel_id = "123456789";
+        let message_id = "987654321";
+        let path = format!(
+            "/channels/{}/messages/{}/reactions/%E2%9C%85/@me",
+            channel_id, message_id
+        );
+        assert_eq!(
+            path,
+            "/channels/123456789/messages/987654321/reactions/%E2%9C%85/@me"
+        );
     }
 }

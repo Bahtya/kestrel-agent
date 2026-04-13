@@ -10,6 +10,7 @@ use nanobot_core::Platform;
 enum MockMethod {
     Get,
     Post,
+    Put,
     Patch,
     Delete,
 }
@@ -48,6 +49,7 @@ async fn start_mock_discord_server(
         let method_matches = match expected_method {
             MockMethod::Get => request_line.starts_with("GET"),
             MockMethod::Post => request_line.starts_with("POST"),
+            MockMethod::Put => request_line.starts_with("PUT"),
             MockMethod::Patch => request_line.starts_with("PATCH"),
             MockMethod::Delete => request_line.starts_with("DELETE"),
         };
@@ -259,4 +261,32 @@ async fn test_discord_delete_message_forbidden() {
     let result = channel.delete_message("12345", "other_msg").await.unwrap();
     assert!(!result.success);
     assert!(!result.retryable);
+}
+
+#[tokio::test]
+async fn test_discord_send_reaction_with_mock() {
+    // PUT /channels/{id}/messages/{id}/reactions/{emoji}/@me → 204 No Content
+    let (port, _handle) = start_mock_discord_server("", 204, MockMethod::Put).await;
+
+    let channel = DiscordChannel::with_token_and_url(
+        "test-bot-token".to_string(),
+        format!("http://127.0.0.1:{}/", port),
+    );
+
+    let result = channel.send_reaction("12345", "111222333", "✅").await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_discord_send_typing_with_mock() {
+    // POST /channels/{id}/typing → 204 No Content
+    let (port, _handle) = start_mock_discord_server("", 204, MockMethod::Post).await;
+
+    let channel = DiscordChannel::with_token_and_url(
+        "test-bot-token".to_string(),
+        format!("http://127.0.0.1:{}/", port),
+    );
+
+    let result = channel.send_typing("12345").await;
+    assert!(result.is_ok());
 }

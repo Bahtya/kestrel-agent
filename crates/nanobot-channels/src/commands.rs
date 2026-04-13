@@ -62,6 +62,10 @@ pub fn try_handle_command(text: &str) -> Option<CommandResponse> {
         })
     } else if matches_command(text, "menu") {
         Some(handle_menu())
+    } else if matches_command(text, "settings") {
+        Some(handle_settings_callback(0))
+    } else if matches_command(text, "history") {
+        Some(handle_history(&[], 0))
     } else {
         None
     }
@@ -129,6 +133,206 @@ pub fn handle_menu_callback(action: &str) -> (String, Option<InlineKeyboardMarku
             Some(menu_keyboard()),
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// /settings implementation
+// ---------------------------------------------------------------------------
+
+/// Number of settings items displayed per page.
+pub const SETTINGS_PER_PAGE: usize = 5;
+
+/// Collect config settings into a flat list of "key: value" strings.
+fn collect_settings(config: &Config) -> Vec<String> {
+    let mut settings = Vec::new();
+
+    let name = config.name.as_deref().unwrap_or("(unnamed)");
+    settings.push(format!("Name: {}", name));
+    settings.push(format!("Model: {}", config.agent.model));
+    settings.push(format!("Streaming: {}", config.agent.streaming));
+    settings.push(format!("Max tokens: {}", config.agent.max_tokens));
+    settings.push(format!("Temperature: {}", config.agent.temperature));
+
+    // Providers
+    let mut providers: Vec<&str> = Vec::new();
+    if config.providers.anthropic.is_some() {
+        providers.push("anthropic");
+    }
+    if config.providers.openai.is_some() {
+        providers.push("openai");
+    }
+    if config.providers.openrouter.is_some() {
+        providers.push("openrouter");
+    }
+    if config.providers.ollama.is_some() {
+        providers.push("ollama");
+    }
+    if config.providers.deepseek.is_some() {
+        providers.push("deepseek");
+    }
+    if config.providers.gemini.is_some() {
+        providers.push("gemini");
+    }
+    if config.providers.groq.is_some() {
+        providers.push("groq");
+    }
+    if config.providers.moonshot.is_some() {
+        providers.push("moonshot");
+    }
+    if config.providers.minimax.is_some() {
+        providers.push("minimax");
+    }
+    if config.providers.azure_openai.is_some() {
+        providers.push("azure_openai");
+    }
+    if config.providers.github_copilot.is_some() {
+        providers.push("github_copilot");
+    }
+    if config.providers.openai_codex.is_some() {
+        providers.push("openai_codex");
+    }
+    for cp in &config.custom_providers {
+        providers.push(&cp.name);
+    }
+    if providers.is_empty() {
+        providers.push("(none)");
+    }
+    settings.push(format!("Providers: {}", providers.join(", ")));
+
+    // Channels
+    let mut channels: Vec<String> = Vec::new();
+    if let Some(ref tg) = config.channels.telegram {
+        let state = if tg.enabled { "enabled" } else { "disabled" };
+        channels.push(format!("telegram ({})", state));
+    }
+    if let Some(ref dc) = config.channels.discord {
+        let state = if dc.enabled { "enabled" } else { "disabled" };
+        channels.push(format!("discord ({})", state));
+    }
+    if config.channels.slack.is_some() {
+        channels.push("slack".to_string());
+    }
+    if config.channels.matrix.is_some() {
+        channels.push("matrix".to_string());
+    }
+    if config.channels.whatsapp.is_some() {
+        channels.push("whatsapp".to_string());
+    }
+    if config.channels.email.is_some() {
+        channels.push("email".to_string());
+    }
+    if config.channels.dingtalk.is_some() {
+        channels.push("dingtalk".to_string());
+    }
+    if config.channels.feishu.is_some() {
+        channels.push("feishu".to_string());
+    }
+    if config.channels.wecom.is_some() {
+        channels.push("wecom".to_string());
+    }
+    if config.channels.weixin.is_some() {
+        channels.push("weixin".to_string());
+    }
+    if config.channels.qq.is_some() {
+        channels.push("qq".to_string());
+    }
+    if config.channels.mochat.is_some() {
+        channels.push("mochat".to_string());
+    }
+    if channels.is_empty() {
+        channels.push("(none)".to_string());
+    }
+    settings.push(format!("Channels: {}", channels.join(", ")));
+
+    settings
+}
+
+/// Build a paginated settings view from a loaded config.
+///
+/// Returns a `CommandResponse` with the current page's settings text and
+/// a pagination keyboard when there are multiple pages.
+pub fn handle_settings(config: &Config, page: usize) -> CommandResponse {
+    let settings = collect_settings(config);
+    let total_pages = settings.len().div_ceil(SETTINGS_PER_PAGE);
+    let total_pages = total_pages.max(1);
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let start = page * SETTINGS_PER_PAGE;
+    let end = (start + SETTINGS_PER_PAGE).min(settings.len());
+
+    let mut text = format!("Settings (page {}/{}):\n\n", page + 1, total_pages);
+    for s in &settings[start..end] {
+        let _ = writeln!(text, "  {}", s);
+    }
+
+    let keyboard = if total_pages > 1 {
+        Some(InlineKeyboardBuilder::pagination("settings", page, total_pages).build())
+    } else {
+        None
+    };
+
+    CommandResponse { text, keyboard }
+}
+
+/// Handle a `/settings` command or settings pagination callback.
+///
+/// Loads the config from the default path and returns the paginated view.
+pub fn handle_settings_callback(page: usize) -> CommandResponse {
+    let config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResponse {
+                text: format!("Failed to load config: {e}"),
+                keyboard: None,
+            }
+        }
+    };
+    handle_settings(&config, page)
+}
+
+// ---------------------------------------------------------------------------
+// /history implementation
+// ---------------------------------------------------------------------------
+
+/// Number of history sessions displayed per page.
+pub const HISTORY_PER_PAGE: usize = 5;
+
+/// Build a paginated session-history view from a list of session keys.
+///
+/// Returns a `CommandResponse` with the current page's session list and
+/// a pagination keyboard when there are multiple pages.
+pub fn handle_history(session_keys: &[String], page: usize) -> CommandResponse {
+    if session_keys.is_empty() {
+        return CommandResponse {
+            text: "No active sessions.".to_string(),
+            keyboard: None,
+        };
+    }
+
+    let total_pages = session_keys.len().div_ceil(HISTORY_PER_PAGE);
+    let total_pages = total_pages.max(1);
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let start = page * HISTORY_PER_PAGE;
+    let end = (start + HISTORY_PER_PAGE).min(session_keys.len());
+
+    let mut text = format!("Sessions (page {}/{}):\n\n", page + 1, total_pages);
+    for (i, key) in session_keys[start..end].iter().enumerate() {
+        let _ = writeln!(text, "  {}. {}", start + i + 1, key);
+    }
+
+    let keyboard = if total_pages > 1 {
+        Some(InlineKeyboardBuilder::pagination("history", page, total_pages).build())
+    } else {
+        None
+    };
+
+    CommandResponse { text, keyboard }
+}
+
+/// Handle a `/history` pagination callback with the provided session keys.
+pub fn handle_history_callback(session_keys: &[String], page: usize) -> CommandResponse {
+    handle_history(session_keys, page)
 }
 
 // ---------------------------------------------------------------------------
@@ -578,5 +782,172 @@ providers:
         let (text, kb) = handle_menu_callback("nonexistent");
         assert!(text.contains("Unknown action"));
         assert!(kb.is_some());
+    }
+
+    // -- /settings tests -------------------------------------------------------
+
+    #[test]
+    fn test_try_handle_command_settings() {
+        let _dir = with_temp_config("providers:\n  openai:\n    api_key: sk-test\n");
+        let result = try_handle_command("/settings");
+        assert!(result.is_some());
+        let resp = result.unwrap();
+        assert!(resp.text.contains("Settings"));
+        assert!(resp.text.contains("page 1/"));
+    }
+
+    #[test]
+    fn test_handle_settings_single_page() {
+        let yaml = r#"
+providers:
+  openai:
+    api_key: "sk-test"
+"#;
+        let _dir = with_temp_config(yaml);
+        let resp = handle_settings_callback(0);
+        // Page 0 contains Name, Model, Streaming, Max tokens, Temperature.
+        assert!(resp.text.contains("Model:"));
+        assert!(resp.text.contains("Settings"));
+    }
+
+    #[test]
+    fn test_handle_settings_first_page() {
+        let _dir = with_empty_home();
+        let resp = handle_settings_callback(0);
+        assert!(resp.text.contains("page 1/"));
+        assert!(resp.text.contains("Name:"));
+    }
+
+    #[test]
+    fn test_handle_settings_page_clamped_to_last() {
+        let _dir = with_empty_home();
+        // Requesting page 999 should clamp to the last valid page.
+        let resp = handle_settings_callback(999);
+        // Should not panic and should still show settings.
+        assert!(resp.text.contains("Settings"));
+    }
+
+    #[test]
+    fn test_handle_settings_shows_name() {
+        let yaml = r#"
+name: "mybot"
+providers:
+  openai:
+    api_key: "sk-test"
+"#;
+        let _dir = with_temp_config(yaml);
+        let resp = handle_settings_callback(0);
+        assert!(resp.text.contains("mybot"));
+    }
+
+    #[test]
+    fn test_handle_settings_shows_providers() {
+        let yaml = r#"
+providers:
+  openai:
+    api_key: "sk-test"
+  anthropic:
+    api_key: "sk-ant-test"
+"#;
+        let _dir = with_temp_config(yaml);
+        // Providers are on page 1 (index 5+ out of 7 settings with page size 5).
+        let resp = handle_settings_callback(1);
+        assert!(resp.text.contains("openai"));
+        assert!(resp.text.contains("anthropic"));
+    }
+
+    #[test]
+    fn test_handle_settings_no_providers() {
+        let yaml = "# empty\n";
+        let _dir = with_temp_config(yaml);
+        // Providers on page 1.
+        let resp = handle_settings_callback(1);
+        assert!(resp.text.contains("(none)") || resp.text.contains("Providers:"));
+    }
+
+    // -- /history tests --------------------------------------------------------
+
+    #[test]
+    fn test_try_handle_command_history() {
+        let result = try_handle_command("/history");
+        assert!(result.is_some());
+        let resp = result.unwrap();
+        assert_eq!(resp.text, "No active sessions.");
+        assert!(resp.keyboard.is_none());
+    }
+
+    #[test]
+    fn test_handle_history_empty() {
+        let resp = handle_history(&[], 0);
+        assert_eq!(resp.text, "No active sessions.");
+        assert!(resp.keyboard.is_none());
+    }
+
+    #[test]
+    fn test_handle_history_single_page() {
+        let keys: Vec<String> = vec![
+            "telegram:123".to_string(),
+            "discord:456".to_string(),
+        ];
+        let resp = handle_history(&keys, 0);
+        assert!(resp.text.contains("Sessions"));
+        assert!(resp.text.contains("telegram:123"));
+        assert!(resp.text.contains("discord:456"));
+        assert!(resp.keyboard.is_none());
+    }
+
+    #[test]
+    fn test_handle_history_multi_page() {
+        let keys: Vec<String> = (0..12)
+            .map(|i| format!("session:{}", i))
+            .collect();
+        let resp = handle_history(&keys, 0);
+        assert!(resp.text.contains("page 1/"));
+        assert!(resp.keyboard.is_some());
+        let kb = resp.keyboard.unwrap();
+        // First page has Next button.
+        let row = &kb.inline_keyboard[0];
+        assert!(row.iter().any(|b| b.text.contains("Next")));
+    }
+
+    #[test]
+    fn test_handle_history_second_page() {
+        let keys: Vec<String> = (0..12)
+            .map(|i| format!("session:{}", i))
+            .collect();
+        let resp = handle_history(&keys, 1);
+        assert!(resp.text.contains("page 2/"));
+        // Page 2 should show items 6-11 (0-indexed 5-11, but 1-indexed 6-12).
+        assert!(resp.text.contains("session:5"));
+        assert!(!resp.text.contains("session:4"));
+    }
+
+    #[test]
+    fn test_handle_history_page_clamped() {
+        let keys: Vec<String> = vec!["a".to_string(), "b".to_string()];
+        let resp = handle_history(&keys, 999);
+        // Should clamp to page 0 and not panic.
+        assert!(resp.text.contains("a"));
+    }
+
+    #[test]
+    fn test_handle_history_callback_delegates() {
+        let keys: Vec<String> = vec!["x".to_string(), "y".to_string()];
+        let resp = handle_history_callback(&keys, 0);
+        assert!(resp.text.contains("x"));
+        assert!(resp.text.contains("y"));
+    }
+
+    #[test]
+    fn test_handle_history_shows_index_numbers() {
+        let keys: Vec<String> = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+        ];
+        let resp = handle_history(&keys, 0);
+        assert!(resp.text.contains("1. alpha"));
+        assert!(resp.text.contains("2. beta"));
+        assert!(resp.text.contains("3. gamma"));
     }
 }

@@ -10,6 +10,10 @@ pub mod registry;
 
 pub use base::BaseChannel;
 pub use commands::CommandResponse;
+pub use commands::{
+    handle_history, handle_history_callback, handle_settings, handle_settings_callback,
+    HISTORY_PER_PAGE, SETTINGS_PER_PAGE,
+};
 pub use manager::ChannelManager;
 pub use platforms::telegram::{
     CallbackAction, CallbackContext, CallbackResponse, CallbackRouter, InlineKeyboardBuilder,

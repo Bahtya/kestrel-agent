@@ -1140,6 +1140,7 @@ dependencies = [
  "nanobot-bus",
  "nanobot-config",
  "nanobot-core",
+ "nanobot-session",
  "parking_lot",
  "reqwest",
  "serde",

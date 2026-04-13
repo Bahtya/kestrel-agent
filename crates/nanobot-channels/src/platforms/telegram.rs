@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
+use parking_lot::Mutex as ParkMutex;
 
 use nanobot_bus::events::InboundMessage;
 use nanobot_core::{MediaAttachment, MessageType, Platform, SessionSource};
@@ -181,6 +182,8 @@ struct AnswerCallbackQueryBody {
     callback_query_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    show_alert: Option<bool>,
 }
 
 /// A single reaction entry for `setMessageReaction`.
@@ -520,6 +523,8 @@ pub struct TelegramChannel {
     base_url_override: Option<String>,
     /// Optional callback router for inline-keyboard button interactions.
     router: Arc<tokio::sync::Mutex<CallbackRouter>>,
+    /// Shared session keys for `/history` display.
+    session_keys: Arc<ParkMutex<Vec<String>>>,
 }
 
 impl TelegramChannel {
@@ -565,6 +570,7 @@ impl TelegramChannel {
             client: Self::build_client(),
             base_url_override: None,
             router: Arc::new(tokio::sync::Mutex::new(CallbackRouter::new())),
+            session_keys: Arc::new(ParkMutex::new(Vec::new())),
         }
     }
 
@@ -582,6 +588,7 @@ impl TelegramChannel {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             base_url_override: Some(base_url),
             router: Arc::new(tokio::sync::Mutex::new(CallbackRouter::new())),
+            session_keys: Arc::new(ParkMutex::new(Vec::new())),
         }
     }
 
@@ -980,7 +987,7 @@ impl TelegramChannel {
             if let Some(response) = router_guard.dispatch(ctx).await {
                 drop(router_guard);
                 // Answer the callback query so the button stops loading.
-                Self::answer_callback_query_static(client, base_url, &cq.id, None).await;
+                Self::answer_callback_query_static(client, base_url, &cq.id, None, false).await;
                 Self::execute_callback_response(client, base_url, &chat_id, &message_id, response)
                     .await;
                 return Ok(());
@@ -988,7 +995,7 @@ impl TelegramChannel {
         }
 
         // No handler matched — answer and fall through to the bus.
-        Self::answer_callback_query_static(client, base_url, &cq.id, None).await;
+        Self::answer_callback_query_static(client, base_url, &cq.id, None, false).await;
 
         let user_name = cq.from.as_ref().map(|u| {
             let first = u.first_name.as_deref().unwrap_or("");
@@ -1066,10 +1073,12 @@ impl TelegramChannel {
         base_url: &str,
         callback_query_id: &str,
         text: Option<&str>,
+        show_alert: bool,
     ) {
         let body = AnswerCallbackQueryBody {
             callback_query_id: callback_query_id.to_string(),
             text: text.map(|s| s.to_string()),
+            show_alert: if show_alert { Some(true) } else { None },
         };
         let url = format!("{}/answerCallbackQuery", base_url);
         if let Err(e) = client.post(&url).json(&body).send().await {
@@ -1147,27 +1156,69 @@ impl TelegramChannel {
 
     /// Register built-in callback handlers for inline keyboard buttons.
     ///
-    /// Currently handles the `menu` prefix used by `/menu` command.
-    fn register_default_handlers(router: &Arc<tokio::sync::Mutex<CallbackRouter>>) {
-        let mut r = router.blocking_lock();
-        if r.has_handler("menu") {
-            return; // Already registered (e.g. by user code).
-        }
-        r.register("menu", |ctx| {
-            let action = ctx.action.action.clone();
-            async move {
-                let (text, keyboard) = crate::commands::handle_menu_callback(&action);
-                match keyboard {
-                    Some(kb) => CallbackResponse::EditMessage { text, keyboard: Some(kb) },
-                    None => CallbackResponse::EditMessage {
-                        text,
-                        keyboard: Some(
-                            InlineKeyboardBuilder::new().build(), // empty keyboard = remove
-                        ),
-                    },
+    /// Currently handles the `menu`, `settings`, and `history` prefixes.
+    fn register_default_handlers(
+        router: &mut CallbackRouter,
+        session_keys: &Arc<ParkMutex<Vec<String>>>,
+    ) {
+        // Menu handler
+        if !router.has_handler("menu") {
+            router.register("menu", |ctx| {
+                let action = ctx.action.action.clone();
+                async move {
+                    let (text, keyboard) = crate::commands::handle_menu_callback(&action);
+                    match keyboard {
+                        Some(kb) => CallbackResponse::EditMessage { text, keyboard: Some(kb) },
+                        None => CallbackResponse::EditMessage {
+                            text,
+                            keyboard: Some(
+                                InlineKeyboardBuilder::new().build(), // empty keyboard = remove
+                            ),
+                        },
+                    }
                 }
-            }
-        });
+            });
+        }
+
+        // Settings pagination handler
+        if !router.has_handler("settings") {
+            router.register("settings", |ctx| {
+                let page: usize = ctx
+                    .action
+                    .payload
+                    .as_deref()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0);
+                async move {
+                    let response = crate::commands::handle_settings_callback(page);
+                    CallbackResponse::EditMessage {
+                        text: response.text,
+                        keyboard: response.keyboard,
+                    }
+                }
+            });
+        }
+
+        // History pagination handler
+        if !router.has_handler("history") {
+            let sk = session_keys.clone();
+            router.register("history", move |ctx| {
+                let page: usize = ctx
+                    .action
+                    .payload
+                    .as_deref()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0);
+                let keys = sk.lock().clone();
+                async move {
+                    let response = crate::commands::handle_history_callback(&keys, page);
+                    CallbackResponse::EditMessage {
+                        text: response.text,
+                        keyboard: response.keyboard,
+                    }
+                }
+            });
+        }
     }
 
     /// Get a reference-counted handle to the callback router.
@@ -1175,6 +1226,14 @@ impl TelegramChannel {
     /// Use this to register handlers before calling `connect()`.
     pub fn router(&self) -> Arc<tokio::sync::Mutex<CallbackRouter>> {
         self.router.clone()
+    }
+
+    /// Update the session keys used for `/history` display.
+    ///
+    /// Call this whenever the active session list changes so that the
+    /// inline-keyboard pagination reflects the current state.
+    pub fn set_session_keys(&self, keys: Vec<String>) {
+        *self.session_keys.lock() = keys;
     }
 }
 
@@ -1213,8 +1272,11 @@ impl BaseChannel for TelegramChannel {
         self.running.store(true, Ordering::Relaxed);
         self.connected = true;
 
-        // Register built-in callback handlers (e.g. /menu button routing).
-        Self::register_default_handlers(&self.router);
+        // Register built-in callback handlers (e.g. /menu, settings, history).
+        {
+            let mut r = self.router.lock().await;
+            Self::register_default_handlers(&mut r, &self.session_keys);
+        }
 
         // Spawn the background polling task.
         if let Some(handler) = self.message_handler.clone() {
@@ -1722,15 +1784,19 @@ impl TelegramChannel {
     }
 
     /// Answer a callback query, optionally showing a short toast notification.
+    ///
+    /// When `show_alert` is `true`, an alert dialog is shown instead of a toast.
     pub async fn answer_callback_query(
         &self,
         callback_query_id: &str,
         text: Option<&str>,
+        show_alert: bool,
     ) -> Result<()> {
         debug!("Answering callback query {}", callback_query_id);
         let body = AnswerCallbackQueryBody {
             callback_query_id: callback_query_id.to_string(),
             text: text.map(|s| s.to_string()),
+            show_alert: if show_alert { Some(true) } else { None },
         };
         let url = self.api_url("answerCallbackQuery");
         if let Err(e) = self.client.post(&url).json(&body).send().await {
@@ -2355,10 +2421,12 @@ mod tests {
         let body = AnswerCallbackQueryBody {
             callback_query_id: "cb123".to_string(),
             text: Some("Done!".to_string()),
+            show_alert: None,
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["callback_query_id"], "cb123");
         assert_eq!(json["text"], "Done!");
+        assert!(json.get("show_alert").is_none());
     }
 
     #[test]
@@ -2366,9 +2434,24 @@ mod tests {
         let body = AnswerCallbackQueryBody {
             callback_query_id: "cb456".to_string(),
             text: None,
+            show_alert: None,
         };
         let json = serde_json::to_value(&body).unwrap();
         assert!(json.get("text").is_none());
+        assert!(json.get("show_alert").is_none());
+    }
+
+    #[test]
+    fn test_answer_callback_query_body_show_alert() {
+        let body = AnswerCallbackQueryBody {
+            callback_query_id: "cb789".to_string(),
+            text: Some("Alert!".to_string()),
+            show_alert: Some(true),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["callback_query_id"], "cb789");
+        assert_eq!(json["text"], "Alert!");
+        assert_eq!(json["show_alert"], true);
     }
 
     // -----------------------------------------------------------------------
@@ -2662,7 +2745,7 @@ mod tests {
     async fn test_answer_callback_query_no_server() {
         let channel = TelegramChannel::new();
         // Will fail to connect but should not panic.
-        let result = channel.answer_callback_query("cb123", Some("Done!")).await;
+        let result = channel.answer_callback_query("cb123", Some("Done!"), false).await;
         assert!(result.is_ok());
     }
 
@@ -3013,5 +3096,128 @@ mod tests {
         r.register("test", |_ctx| async { CallbackResponse::Acknowledged });
         assert!(r.has_handler("test"));
         assert_eq!(r.handler_count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // session_keys and set_session_keys
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_session_keys() {
+        let channel = TelegramChannel::new();
+        assert!(channel.session_keys.lock().is_empty());
+        channel.set_session_keys(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(channel.session_keys.lock().len(), 2);
+        assert_eq!(channel.session_keys.lock()[0], "a");
+    }
+
+    #[test]
+    fn test_session_keys_independent_per_channel() {
+        let ch1 = TelegramChannel::new();
+        let ch2 = TelegramChannel::new();
+        ch1.set_session_keys(vec!["x".to_string()]);
+        assert!(ch2.session_keys.lock().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // register_default_handlers with settings/history
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_register_default_handlers_registers_all() {
+        let mut router = CallbackRouter::new();
+        let session_keys = Arc::new(ParkMutex::new(Vec::new()));
+        TelegramChannel::register_default_handlers(&mut router, &session_keys);
+        assert!(router.has_handler("menu"));
+        assert!(router.has_handler("settings"));
+        assert!(router.has_handler("history"));
+        assert_eq!(router.handler_count(), 3);
+    }
+
+    #[test]
+    fn test_register_default_handlers_idempotent() {
+        let mut router = CallbackRouter::new();
+        let session_keys = Arc::new(ParkMutex::new(Vec::new()));
+        TelegramChannel::register_default_handlers(&mut router, &session_keys);
+        TelegramChannel::register_default_handlers(&mut router, &session_keys);
+        // Should not double-register.
+        assert_eq!(router.handler_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_settings_callback_handler_dispatches() {
+        std::env::set_var("NANOBOT_RS_HOME", tempfile::tempdir().unwrap().path());
+        let mut router = CallbackRouter::new();
+        let session_keys = Arc::new(ParkMutex::new(Vec::new()));
+        TelegramChannel::register_default_handlers(&mut router, &session_keys);
+
+        let ctx = CallbackContext {
+            chat_id: "1".into(),
+            message_id: "1".into(),
+            sender_id: "1".into(),
+            callback_query_id: "cb_settings".into(),
+            action: CallbackAction::parse("settings:page:0").unwrap(),
+        };
+
+        let resp = router.dispatch(ctx).await.unwrap();
+        match resp {
+            CallbackResponse::EditMessage { text, keyboard } => {
+                assert!(text.contains("Settings"));
+                assert!(text.contains("page 1/"));
+                let _ = keyboard;
+            }
+            other => panic!("Expected EditMessage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_history_callback_handler_dispatches_empty() {
+        let mut router = CallbackRouter::new();
+        let session_keys = Arc::new(ParkMutex::new(Vec::new()));
+        TelegramChannel::register_default_handlers(&mut router, &session_keys);
+
+        let ctx = CallbackContext {
+            chat_id: "1".into(),
+            message_id: "1".into(),
+            sender_id: "1".into(),
+            callback_query_id: "cb_history".into(),
+            action: CallbackAction::parse("history:page:0").unwrap(),
+        };
+
+        let resp = router.dispatch(ctx).await.unwrap();
+        match resp {
+            CallbackResponse::EditMessage { text, keyboard } => {
+                assert_eq!(text, "No active sessions.");
+                assert!(keyboard.is_none());
+            }
+            other => panic!("Expected EditMessage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_history_callback_handler_with_sessions() {
+        let mut router = CallbackRouter::new();
+        let session_keys = Arc::new(ParkMutex::new(vec![
+            "tg:111".to_string(),
+            "tg:222".to_string(),
+        ]));
+        TelegramChannel::register_default_handlers(&mut router, &session_keys);
+
+        let ctx = CallbackContext {
+            chat_id: "1".into(),
+            message_id: "1".into(),
+            sender_id: "1".into(),
+            callback_query_id: "cb_hist".into(),
+            action: CallbackAction::parse("history:page:0").unwrap(),
+        };
+
+        let resp = router.dispatch(ctx).await.unwrap();
+        match resp {
+            CallbackResponse::EditMessage { text, .. } => {
+                assert!(text.contains("tg:111"));
+                assert!(text.contains("tg:222"));
+            }
+            other => panic!("Expected EditMessage, got {other:?}"),
+        }
     }
 }

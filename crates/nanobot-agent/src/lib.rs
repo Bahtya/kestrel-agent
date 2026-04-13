@@ -26,8 +26,8 @@ pub use notes::{extract_compaction_notes, NoteFormat, NotesManager};
 pub use runner::AgentRunner;
 pub use skills::SkillsLoader;
 pub use subagent::{
-    ParallelSpawnConfig, SpawnSummary, SubAgentHandle, SubAgentManager, SubAgentResult,
-    SubAgentTask, TaskStatus,
+    ParallelSpawnConfig, SpawnSummary, SubAgentHandle, SubAgentManager, SubAgentManagerConfig,
+    SubAgentMessage, SubAgentResult, SubAgentTask, TaskStatus,
 };
 
 /// Result from a streaming LLM completion (internal type).

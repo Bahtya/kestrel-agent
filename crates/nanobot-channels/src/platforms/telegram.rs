@@ -141,6 +141,8 @@ struct SendMessageBody {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_to_message_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_markup: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -664,10 +666,35 @@ impl TelegramChannel {
             chat_id,
             text: text.to_string(),
             reply_to_message_id: None,
+            reply_markup: None,
         };
         let url = format!("{}/sendMessage", base_url);
         if let Err(e) = client.post(&url).json(&body).send().await {
             warn!("Failed to send direct reply: {e}");
+        }
+    }
+
+    /// Send a text reply with an inline keyboard (bypassing the bus).
+    ///
+    /// Used by built-in commands like `/settings` and `/history` that need
+    /// interactive buttons.  Non-critical: failures are logged only.
+    async fn send_direct_reply_with_keyboard(
+        client: &reqwest::Client,
+        base_url: &str,
+        chat_id: i64,
+        text: &str,
+        keyboard: &InlineKeyboardMarkup,
+    ) {
+        let reply_markup = serde_json::to_value(keyboard).unwrap_or_default();
+        let body = SendMessageBody {
+            chat_id,
+            text: text.to_string(),
+            reply_to_message_id: None,
+            reply_markup: Some(reply_markup),
+        };
+        let url = format!("{}/sendMessage", base_url);
+        if let Err(e) = client.post(&url).json(&body).send().await {
+            warn!("Failed to send direct reply with keyboard: {e}");
         }
     }
 
@@ -746,13 +773,24 @@ impl TelegramChannel {
                     let text = msg.text.as_deref().unwrap_or("");
                     if let Some(response) = crate::commands::try_handle_command(text) {
                         // Built-in command matched — reply directly, skip bus.
-                        Self::send_direct_reply(
-                            &client,
-                            &base_url,
-                            msg.chat.id,
-                            &response,
-                        )
-                        .await;
+                        if let Some(ref keyboard) = response.keyboard {
+                            Self::send_direct_reply_with_keyboard(
+                                &client,
+                                &base_url,
+                                msg.chat.id,
+                                &response.text,
+                                keyboard,
+                            )
+                            .await;
+                        } else {
+                            Self::send_direct_reply(
+                                &client,
+                                &base_url,
+                                msg.chat.id,
+                                &response.text,
+                            )
+                            .await;
+                        }
                         Self::send_read_receipt(
                             &client,
                             &base_url,
@@ -956,13 +994,20 @@ impl TelegramChannel {
                 action,
             };
             let router_guard = router.lock().await;
-            if let Some(response) = router_guard.dispatch(ctx).await {
-                drop(router_guard);
-                // Answer the callback query so the button stops loading.
-                Self::answer_callback_query_static(client, base_url, &cq.id, None).await;
-                Self::execute_callback_response(client, base_url, &chat_id, &message_id, response)
-                    .await;
-                return Ok(());
+            if router_guard.has_handler(&ctx.action.prefix) {
+                // Show loading animation before running the handler.
+                Self::edit_message_text_static(
+                    client, base_url, &chat_id, &message_id, "⏳ Loading...", None,
+                )
+                .await;
+                if let Some(response) = router_guard.dispatch(ctx).await {
+                    drop(router_guard);
+                    // Answer the callback query so the button stops loading.
+                    Self::answer_callback_query_static(client, base_url, &cq.id, None).await;
+                    Self::execute_callback_response(client, base_url, &chat_id, &message_id, response)
+                        .await;
+                    return Ok(());
+                }
             }
         }
 
@@ -1056,6 +1101,31 @@ impl TelegramChannel {
         }
     }
 
+    /// Edit a message's text (static version for loading animation).
+    async fn edit_message_text_static(
+        client: &reqwest::Client,
+        base_url: &str,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+        reply_markup: Option<serde_json::Value>,
+    ) {
+        if let (Ok(chat_id_num), Ok(msg_id_num)) =
+            (chat_id.parse::<i64>(), message_id.parse::<i64>())
+        {
+            let body = EditMessageTextBody {
+                chat_id: chat_id_num,
+                message_id: msg_id_num,
+                text: text.to_string(),
+                reply_markup,
+            };
+            let url = format!("{}/editMessageText", base_url);
+            if let Err(e) = client.post(&url).json(&body).send().await {
+                debug!("Failed to edit message for loading animation: {e}");
+            }
+        }
+    }
+
     /// Execute a [`CallbackResponse`] against the Telegram API.
     async fn execute_callback_response(
         client: &reqwest::Client,
@@ -1071,6 +1141,7 @@ impl TelegramChannel {
                         chat_id: chat_id_num,
                         text,
                         reply_to_message_id: None,
+                        reply_markup: None,
                     };
                     let url = format!("{}/sendMessage", base_url);
                     if let Err(e) = client.post(&url).json(&body).send().await {
@@ -1225,6 +1296,7 @@ impl BaseChannel for TelegramChannel {
             chat_id: chat_id_num,
             text: content.to_string(),
             reply_to_message_id: reply_to_id,
+            reply_markup: None,
         };
 
         let url = self.api_url("sendMessage");

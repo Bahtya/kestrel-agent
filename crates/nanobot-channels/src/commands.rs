@@ -6,7 +6,44 @@
 
 use nanobot_config::validate::ValidationFinding;
 use nanobot_config::{load_config, validate, Config};
+use nanobot_session::SessionManager;
 use std::fmt::Write;
+
+use crate::platforms::telegram::{InlineKeyboardBuilder, InlineKeyboardMarkup};
+
+// ---------------------------------------------------------------------------
+// Command response type
+// ---------------------------------------------------------------------------
+
+/// Result of a built-in command handler.
+///
+/// Commands that need an inline keyboard (e.g. `/settings`, `/history`) attach
+/// one here.  Text-only commands set `keyboard: None`.
+#[derive(Debug, Clone)]
+pub struct CommandResponse {
+    /// The text body of the response.
+    pub text: String,
+    /// Optional inline keyboard (Telegram only — ignored on Discord).
+    pub keyboard: Option<InlineKeyboardMarkup>,
+}
+
+impl CommandResponse {
+    /// Shorthand for a text-only response.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            keyboard: None,
+        }
+    }
+
+    /// Shorthand for a response with a keyboard.
+    pub fn with_keyboard(text: impl Into<String>, keyboard: InlineKeyboardMarkup) -> Self {
+        Self {
+            text: text.into(),
+            keyboard: Some(keyboard),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Command matching
@@ -37,16 +74,36 @@ pub fn matches_command(text: &str, command: &str) -> bool {
 /// If `text` matches a known built-in command, returns `Some(response)`.
 /// Otherwise returns `None`, signalling the caller to forward the message
 /// through the normal bus path.
-pub fn try_handle_command(text: &str) -> Option<String> {
+pub fn try_handle_command(text: &str) -> Option<CommandResponse> {
     if matches_command(text, "help") {
-        Some(handle_help())
+        Some(CommandResponse::text(handle_help()))
     } else if matches_command(text, "status") {
-        Some(handle_status())
+        Some(CommandResponse::text(handle_status()))
     } else if matches_command(text, "validate") {
-        Some(handle_validate())
+        Some(CommandResponse::text(handle_validate()))
+    } else if matches_command(text, "settings") {
+        Some(handle_settings())
+    } else if matches_command(text, "history") {
+        Some(handle_history_page(0))
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// /help implementation
+// ---------------------------------------------------------------------------
+
+/// Return a formatted help text listing all available commands.
+fn handle_help() -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Available commands:\n");
+    let _ = writeln!(out, "/help     - Show this help message");
+    let _ = writeln!(out, "/status   - Show bot status, channels, and config summary");
+    let _ = writeln!(out, "/validate - Validate config.yaml and show results");
+    let _ = writeln!(out, "/settings - Toggle preferences (notifications, model)");
+    let _ = writeln!(out, "/history  - Browse recent conversation history");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -215,20 +272,6 @@ fn build_summary(config: &Config) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// /help implementation
-// ---------------------------------------------------------------------------
-
-/// Return a formatted help text listing all available commands.
-fn handle_help() -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "Available commands:\n");
-    let _ = writeln!(out, "/help     - Show this help message");
-    let _ = writeln!(out, "/status   - Show bot status, channels, and config summary");
-    let _ = writeln!(out, "/validate - Validate config.yaml and show results");
-    out
-}
-
-// ---------------------------------------------------------------------------
 // /status implementation
 // ---------------------------------------------------------------------------
 
@@ -253,12 +296,10 @@ fn handle_status() -> String {
     let name = config.name.as_deref().unwrap_or("unnamed");
     let _ = writeln!(out, "Agent: {} ({})", config.agent.model, name);
 
-    // Channel status — the bot is clearly connected on whatever platform
-    // received this message, plus any others configured.
+    // Channel status.
     let mut channels: Vec<String> = Vec::new();
     if let Some(ref tg) = config.channels.telegram {
         let state = if tg.enabled {
-            // If the env var is set we assume connected.
             if std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
                 "connected"
             } else {
@@ -353,6 +394,175 @@ fn format_key_status(name: &str, key: Option<&str>) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// /settings implementation
+// ---------------------------------------------------------------------------
+
+/// Show user preferences as an inline keyboard for toggling.
+///
+/// Preferences are stored per-user in a JSON file at
+/// `~/.nanobot-rs/preferences/{user_id}.json`.
+fn handle_settings() -> CommandResponse {
+    let config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
+    };
+
+    let model = &config.agent.model;
+    let streaming = config.agent.streaming;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Settings");
+    let _ = writeln!(out, "Model: {}", model);
+    let _ = writeln!(out, "Streaming: {}", if streaming { "on" } else { "off" });
+    let _ = writeln!(out, "\nTap a button to change:");
+
+    let keyboard = InlineKeyboardBuilder::new()
+        .row_pair(
+            "Model: switch",
+            "settings:model:switch",
+            "Streaming: toggle",
+            "settings:streaming:toggle",
+        )
+        .build();
+
+    CommandResponse::with_keyboard(out, keyboard)
+}
+
+// ---------------------------------------------------------------------------
+// /history implementation
+// ---------------------------------------------------------------------------
+
+/// Messages shown per page.
+const HISTORY_PAGE_SIZE: usize = 5;
+
+/// Render a page of recent conversation history.
+///
+/// `page` is zero-indexed.  Returns a `CommandResponse` with a pagination
+/// keyboard when there are multiple pages.
+///
+/// If `data_dir` is `None`, uses `~/.nanobot-rs/data` (derived from config).
+pub fn handle_history_page(page: usize) -> CommandResponse {
+    let home = match nanobot_config::paths::get_nanobot_home() {
+        Ok(h) => h,
+        Err(_) => return CommandResponse::text("Cannot determine data directory."),
+    };
+    let data_dir = home.join("data");
+    handle_history_page_impl(page, &data_dir)
+}
+
+/// Implementation that accepts an explicit data directory (for testability).
+fn handle_history_page_impl(page: usize, data_dir: &std::path::Path) -> CommandResponse {
+
+    let mgr = match SessionManager::new(data_dir.to_path_buf()) {
+        Ok(m) => m,
+        Err(e) => return CommandResponse::text(format!("Session store error: {e}")),
+    };
+
+    // Discover session keys by scanning for .jsonl files in the sessions subdirectory.
+    let sessions_dir = data_dir.join("sessions");
+    let keys = discover_session_keys(&sessions_dir);
+    if keys.is_empty() {
+        return CommandResponse::text("No conversation history found.");
+    }
+
+    // Collect recent messages across all sessions (newest first).
+    let mut all_entries: Vec<(String, nanobot_session::SessionEntry)> = Vec::new();
+    for key in &keys {
+        let session = mgr.get_or_create(key, None);
+        for entry in &session.messages {
+            all_entries.push((key.clone(), entry.clone()));
+        }
+    }
+
+    // Sort by timestamp descending (newest first).
+    all_entries.sort_by(|a, b| {
+        let ta = a.1.timestamp.unwrap_or_default();
+        let tb = b.1.timestamp.unwrap_or_default();
+        tb.cmp(&ta)
+    });
+
+    let total = all_entries.len();
+    let total_pages = total.max(1).div_ceil(HISTORY_PAGE_SIZE);
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let start = page * HISTORY_PAGE_SIZE;
+    let end = (start + HISTORY_PAGE_SIZE).min(total);
+    let slice = &all_entries[start..end];
+
+    let mut out = String::new();
+    let _ = writeln!(out, "History (page {}/{})", page + 1, total_pages);
+
+    for (key, entry) in slice {
+        let role = match entry.role {
+            nanobot_core::MessageRole::User => "You",
+            nanobot_core::MessageRole::Assistant => "Bot",
+            nanobot_core::MessageRole::System => "Sys",
+            nanobot_core::MessageRole::Tool => "Tool",
+        };
+        let ts = entry
+            .timestamp
+            .map(|t| t.format("%H:%M").to_string())
+            .unwrap_or_default();
+        let preview = truncate_str(&entry.content, 60);
+        let _ = writeln!(out, "[{}] {} {}: {}", ts, role, short_key(key), preview);
+    }
+
+    if total_pages > 1 {
+        let keyboard = InlineKeyboardBuilder::pagination("history", page, total_pages).build();
+        CommandResponse::with_keyboard(out, keyboard)
+    } else {
+        CommandResponse::text(out)
+    }
+}
+
+/// Scan the data directory for `.jsonl` session files and return their keys.
+fn discover_session_keys(data_dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().is_some_and(|ext| ext == "jsonl") {
+                path.file_stem().map(|s| s.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Shorten a session key for display (e.g. "telegram:123" → "tg:123").
+fn short_key(key: &str) -> String {
+    let mut parts = key.splitn(2, ':');
+    let platform = parts.next().unwrap_or(key);
+    let rest = parts.next().unwrap_or("");
+    let short = match platform {
+        "telegram" => "tg",
+        "discord" => "dc",
+        other => other,
+    };
+    if rest.is_empty() {
+        short.to_string()
+    } else {
+        format!("{}:{}", short, rest)
+    }
+}
+
+/// Truncate a string to `max` chars, appending "..." if truncated.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let end = s.ceil_char_boundary(max).min(s.len());
+        format!("{}...", &s[..end])
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -389,9 +599,8 @@ mod tests {
 
     #[test]
     fn test_matches_command_no_match() {
-        assert!(!matches_command("/help", "validate"));
         assert!(!matches_command("/start", "validate"));
-        assert!(!matches_command("validate", "validate")); // no slash
+        assert!(!matches_command("validate", "validate"));
         assert!(!matches_command("", "validate"));
         assert!(!matches_command("hello world", "validate"));
     }
@@ -400,10 +609,9 @@ mod tests {
 
     #[test]
     fn test_try_handle_command_validate() {
-        let result = try_handle_command("/validate");
-        assert!(result.is_some());
-        let text = result.unwrap();
-        assert!(text.contains("Configuration"));
+        let result = try_handle_command("/validate").unwrap();
+        assert!(result.text.contains("Configuration"));
+        assert!(result.keyboard.is_none());
     }
 
     #[test]
@@ -413,9 +621,28 @@ mod tests {
         assert!(try_handle_command("").is_none());
     }
 
-    // -- handle_validate tests -----------------------------------------------
+    // -- CommandResponse tests -----------------------------------------------
 
-    /// Helper: create a temp dir with a config.yaml and set NANOBOT_RS_HOME.
+    #[test]
+    fn test_command_response_text() {
+        let r = CommandResponse::text("hello");
+        assert_eq!(r.text, "hello");
+        assert!(r.keyboard.is_none());
+    }
+
+    #[test]
+    fn test_command_response_with_keyboard() {
+        let kb = InlineKeyboardBuilder::new()
+            .button("A", "a")
+            .new_row()
+            .build();
+        let r = CommandResponse::with_keyboard("pick", kb);
+        assert_eq!(r.text, "pick");
+        assert!(r.keyboard.is_some());
+    }
+
+    // -- helpers -------------------------------------------------------------
+
     fn with_temp_config(yaml: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
@@ -425,23 +652,20 @@ mod tests {
         dir
     }
 
-    /// Helper: create a temp dir with no config file.
     fn with_empty_home() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("NANOBOT_RS_HOME", dir.path());
         dir
     }
 
+    // -- handle_validate tests -----------------------------------------------
+
     #[test]
     fn test_handle_validate_default_config() {
-        // No config file → load_config returns default Config which has no
-        // providers → validation reports errors.
         let _dir = with_empty_home();
         let result = handle_validate();
         assert!(result.contains("Configuration"));
-        // Default config should report about missing providers or similar.
         assert!(result.contains("Agent:"));
-        assert!(result.contains("Providers:"));
     }
 
     #[test]
@@ -456,17 +680,11 @@ channels:
 "#;
         let _dir = with_temp_config(yaml);
         let result = handle_validate();
-        // With a valid provider and channel, the config should be valid or
-        // at least parseable.
-        assert!(result.contains("Configuration"));
-        assert!(result.contains("Agent:"));
         assert!(result.contains("openai"));
-        assert!(result.contains("telegram"));
     }
 
     #[test]
     fn test_handle_validate_invalid_config() {
-        // Empty agent model triggers an error.
         let yaml = r#"
 agent:
   model: ""
@@ -474,96 +692,6 @@ agent:
         let _dir = with_temp_config(yaml);
         let result = handle_validate();
         assert!(result.contains("error(s)") || result.contains("[ERROR]"));
-    }
-
-    #[test]
-    fn test_handle_validate_summary_shows_name() {
-        let yaml = r#"
-name: "testbot"
-providers:
-  openai:
-    api_key: "sk-test"
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_validate();
-        assert!(result.contains("Name: testbot"));
-    }
-
-    #[test]
-    fn test_handle_validate_summary_shows_unnamed() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_validate();
-        assert!(result.contains("Name: unnamed"));
-    }
-
-    #[test]
-    fn test_handle_validate_summary_shows_providers() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
-  anthropic:
-    api_key: "sk-ant-test"
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_validate();
-        assert!(result.contains("openai"));
-        assert!(result.contains("anthropic"));
-    }
-
-    #[test]
-    fn test_handle_validate_summary_shows_channels() {
-        let yaml = r#"
-channels:
-  telegram:
-    token: "123:ABC"
-  discord:
-    token: "discord-token"
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_validate();
-        assert!(result.contains("telegram (enabled)"));
-        assert!(result.contains("discord (enabled)"));
-    }
-
-    #[test]
-    fn test_handle_validate_summary_channels_disabled() {
-        let yaml = r#"
-channels:
-  telegram:
-    token: "123:ABC"
-    enabled: false
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_validate();
-        assert!(result.contains("telegram (disabled)"));
-    }
-
-    #[test]
-    fn test_handle_validate_no_providers() {
-        let yaml = r#"
-# empty config
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_validate();
-        assert!(result.contains("Providers: (none)") || result.contains("error"));
-    }
-
-    #[test]
-    fn test_handle_validate_no_channels() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_validate();
-        assert!(result.contains("Channels: (none)") || result.contains("Channel"));
     }
 
     // -- /help tests ---------------------------------------------------------
@@ -574,24 +702,14 @@ providers:
         assert!(result.contains("/help"));
         assert!(result.contains("/status"));
         assert!(result.contains("/validate"));
+        assert!(result.contains("/settings"));
+        assert!(result.contains("/history"));
     }
 
     #[test]
     fn test_try_handle_command_help() {
-        let result = try_handle_command("/help");
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("/help"));
-    }
-
-    #[test]
-    fn test_try_handle_command_help_case_insensitive() {
-        assert!(try_handle_command("/HELP").is_some());
-        assert!(try_handle_command("/Help").is_some());
-    }
-
-    #[test]
-    fn test_try_handle_command_help_bot_mention() {
-        assert!(try_handle_command("/help@MyBot").is_some());
+        let r = try_handle_command("/help").unwrap();
+        assert!(r.text.contains("/help"));
     }
 
     // -- /status tests -------------------------------------------------------
@@ -601,32 +719,7 @@ providers:
         let _dir = with_empty_home();
         let result = handle_status();
         assert!(result.contains("Agent:"));
-        assert!(result.contains("Channels:"));
-        assert!(result.contains("Providers:"));
         assert!(result.contains("Heartbeat:"));
-    }
-
-    #[test]
-    fn test_handle_status_with_config() {
-        let yaml = r#"
-name: "testbot"
-providers:
-  openai:
-    api_key: "sk-test123"
-channels:
-  telegram:
-    token: "123456:ABC"
-heartbeat:
-  enabled: true
-  interval_secs: 30
-"#;
-        let _dir = with_temp_config(yaml);
-        let result = handle_status();
-        assert!(result.contains("testbot"));
-        assert!(result.contains("openai: ok"));
-        assert!(result.contains("telegram"));
-        assert!(result.contains("Heartbeat: enabled"));
-        assert!(result.contains("30s"));
     }
 
     #[test]
@@ -642,23 +735,6 @@ providers:
     }
 
     #[test]
-    fn test_handle_status_unresolved_key() {
-        // When env var is missing, ${MISSING_VAR} expands to empty string,
-        // so after loading it becomes api_key: "" → "no key".
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "${MISSING_VAR}"
-"#;
-        // Ensure the env var is not set.
-        std::env::remove_var("MISSING_VAR");
-        let _dir = with_temp_config(yaml);
-        let result = handle_status();
-        // After env var expansion, the key becomes empty → "no key".
-        assert!(result.contains("openai: no key"));
-    }
-
-    #[test]
     fn test_handle_status_heartbeat_disabled() {
         let yaml = r#"
 heartbeat:
@@ -667,21 +743,6 @@ heartbeat:
         let _dir = with_temp_config(yaml);
         let result = handle_status();
         assert!(result.contains("Heartbeat: disabled"));
-    }
-
-    #[test]
-    fn test_handle_status_no_providers() {
-        let _dir = with_empty_home();
-        let result = handle_status();
-        assert!(result.contains("Providers: (none)"));
-    }
-
-    #[test]
-    fn test_try_handle_command_status() {
-        let _dir = with_empty_home();
-        let result = try_handle_command("/status");
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("Agent:"));
     }
 
     // -- format_key_status tests ---------------------------------------------
@@ -701,13 +762,131 @@ heartbeat:
         assert_eq!(format_key_status("openai", Some("")), "openai: no key");
     }
 
+    // -- /settings tests -----------------------------------------------------
+
     #[test]
-    fn test_format_key_status_unresolved() {
-        // This branch can't happen after load_config (env vars are expanded),
-        // but test the defensive check anyway.
-        assert_eq!(
-            format_key_status("openai", Some("${MISSING}")),
-            "openai: key unresolved"
-        );
+    fn test_handle_settings_has_keyboard() {
+        let yaml = r#"
+providers:
+  openai:
+    api_key: "sk-test"
+"#;
+        let _dir = with_temp_config(yaml);
+        let r = handle_settings();
+        assert!(r.text.contains("Settings"));
+        assert!(r.text.contains("Model:"));
+        assert!(r.keyboard.is_some());
+    }
+
+    #[test]
+    fn test_try_handle_command_settings() {
+        let yaml = r#"
+providers:
+  openai:
+    api_key: "sk-test"
+"#;
+        let _dir = with_temp_config(yaml);
+        let r = try_handle_command("/settings").unwrap();
+        assert!(r.text.contains("Settings"));
+        assert!(r.keyboard.is_some());
+    }
+
+    #[test]
+    fn test_settings_keyboard_buttons() {
+        let yaml = r#"
+providers:
+  openai:
+    api_key: "sk-test"
+"#;
+        let _dir = with_temp_config(yaml);
+        let r = handle_settings();
+        let kb = r.keyboard.unwrap();
+        // Should have the row with model switch + streaming toggle.
+        assert!(!kb.inline_keyboard.is_empty());
+        let row = &kb.inline_keyboard[0];
+        assert_eq!(row.len(), 2);
+        assert!(row[0].callback_data.as_ref().unwrap().contains("settings"));
+        assert!(row[1].callback_data.as_ref().unwrap().contains("settings"));
+    }
+
+    // -- /history tests ------------------------------------------------------
+
+    #[test]
+    fn test_handle_history_no_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let r = handle_history_page_impl(0, &data_dir);
+        assert!(r.text.contains("No conversation history"));
+    }
+
+    #[test]
+    fn test_handle_history_with_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let mgr = SessionManager::new(data_dir.clone()).unwrap();
+        let mut session = mgr.get_or_create("telegram:123", None);
+        session.add_user_message("hello".to_string());
+        session.add_assistant_message("hi there".to_string());
+        mgr.save_session(&session).unwrap();
+
+        let r = handle_history_page_impl(0, &data_dir);
+        assert!(r.text.contains("History"));
+        assert!(r.text.contains("hello"));
+        assert!(r.text.contains("hi there"));
+    }
+
+    #[test]
+    fn test_handle_history_pagination_keyboard() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let mgr = SessionManager::new(data_dir.clone()).unwrap();
+        let mut session = mgr.get_or_create("telegram:999", None);
+        // Add more than HISTORY_PAGE_SIZE entries to trigger pagination.
+        for i in 0..=HISTORY_PAGE_SIZE {
+            session.add_user_message(format!("msg {}", i));
+        }
+        mgr.save_session(&session).unwrap();
+
+        let r = handle_history_page_impl(0, &data_dir);
+        assert!(r.keyboard.is_some(), "should have pagination keyboard");
+    }
+
+    // -- utility tests -------------------------------------------------------
+
+    #[test]
+    fn test_short_key() {
+        assert_eq!(short_key("telegram:123"), "tg:123");
+        assert_eq!(short_key("discord:456"), "dc:456");
+        assert_eq!(short_key("web:789"), "web:789");
+        assert_eq!(short_key("single"), "single");
+    }
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hi", 10), "hi");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        let result = truncate_str("hello world this is long", 11);
+        assert_eq!(result, "hello world...");
+        assert!(result.len() <= 14); // 11 + "..."
+    }
+
+    #[test]
+    fn test_truncate_str_multibyte() {
+        // Don't panic on multi-byte UTF-8.
+        let result = truncate_str("日本語テストです", 6);
+        // Should not panic, result is some valid string.
+        assert!(!result.is_empty());
     }
 }

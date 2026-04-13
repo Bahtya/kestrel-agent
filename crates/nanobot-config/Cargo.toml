@@ -16,3 +16,4 @@ ipnet = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+clap = { workspace = true }

@@ -501,7 +501,7 @@ fn validate_schedule(schedule: &CronSchedule) -> Result<()> {
             }
         }
         ScheduleKind::Every => {
-            if schedule.every_ms.is_none() || schedule.every_ms.unwrap() <= 0 {
+            if schedule.every_ms.is_none() || schedule.every_ms.unwrap_or(0) <= 0 {
                 anyhow::bail!("'every' schedule requires positive every_ms field");
             }
         }

@@ -573,7 +573,13 @@ impl DiscordChannel {
 
         // ── Send RESUME or IDENTIFY ─────────────────────────────────────
         if state.has_session() {
-            let session_id = state.session_id.as_ref().unwrap();
+            let session_id = match state.session_id.as_ref() {
+                Some(id) => id,
+                None => {
+                    error!("Discord Gateway: has_session() is true but session_id is None");
+                    return SessionOutcome::ResumableDisconnect;
+                }
+            };
             let seq = state.last_seq.unwrap_or(0);
             let resume = build_resume_payload(token, session_id, seq);
             if let Err(e) = ws.send(WsMessage::Text(resume.to_string().into())).await {
@@ -834,7 +840,13 @@ impl BaseChannel for DiscordChannel {
 
         // Start Gateway listener if handler is set
         if let Some(handler) = self.message_handler.clone() {
-            let token = self.token.clone().unwrap();
+            let token = match self.token.clone() {
+                Some(t) => t,
+                None => {
+                    error!("Discord token not set; cannot start gateway listener");
+                    return Ok(false);
+                }
+            };
             let running = self.running.clone();
             let event_tx = self.event_tx.clone();
             let gateway_url = self.gateway_url().to_string();

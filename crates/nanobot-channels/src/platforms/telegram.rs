@@ -641,7 +641,13 @@ impl BaseChannel for TelegramChannel {
         // Spawn the background polling task.
         if let Some(handler) = self.message_handler.clone() {
             let client = self.client.clone();
-            let token = self.token.clone().unwrap();
+            let token = match self.token.clone() {
+                Some(t) => t,
+                None => {
+                    error!("Telegram token not set; cannot start polling");
+                    return Ok(false);
+                }
+            };
             let running = self.running.clone();
 
             tokio::spawn(async move {

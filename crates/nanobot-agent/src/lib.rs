@@ -22,7 +22,9 @@ pub use heartbeat::{
 pub use hook::{AgentHook, CompositeHook};
 pub use loop_mod::{AgentLoop, HeartbeatHandle};
 pub use memory::MemoryStore;
-pub use notes::{extract_compaction_notes, NoteFormat, NotesManager};
+pub use notes::{
+    extract_compaction_notes, NoteCompactionConfig, NoteFormat, NotesManager, NotesStore,
+};
 pub use runner::AgentRunner;
 pub use skills::SkillsLoader;
 pub use subagent::{

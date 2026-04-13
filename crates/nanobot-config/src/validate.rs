@@ -21,6 +21,7 @@ use crate::schema::{
     DiscordConfig, DreamConfig, HeartbeatConfig, McpServerConfig, ProvidersConfig,
     SecurityConfig, TelegramConfig,
 };
+use std::collections::HashSet;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -149,7 +150,13 @@ pub fn validate(config: &Config) -> ValidationReport {
     validate_security(&config.security, &mut report);
     validate_mcp_servers(&config.mcp_servers, &mut report);
     validate_api(&config.api, &mut report);
-    validate_cross_field(&config.providers, &config.custom_providers, &config.agent, &mut report);
+    validate_cross_field(
+        &config.providers,
+        &config.custom_providers,
+        &config.agent,
+        &config.dream,
+        &mut report,
+    );
 
     report
 }
@@ -227,6 +234,14 @@ fn validate_url(url: &str, path: &str, report: &mut ValidationReport) {
     }
     if !url.starts_with("http://") && !url.starts_with("https://") {
         report.error(path, "URL must start with http:// or https://");
+    }
+}
+
+/// Validate a URL and warn if it uses HTTP instead of HTTPS (for sensitive endpoints).
+fn validate_url_require_https(url: &str, path: &str, report: &mut ValidationReport) {
+    validate_url(url, path, report);
+    if url.starts_with("http://") {
+        report.warning(path, "URL uses HTTP instead of HTTPS — credentials may be exposed in transit");
     }
 }
 
@@ -344,16 +359,28 @@ fn validate_providers(
     }
 
     // Custom providers
+    let mut custom_names = HashSet::new();
     for (i, cp) in custom.iter().enumerate() {
         has_provider = true;
         let prefix = format!("custom_providers[{i}]");
         if cp.name.is_empty() {
             report.error(format!("{prefix}.name"), "Custom provider name is empty");
+        } else if !custom_names.insert(cp.name.clone()) {
+            report.error(
+                format!("{prefix}.name"),
+                format!("Duplicate custom provider name '{}'", cp.name),
+            );
         }
         if cp.base_url.is_empty() {
             report.error(format!("{prefix}.base_url"), "Custom provider base_url is empty");
         } else {
             validate_url(&cp.base_url, &format!("{prefix}.base_url"), report);
+        }
+        if cp.model_patterns.is_empty() {
+            report.warning(
+                format!("{prefix}.model_patterns"),
+                "No model_patterns defined — this provider will only be used via explicit routing",
+            );
         }
     }
 
@@ -431,6 +458,13 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
             if e.username.as_deref().is_none_or(|u| u.is_empty()) {
                 report.error("channels.email.username", "Username is required when email is enabled");
             }
+            if e.port == 0 {
+                report.warning("channels.email.port", "Email port is 0 — will use default (587 for SMTP)");
+            } else if !(1..=65535).contains(&e.port) {
+                report.error("channels.email.port", format!("Port must be between 1 and 65535, got {}", e.port));
+            } else if e.port != 25 && e.port != 465 && e.port != 587 && e.port != 993 && e.port != 995 {
+                report.warning("channels.email.port", format!("Port {} is non-standard for email (common: 25, 465, 587, 993, 995)", e.port));
+            }
         }
     }
 
@@ -441,7 +475,7 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
             if d.webhook.as_deref().is_none_or(|w| w.is_empty()) {
                 report.error("channels.dingtalk.webhook", "Webhook URL is required when DingTalk is enabled");
             } else if let Some(ref url) = d.webhook {
-                validate_url(url, "channels.dingtalk.webhook", report);
+                validate_url_require_https(url, "channels.dingtalk.webhook", report);
             }
         }
     }
@@ -499,7 +533,18 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
             if m.webhook_url.as_deref().is_none_or(|u| u.is_empty()) {
                 report.error("channels.mochat.webhook_url", "Webhook URL is required when Mochat is enabled");
             } else if let Some(ref url) = m.webhook_url {
-                validate_url(url, "channels.mochat.webhook_url", report);
+                validate_url_require_https(url, "channels.mochat.webhook_url", report);
+            }
+        }
+    }
+
+    // Matrix homeserver — should use HTTPS
+    if let Some(ref m) = channels.matrix {
+        if m.enabled {
+            if let Some(ref hs) = m.homeserver {
+                if !hs.is_empty() {
+                    validate_url_require_https(hs, "channels.matrix.homeserver", report);
+                }
             }
         }
     }
@@ -538,6 +583,11 @@ fn validate_discord(dc: &DiscordConfig, report: &mut ValidationReport) {
 fn validate_agent(agent: &AgentDefaults, report: &mut ValidationReport) {
     if agent.model.is_empty() {
         report.error("agent.model", "Model name cannot be empty");
+    } else if agent.model.contains(char::is_whitespace) {
+        report.error(
+            "agent.model",
+            format!("Model name '{}' contains whitespace", agent.model),
+        );
     }
 
     if !(0.0..=2.0).contains(&agent.temperature) {
@@ -555,6 +605,11 @@ fn validate_agent(agent: &AgentDefaults, report: &mut ValidationReport) {
 
     if agent.max_iterations == 0 {
         report.error("agent.max_iterations", "max_iterations must be > 0");
+    } else if agent.max_iterations > 500 {
+        report.warning(
+            "agent.max_iterations",
+            format!("max_iterations of {} is very high — may cause excessive token usage or infinite loops", agent.max_iterations),
+        );
     }
 
     if agent.tool_timeout == 0 {
@@ -727,9 +782,25 @@ const MODEL_KEYWORD_MAP: &[(&str, &str)] = &[
 fn validate_api(api: &ApiConfig, report: &mut ValidationReport) {
     if api.max_body_size == 0 {
         report.error("api.max_body_size", "Max body size must be > 0");
+    } else if api.max_body_size < 1024 {
+        report.warning("api.max_body_size", "Max body size < 1KB may reject legitimate requests");
     }
     if api.allowed_origins.is_empty() {
         report.warning("api.allowed_origins", "No CORS origins configured — API may reject browser requests");
+    } else {
+        for (i, origin) in api.allowed_origins.iter().enumerate() {
+            if origin.is_empty() {
+                report.warning(
+                    format!("api.allowed_origins[{i}]"),
+                    "Empty origin entry",
+                );
+            } else if origin != "*" && !origin.starts_with("http://") && !origin.starts_with("https://") {
+                report.warning(
+                    format!("api.allowed_origins[{i}]"),
+                    format!("Origin '{}' should be '*' or start with http(s)://", origin),
+                );
+            }
+        }
     }
 }
 
@@ -737,6 +808,7 @@ fn validate_cross_field(
     providers: &ProvidersConfig,
     custom: &[CustomProviderConfig],
     agent: &AgentDefaults,
+    dream: &DreamConfig,
     report: &mut ValidationReport,
 ) {
     if agent.model.is_empty() {
@@ -814,10 +886,50 @@ fn validate_cross_field(
         );
     }
 
-    // Dream model cross-check
-    if let Some(ref dream_model) = agent.workspace {
-        // If there's a dream model specified elsewhere we'd check it here
-        let _ = dream_model;
+    // Dream model cross-check — verify the dream model also has a matching provider
+    if dream.enabled {
+        if let Some(ref dream_model) = dream.model {
+            if !dream_model.is_empty() {
+                let dm_lower = dream_model.to_lowercase();
+                let mut dream_matched = false;
+                for (keyword, provider_name) in MODEL_KEYWORD_MAP {
+                    if dm_lower.contains(keyword) && configured.contains(provider_name) {
+                        dream_matched = true;
+                        break;
+                    }
+                }
+                if !dream_matched {
+                    for cp in custom {
+                        if cp.model_patterns.iter().any(|p| dm_lower.contains(&p.to_lowercase())) {
+                            dream_matched = true;
+                            break;
+                        }
+                    }
+                }
+                if !dream_matched && configured.len() == 1 {
+                    // Single provider fallback — only OK if no explicit keyword mismatch
+                    let mut explicit_mismatch = false;
+                    for (keyword, provider_name) in MODEL_KEYWORD_MAP {
+                        if dm_lower.contains(keyword) && !configured.contains(provider_name) {
+                            explicit_mismatch = true;
+                            break;
+                        }
+                    }
+                    if !explicit_mismatch {
+                        dream_matched = true;
+                    }
+                }
+                if !dream_matched {
+                    report.warning(
+                        "dream.model",
+                        format!(
+                            "Dream model '{}' may not match any configured provider",
+                            dream_model
+                        ),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1736,5 +1848,245 @@ mod tests {
         });
         let report = validate(&config);
         assert!(report.errors().iter().any(|e| e.path == "providers.azure_openai.endpoint"));
+    }
+
+    // -------------------------------------------------------------------
+    // New: Duplicate custom provider names
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_custom_provider_duplicate_names() {
+        let mut config = make_valid_config();
+        config.custom_providers.push(CustomProviderConfig {
+            name: "dup".to_string(),
+            base_url: "https://a.com/v1".to_string(),
+            api_key: Some("key".to_string()),
+            model_patterns: vec!["a".to_string()],
+            no_proxy: None,
+        });
+        config.custom_providers.push(CustomProviderConfig {
+            name: "dup".to_string(),
+            base_url: "https://b.com/v1".to_string(),
+            api_key: Some("key".to_string()),
+            model_patterns: vec!["b".to_string()],
+            no_proxy: None,
+        });
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(report.errors().iter().any(|e| e.path == "custom_providers[1].name" && e.message.contains("Duplicate")));
+    }
+
+    // -------------------------------------------------------------------
+    // New: Custom provider no model_patterns warning
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_custom_provider_no_model_patterns_warning() {
+        let mut config = make_valid_config();
+        config.custom_providers.push(CustomProviderConfig {
+            name: "bare".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: Some("key".to_string()),
+            model_patterns: vec![],
+            no_proxy: None,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "custom_providers[0].model_patterns"));
+    }
+
+    // -------------------------------------------------------------------
+    // New: Email port validation
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_email_port_zero_warns() {
+        let mut config = make_valid_config();
+        config.channels.email = Some(EmailConfig {
+            imap_host: Some("imap.example.com".to_string()),
+            smtp_host: Some("smtp.example.com".to_string()),
+            username: Some("user@example.com".to_string()),
+            password: None,
+            port: 0,
+            enabled: true,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "channels.email.port" && w.message.contains("0")));
+    }
+
+    #[test]
+    fn test_email_port_nonstandard_warns() {
+        let mut config = make_valid_config();
+        config.channels.email = Some(EmailConfig {
+            imap_host: Some("imap.example.com".to_string()),
+            smtp_host: Some("smtp.example.com".to_string()),
+            username: Some("user@example.com".to_string()),
+            password: None,
+            port: 8080,
+            enabled: true,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "channels.email.port" && w.message.contains("non-standard")));
+    }
+
+    #[test]
+    fn test_email_port_standard_ok() {
+        let mut config = make_valid_config();
+        config.channels.email = Some(EmailConfig {
+            imap_host: Some("imap.example.com".to_string()),
+            smtp_host: Some("smtp.example.com".to_string()),
+            username: Some("user@example.com".to_string()),
+            password: None,
+            port: 587,
+            enabled: true,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().all(|w| w.path != "channels.email.port"));
+    }
+
+    // -------------------------------------------------------------------
+    // New: URL HTTPS enforcement for webhooks
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_dingtalk_http_webhook_warns() {
+        let mut config = make_valid_config();
+        config.channels.dingtalk = Some(DingtalkConfig {
+            webhook: Some("http://oapi.dingtalk.com/robot/send?access_token=abc".to_string()),
+            secret: None,
+            enabled: true,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "channels.dingtalk.webhook" && w.message.contains("HTTP instead of HTTPS")));
+    }
+
+    #[test]
+    fn test_mochat_http_webhook_warns() {
+        let mut config = make_valid_config();
+        config.channels.mochat = Some(MochatConfig {
+            webhook_url: Some("http://hook.example.com/webhook".to_string()),
+            enabled: true,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "channels.mochat.webhook_url" && w.message.contains("HTTP instead of HTTPS")));
+    }
+
+    #[test]
+    fn test_matrix_homeserver_http_warns() {
+        let mut config = make_valid_config();
+        config.channels.matrix = Some(MatrixConfig {
+            homeserver: Some("http://matrix.example.com".to_string()),
+            user_id: Some("@bot:example.com".to_string()),
+            password: Some("pass".to_string()),
+            access_token: None,
+            enabled: true,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "channels.matrix.homeserver" && w.message.contains("HTTP instead of HTTPS")));
+    }
+
+    #[test]
+    fn test_matrix_homeserver_https_ok() {
+        let mut config = make_valid_config();
+        config.channels.matrix = Some(MatrixConfig {
+            homeserver: Some("https://matrix.example.com".to_string()),
+            user_id: Some("@bot:example.com".to_string()),
+            password: Some("pass".to_string()),
+            access_token: None,
+            enabled: true,
+        });
+        let report = validate(&config);
+        assert!(report.warnings().iter().all(|w| w.path != "channels.matrix.homeserver"));
+    }
+
+    // -------------------------------------------------------------------
+    // New: Agent model whitespace
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_agent_model_whitespace_error() {
+        let mut config = make_valid_config();
+        config.agent.model = "gpt 4o".to_string();
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(report.errors().iter().any(|e| e.path == "agent.model" && e.message.contains("whitespace")));
+    }
+
+    // -------------------------------------------------------------------
+    // New: Agent max_iterations upper bound
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_agent_max_iterations_very_large() {
+        let mut config = make_valid_config();
+        config.agent.max_iterations = 1000;
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "agent.max_iterations" && w.message.contains("very high")));
+    }
+
+    // -------------------------------------------------------------------
+    // New: API allowed_origins format
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_api_allowed_origins_bad_format() {
+        let mut config = make_valid_config();
+        config.api.allowed_origins = vec!["example.com".to_string()];
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "api.allowed_origins[0]" && w.message.contains("should be")));
+    }
+
+    #[test]
+    fn test_api_allowed_origins_wildcard_ok() {
+        let mut config = make_valid_config();
+        config.api.allowed_origins = vec!["*".to_string()];
+        let report = validate(&config);
+        assert!(report.warnings().iter().all(|w| !w.path.starts_with("api.allowed_origins")));
+    }
+
+    #[test]
+    fn test_api_allowed_origins_valid_url_ok() {
+        let mut config = make_valid_config();
+        config.api.allowed_origins = vec!["https://example.com".to_string()];
+        let report = validate(&config);
+        assert!(report.warnings().iter().all(|w| !w.path.starts_with("api.allowed_origins")));
+    }
+
+    #[test]
+    fn test_api_max_body_size_tiny_warns() {
+        let mut config = make_valid_config();
+        config.api.max_body_size = 512;
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "api.max_body_size" && w.message.contains("1KB")));
+    }
+
+    // -------------------------------------------------------------------
+    // New: Dream model cross-check
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_dream_model_cross_check_mismatch() {
+        let mut config = make_valid_config();
+        config.dream.enabled = true;
+        config.dream.model = Some("claude-3".to_string()); // only openai configured
+        let report = validate(&config);
+        assert!(report.warnings().iter().any(|w| w.path == "dream.model" && w.message.contains("may not match")));
+    }
+
+    #[test]
+    fn test_dream_model_cross_check_match() {
+        let mut config = make_valid_config();
+        config.dream.enabled = true;
+        config.dream.model = Some("gpt-4o-mini".to_string()); // openai configured
+        let report = validate(&config);
+        assert!(report.warnings().iter().all(|w| w.path != "dream.model"));
+    }
+
+    #[test]
+    fn test_dream_model_cross_check_disabled() {
+        let mut config = make_valid_config();
+        config.dream.enabled = false;
+        config.dream.model = Some("claude-3".to_string()); // mismatch but dream disabled
+        let report = validate(&config);
+        assert!(report.warnings().iter().all(|w| w.path != "dream.model"));
     }
 }

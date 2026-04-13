@@ -92,6 +92,7 @@ impl SkillLoader {
 
         let mut skills = Vec::new();
         let mut new_by_name = HashMap::new();
+        let mut seen_names: HashMap<String, PathBuf> = HashMap::new();
 
         for path in &files {
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -111,6 +112,14 @@ impl SkillLoader {
             if let Some(entry) = self.cache.get(&canonical) {
                 if entry.content_hash == hash {
                     debug!("Cache hit for {}", path.display());
+                    if let Some(prev) = seen_names.insert(entry.skill.name.clone(), path.clone()) {
+                        warn!(
+                            "Duplicate skill name '{}' — file {} shadows {}",
+                            entry.skill.name,
+                            path.display(),
+                            prev.display()
+                        );
+                    }
                     new_by_name.insert(entry.skill.name.clone(), entry.skill.clone());
                     skills.push(entry.skill.clone());
                     continue;
@@ -127,6 +136,14 @@ impl SkillLoader {
                         skill.category,
                         relative.display()
                     );
+                    if let Some(prev) = seen_names.insert(skill.name.clone(), path.clone()) {
+                        warn!(
+                            "Duplicate skill name '{}' — file {} shadows {}",
+                            skill.name,
+                            path.display(),
+                            prev.display()
+                        );
+                    }
                     new_by_name.insert(skill.name.clone(), skill.clone());
                     self.cache.insert(
                         canonical,
@@ -229,6 +246,9 @@ impl SkillLoader {
     // -----------------------------------------------------------------------
 
     /// Parse a skill file from its raw content.
+    ///
+    /// Returns an error if the skill name is empty. Warns (via tracing) for
+    /// empty instructions or names with unusual characters.
     fn parse_skill(content: &str, path: &Path, relative: &Path) -> Result<Skill> {
         let (frontmatter, body) = parse_frontmatter(content)?;
 
@@ -241,6 +261,27 @@ impl SkillLoader {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default()
             });
+
+        if name.is_empty() {
+            anyhow::bail!("Skill name is empty (no frontmatter 'name' and file stem is empty)");
+        }
+
+        if name.contains(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
+            warn!(
+                "Skill name '{}' in {} contains unusual characters — consider using only alphanumeric, underscore, or hyphen",
+                name,
+                relative.display()
+            );
+        }
+
+        let instructions = body.trim().to_string();
+        if instructions.is_empty() {
+            warn!(
+                "Skill '{}' in {} has no instructions (empty body after frontmatter)",
+                name,
+                relative.display()
+            );
+        }
 
         let description = frontmatter
             .get("description")
@@ -270,7 +311,7 @@ impl SkillLoader {
             name,
             description,
             category,
-            instructions: body.trim().to_string(),
+            instructions,
             parameters,
             tags,
             source_path: path.to_path_buf(),
@@ -299,6 +340,12 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in entries {
         let entry = entry.context("Failed to read dir entry")?;
         let path = entry.path();
+
+        // Skip symlinks to avoid infinite recursion
+        if path.is_symlink() {
+            debug!("Skipping symlink: {}", path.display());
+            continue;
+        }
 
         if path.is_dir() {
             walk_dir(&path, files)?;
@@ -340,6 +387,8 @@ fn parse_frontmatter(content: &str) -> Result<(serde_yaml::Value, String)> {
 }
 
 /// Parse the `parameters` field from frontmatter.
+///
+/// Skips parameters with empty names (logs a warning).
 fn parse_parameters(frontmatter: &serde_yaml::Value) -> Vec<SkillParameter> {
     let params = match frontmatter
         .get("parameters")
@@ -353,7 +402,14 @@ fn parse_parameters(frontmatter: &serde_yaml::Value) -> Vec<SkillParameter> {
         .iter()
         .filter_map(|v| {
             if v.is_mapping() {
-                let name = v.get("name")?.as_str()?.to_string();
+                let name = match v.get("name").and_then(|n| n.as_str()) {
+                    Some(n) if !n.is_empty() => n.to_string(),
+                    Some(_) => {
+                        warn!("Skipping parameter with empty name in frontmatter");
+                        return None;
+                    }
+                    None => return None,
+                };
                 let description = v
                     .get("description")
                     .and_then(|d| d.as_str())
@@ -369,11 +425,13 @@ fn parse_parameters(frontmatter: &serde_yaml::Value) -> Vec<SkillParameter> {
                     required,
                 })
             } else {
-                v.as_str().map(|name| SkillParameter {
-                    name: name.to_string(),
-                    description: String::new(),
-                    required: false,
-                })
+                v.as_str()
+                    .filter(|n| !n.is_empty())
+                    .map(|name| SkillParameter {
+                        name: name.to_string(),
+                        description: String::new(),
+                        required: false,
+                    })
             }
         })
         .collect()
@@ -1026,5 +1084,109 @@ mod tests {
     fn test_root_accessor() {
         let loader = SkillLoader::new(PathBuf::from("/some/path"));
         assert_eq!(loader.root(), Path::new("/some/path"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Name validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_skill_empty_name_rejected() {
+        // Explicitly setting name to empty in frontmatter should fail
+        let content = "---\nname: ''\n---\nBody text.";
+        let path = Path::new("some.md");
+        let relative = Path::new("some.md");
+        assert!(SkillLoader::parse_skill(content, path, relative).is_err());
+    }
+
+    #[test]
+    fn test_parse_skill_valid_name_ok() {
+        let content = "---\nname: my-skill_v2\n---\nBody.";
+        let path = Path::new("my-skill_v2.md");
+        let relative = Path::new("my-skill_v2.md");
+        let skill = SkillLoader::parse_skill(content, path, relative).unwrap();
+        assert_eq!(skill.name, "my-skill_v2");
+    }
+
+    #[test]
+    fn test_parse_skill_no_instructions_warns() {
+        // This doesn't fail, just warns — verify it returns a skill with empty instructions
+        let content = "---\nname: empty_body\n---\n";
+        let path = Path::new("empty_body.md");
+        let relative = Path::new("empty_body.md");
+        let skill = SkillLoader::parse_skill(content, path, relative).unwrap();
+        assert!(skill.instructions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Duplicate name detection (last-wins, warned)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_duplicate_name_last_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(
+            tmp.path(),
+            "a.md",
+            "---\nname: dup\n---\nFirst.",
+        );
+        write_skill(
+            tmp.path(),
+            "b.md",
+            "---\nname: dup\n---\nSecond.",
+        );
+
+        let mut loader = SkillLoader::new(tmp.path().to_path_buf());
+        let skills = loader.load_all().unwrap();
+
+        // Both skills returned in list
+        assert_eq!(skills.len(), 2);
+        // by_name lookup returns the last one loaded
+        assert_eq!(loader.get("dup").unwrap().instructions, "Second.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameter name validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_parameters_skips_empty_name() {
+        let yaml = serde_yaml::from_str(
+            "parameters:\n  - name: ''\n    description: Empty name\n  - name: good\n",
+        )
+        .unwrap();
+        let params = parse_parameters(&yaml);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "good");
+    }
+
+    #[test]
+    fn test_parse_parameters_skips_empty_shorthand() {
+        let yaml = serde_yaml::from_str("parameters:\n  - ''\n  - valid\n").unwrap();
+        let params = parse_parameters(&yaml);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "valid");
+    }
+
+    // -----------------------------------------------------------------------
+    // Symlink skipping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collect_md_files_skips_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(tmp.path(), "real.md", "---\nname: real\n---\nReal.");
+        // Create a symlink to a directory that would cause recursion
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let link = tmp.path().join("link.md");
+            symlink(tmp.path().join("real.md"), &link).unwrap();
+        }
+
+        let files = collect_md_files(tmp.path()).unwrap();
+        // real.md is found, symlink is skipped
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("real.md"));
     }
 }

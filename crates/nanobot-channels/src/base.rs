@@ -56,6 +56,18 @@ pub trait BaseChannel: Send + Sync {
     /// Send a typing indicator.
     async fn send_typing(&self, chat_id: &str) -> Result<()>;
 
+    /// Send a reaction emoji to a message.
+    ///
+    /// Default no-op — platforms that don't support reactions can ignore this.
+    async fn send_reaction(
+        &self,
+        _chat_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Send an image.
     async fn send_image(
         &self,

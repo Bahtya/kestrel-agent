@@ -7,13 +7,29 @@ use dashmap::DashMap;
 use nanobot_bus::events::OutboundMessage;
 use nanobot_bus::MessageBus;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tokio::task::JoinHandle;
+use tracing::{debug, error, info, warn};
 
 /// Manages multiple channel adapters and routes messages.
 pub struct ChannelManager {
     registry: Arc<ChannelRegistry>,
     bus: Arc<MessageBus>,
     running_channels: DashMap<String, Arc<tokio::sync::Mutex<Box<dyn BaseChannel>>>>,
+    /// Active periodic typing tasks, keyed by session_key.
+    typing_tasks: DashMap<String, JoinHandle<()>>,
+}
+
+/// Extract platform name and chat_id from a session_key.
+///
+/// Format: `"{platform}:{chat_id}:{thread_id?}"`
+fn parse_session_key(key: &str) -> Option<(&str, &str)> {
+    let mut parts = key.splitn(3, ':');
+    let platform = parts.next()?;
+    let chat_id = parts.next()?;
+    if platform.is_empty() || chat_id.is_empty() {
+        return None;
+    }
+    Some((platform, chat_id))
 }
 
 impl ChannelManager {
@@ -22,6 +38,7 @@ impl ChannelManager {
             registry: Arc::new(registry),
             bus: Arc::new(bus),
             running_channels: DashMap::new(),
+            typing_tasks: DashMap::new(),
         }
     }
 
@@ -104,12 +121,90 @@ impl ChannelManager {
         info!("Channel manager outbound consumer stopped");
     }
 
-    /// Stop all running channels.
+    /// Stop all running channels and cancel typing tasks.
     pub async fn stop_all(&self) {
+        // Cancel all periodic typing tasks.
+        for entry in self.typing_tasks.iter() {
+            entry.value().abort();
+        }
+        self.typing_tasks.clear();
+
         let names: Vec<String> = self.running_channel_names();
         for name in names {
             if let Err(e) = self.stop_channel(&name).await {
                 error!("Error stopping channel '{}': {}", name, e);
+            }
+        }
+    }
+
+    /// Start a periodic typing indicator for a session.
+    ///
+    /// Sends one typing action immediately, then repeats every 4 seconds.
+    /// Call [`stop_typing`] to cancel.
+    pub fn start_typing(&self, session_key: &str) {
+        let (platform, chat_id) = match parse_session_key(session_key) {
+            Some(p) => p,
+            None => {
+                warn!("Cannot parse session_key for typing: {session_key}");
+                return;
+            }
+        };
+
+        let channel = match self.running_channels.get(platform) {
+            Some(c) => c.clone(),
+            None => {
+                debug!("No running channel for platform: {platform}");
+                return;
+            }
+        };
+
+        let chat_id_owned = chat_id.to_string();
+        let sk = session_key.to_string();
+
+        // Fire one typing action immediately.
+        {
+            let ch = channel.clone();
+            let cid = chat_id_owned.clone();
+            tokio::spawn(async move {
+                let ch = ch.lock().await;
+                let _ = ch.send_typing(&cid).await;
+            });
+        }
+
+        // Spawn a periodic typing task (every 4 s).
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                let ch = channel.lock().await;
+                let _ = ch.send_typing(&chat_id_owned).await;
+            }
+        });
+
+        // Cancel any previous task for the same session.
+        if let Some(old) = self.typing_tasks.insert(sk, handle) {
+            old.abort();
+        }
+    }
+
+    /// Stop the periodic typing indicator for a session.
+    pub fn stop_typing(&self, session_key: &str) {
+        if let Some((_, handle)) = self.typing_tasks.remove(session_key) {
+            handle.abort();
+        }
+    }
+
+    /// Send a reaction emoji on a specific platform channel.
+    pub async fn send_reaction_for_chat(
+        &self,
+        platform: &str,
+        chat_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) {
+        if let Some(channel) = self.running_channels.get(platform) {
+            let channel = channel.lock().await;
+            if let Err(e) = channel.send_reaction(chat_id, message_id, emoji).await {
+                warn!("Failed to send reaction: {e}");
             }
         }
     }
@@ -162,5 +257,93 @@ mod tests {
         // stop_all on empty manager should succeed without panic
         manager.stop_all().await;
         assert!(manager.running_channel_names().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for parse_session_key helper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_session_key_simple() {
+        let (platform, chat_id) = parse_session_key("telegram:123").unwrap();
+        assert_eq!(platform, "telegram");
+        assert_eq!(chat_id, "123");
+    }
+
+    #[test]
+    fn test_parse_session_key_with_thread() {
+        let (platform, chat_id) = parse_session_key("telegram:-100:42").unwrap();
+        assert_eq!(platform, "telegram");
+        assert_eq!(chat_id, "-100");
+    }
+
+    #[test]
+    fn test_parse_session_key_negative_chat_id() {
+        let (platform, chat_id) = parse_session_key("discord:-999888").unwrap();
+        assert_eq!(platform, "discord");
+        assert_eq!(chat_id, "-999888");
+    }
+
+    #[test]
+    fn test_parse_session_key_empty() {
+        assert!(parse_session_key("").is_none());
+    }
+
+    #[test]
+    fn test_parse_session_key_no_colon() {
+        assert!(parse_session_key("telegram").is_none());
+    }
+
+    #[test]
+    fn test_parse_session_key_empty_platform() {
+        assert!(parse_session_key(":123").is_none());
+    }
+
+    #[test]
+    fn test_parse_session_key_empty_chat_id() {
+        assert!(parse_session_key("telegram:").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for typing indicator lifecycle
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_start_typing_no_running_channel() {
+        let registry = ChannelRegistry::new();
+        let bus = MessageBus::new();
+        let manager = ChannelManager::new(registry, bus);
+        // Should silently do nothing — no panic.
+        manager.start_typing("telegram:123");
+        assert!(manager.typing_tasks.is_empty());
+    }
+
+    #[test]
+    fn test_stop_typing_nonexistent() {
+        let registry = ChannelRegistry::new();
+        let bus = MessageBus::new();
+        let manager = ChannelManager::new(registry, bus);
+        // Should silently do nothing — no panic.
+        manager.stop_typing("telegram:nonexistent");
+    }
+
+    #[test]
+    fn test_start_typing_invalid_session_key() {
+        let registry = ChannelRegistry::new();
+        let bus = MessageBus::new();
+        let manager = ChannelManager::new(registry, bus);
+        manager.start_typing("invalid-no-colon");
+        assert!(manager.typing_tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_for_chat_no_channel() {
+        let registry = ChannelRegistry::new();
+        let bus = MessageBus::new();
+        let manager = ChannelManager::new(registry, bus);
+        // Should silently do nothing — no panic.
+        manager
+            .send_reaction_for_chat("telegram", "123", "456", "👀")
+            .await;
     }
 }

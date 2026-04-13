@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use nanobot_agent::AgentLoop;
 use nanobot_api::ApiServer;
+use nanobot_bus::events::AgentEvent;
 use nanobot_bus::MessageBus;
 use nanobot_channels::{ChannelManager, ChannelRegistry};
 use nanobot_config::Config;
@@ -122,6 +123,28 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
         outbound_cm.run_outbound_consumer().await;
     });
 
+    // ── Typing indicator lifecycle ──────────────────────────────
+    let typing_cm = channel_manager.clone();
+    let mut typing_event_rx = bus.subscribe_events();
+    let typing_handle = tokio::spawn(async move {
+        loop {
+            match typing_event_rx.recv().await {
+                Ok(AgentEvent::Started { session_key }) => {
+                    typing_cm.start_typing(&session_key);
+                }
+                Ok(AgentEvent::Completed { session_key, .. })
+                | Ok(AgentEvent::Error { session_key, .. }) => {
+                    typing_cm.stop_typing(&session_key);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Typing event consumer lagged by {n} messages");
+                }
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+
     let heartbeat_enabled = config.heartbeat.enabled;
     let heartbeat_handle = tokio::spawn(async move {
         if heartbeat_enabled {
@@ -159,6 +182,9 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
         }
         _ = api_handle => {
             info!("API server exited");
+        }
+        _ = typing_handle => {
+            info!("Typing handler exited");
         }
     }
 

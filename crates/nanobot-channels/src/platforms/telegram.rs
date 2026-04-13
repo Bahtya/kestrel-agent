@@ -181,6 +181,21 @@ struct AnswerCallbackQueryBody {
     text: Option<String>,
 }
 
+/// A single reaction entry for `setMessageReaction`.
+#[derive(Debug, Serialize)]
+struct ReactionType {
+    r#type: String,
+    emoji: String,
+}
+
+/// Request body for `setMessageReaction`.
+#[derive(Debug, Serialize)]
+struct SetMessageReactionBody {
+    chat_id: i64,
+    message_id: i64,
+    reaction: Vec<ReactionType>,
+}
+
 // ---------------------------------------------------------------------------
 // TelegramChannel
 // ---------------------------------------------------------------------------
@@ -298,6 +313,30 @@ impl TelegramChannel {
         Ok(())
     }
 
+    /// Send a 👀 read-receipt reaction to a Telegram message.
+    ///
+    /// Non-critical: failures are logged but not propagated.
+    async fn send_read_receipt(
+        client: &reqwest::Client,
+        base_url: &str,
+        chat_id: i64,
+        message_id: i64,
+    ) {
+        let body = SetMessageReactionBody {
+            chat_id,
+            message_id,
+            reaction: vec![ReactionType {
+                r#type: "emoji".to_string(),
+                emoji: "👀".to_string(),
+            }],
+        };
+
+        let url = format!("{}/setMessageReaction", base_url);
+        if let Err(e) = client.post(&url).json(&body).send().await {
+            debug!("Failed to send read receipt: {e}");
+        }
+    }
+
     /// Poll `getUpdates` in a loop until `running` is cleared.
     ///
     /// Uses exponential backoff on transient errors (max 60s).
@@ -369,8 +408,21 @@ impl TelegramChannel {
                 offset = Some(update.update_id + 1);
 
                 if let Some(msg) = update.message {
-                    if let Err(e) = Self::dispatch_message(&handler, &msg).await {
-                        error!("Failed to dispatch Telegram message: {e}");
+                    match Self::dispatch_message(&handler, &msg).await {
+                        Ok(true) => {
+                            // Message dispatched — send 👀 read receipt.
+                            Self::send_read_receipt(
+                                &client,
+                                &base_url,
+                                msg.chat.id,
+                                msg.message_id,
+                            )
+                            .await;
+                        }
+                        Ok(false) => {} // Skipped (no text/photo).
+                        Err(e) => {
+                            error!("Failed to dispatch Telegram message: {e}");
+                        }
                     }
                 } else if let Some(cq) = update.callback_query {
                     if let Err(e) =
@@ -387,10 +439,13 @@ impl TelegramChannel {
 
     /// Convert a `TgMessage` into an `InboundMessage` and send it
     /// through the handler channel.
+    ///
+    /// Returns `Ok(true)` if the message was dispatched, `Ok(false)` if it
+    /// was skipped (no text and no photo).
     async fn dispatch_message(
         handler: &tokio::sync::mpsc::Sender<InboundMessage>,
         msg: &TgMessage,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let sender_id = msg
             .from
             .as_ref()
@@ -411,7 +466,7 @@ impl TelegramChannel {
 
         // If there is no text and no photo, skip the message.
         if text.is_empty() && msg.photo.is_none() {
-            return Ok(());
+            return Ok(false);
         }
 
         let chat_id = msg.chat.id.to_string();
@@ -498,7 +553,8 @@ impl TelegramChannel {
         handler
             .send(inbound)
             .await
-            .context("message handler channel closed")
+            .context("message handler channel closed")?;
+        Ok(true)
     }
 
     /// Convert a `TgCallbackQuery` into an `InboundMessage` and answer it.
@@ -760,6 +816,50 @@ impl BaseChannel for TelegramChannel {
         let url = self.api_url("sendChatAction");
         if let Err(e) = self.client.post(&url).json(&body).send().await {
             warn!("Failed to send typing indicator: {e}");
+        }
+
+        Ok(())
+    }
+
+    async fn send_reaction(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        debug!(
+            "Sending reaction '{}' to message {} in chat {}",
+            emoji, message_id, chat_id
+        );
+
+        let chat_id_num: i64 = match chat_id.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                warn!("Invalid chat_id for reaction: {chat_id}");
+                return Ok(());
+            }
+        };
+
+        let message_id_num: i64 = match message_id.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                warn!("Invalid message_id for reaction: {message_id}");
+                return Ok(());
+            }
+        };
+
+        let body = SetMessageReactionBody {
+            chat_id: chat_id_num,
+            message_id: message_id_num,
+            reaction: vec![ReactionType {
+                r#type: "emoji".to_string(),
+                emoji: emoji.to_string(),
+            }],
+        };
+
+        let url = self.api_url("setMessageReaction");
+        if let Err(e) = self.client.post(&url).json(&body).send().await {
+            warn!("Failed to send reaction: {e}");
         }
 
         Ok(())
@@ -1372,7 +1472,54 @@ mod tests {
         };
 
         // Should succeed but not send anything — no text, no photo.
-        TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        let dispatched = TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        assert!(!dispatched);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_message_returns_true_for_text() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<InboundMessage>(10);
+        let msg = TgMessage {
+            message_id: 1,
+            from: None,
+            chat: TgChat {
+                id: 1,
+                chat_type: Some("private".to_string()),
+                title: None,
+                thread_id: None,
+            },
+            text: Some("hi".to_string()),
+            photo: None,
+            caption: None,
+            reply_to_message: None,
+        };
+        let dispatched = TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        assert!(dispatched);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_message_returns_true_for_photo() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<InboundMessage>(10);
+        let msg = TgMessage {
+            message_id: 3,
+            from: None,
+            chat: TgChat {
+                id: 3,
+                chat_type: Some("private".to_string()),
+                title: None,
+                thread_id: None,
+            },
+            text: None,
+            photo: Some(vec![TgPhotoSize {
+                file_id: "f".to_string(),
+                width: 100,
+                height: 100,
+            }]),
+            caption: None,
+            reply_to_message: None,
+        };
+        let dispatched = TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        assert!(dispatched);
     }
 
     // -----------------------------------------------------------------------
@@ -1597,5 +1744,53 @@ mod tests {
         };
         let json = serde_json::to_value(&body).unwrap();
         assert!(json.get("text").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for read receipt (reaction) and send_reaction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_message_reaction_body_serialisation() {
+        let body = SetMessageReactionBody {
+            chat_id: 123,
+            message_id: 456,
+            reaction: vec![ReactionType {
+                r#type: "emoji".to_string(),
+                emoji: "👀".to_string(),
+            }],
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["chat_id"], 123);
+        assert_eq!(json["message_id"], 456);
+        let reaction = json["reaction"].as_array().unwrap();
+        assert_eq!(reaction.len(), 1);
+        assert_eq!(reaction[0]["type"], "emoji");
+        assert_eq!(reaction[0]["emoji"], "👀");
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_invalid_chat_id() {
+        let channel = TelegramChannel::new();
+        // Should not panic — gracefully handles bad chat_id.
+        channel.send_reaction("abc", "1", "👀").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_invalid_message_id() {
+        let channel = TelegramChannel::new();
+        // Should not panic — gracefully handles bad message_id.
+        channel.send_reaction("123", "xyz", "👀").await.unwrap();
+    }
+
+    #[test]
+    fn test_reaction_type_serialisation() {
+        let rt = ReactionType {
+            r#type: "emoji".to_string(),
+            emoji: "👍".to_string(),
+        };
+        let json = serde_json::to_value(&rt).unwrap();
+        assert_eq!(json["type"], "emoji");
+        assert_eq!(json["emoji"], "👍");
     }
 }

@@ -154,3 +154,31 @@ async fn test_telegram_edit_message_reply_markup_with_mock() {
         .unwrap();
     assert!(result.success);
 }
+
+#[tokio::test]
+async fn test_telegram_send_reaction_with_mock() {
+    let mock_response = r#"{"ok":true}"#;
+    let (port, _handle) = start_mock_telegram_server(mock_response).await;
+
+    let channel = TelegramChannel::with_token_and_url(
+        "test-token".to_string(),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    let result = channel.send_reaction("123", "42", "👀").await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_telegram_send_typing_with_mock() {
+    let mock_response = r#"{"ok":true}"#;
+    let (port, _handle) = start_mock_telegram_server(mock_response).await;
+
+    let channel = TelegramChannel::with_token_and_url(
+        "test-token".to_string(),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    let result = channel.send_typing("123").await;
+    assert!(result.is_ok());
+}

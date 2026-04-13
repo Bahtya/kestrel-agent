@@ -18,6 +18,7 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
+uuid = { workspace = true }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 tungstenite = "0.26"
 

@@ -9,4 +9,5 @@ pub mod registry;
 
 pub use base::BaseChannel;
 pub use manager::ChannelManager;
+pub use platforms::websocket::WebSocketChannel;
 pub use registry::ChannelRegistry;

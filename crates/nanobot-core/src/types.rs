@@ -34,6 +34,8 @@ pub enum Platform {
     QQ,
     /// MoChat messaging platform.
     Mochat,
+    /// WebSocket chat channel (browser-based).
+    WebSocket,
     /// Built-in HTTP API server.
     ApiServer,
     /// Generic webhook endpoint.
@@ -58,6 +60,7 @@ impl Platform {
             Self::Weixin => "weixin",
             Self::QQ => "qq",
             Self::Mochat => "mochat",
+            Self::WebSocket => "websocket",
             Self::ApiServer => "api_server",
             Self::Webhook => "webhook",
         }
@@ -302,6 +305,7 @@ mod tests {
         assert_eq!(Platform::Weixin.as_str(), "weixin");
         assert_eq!(Platform::QQ.as_str(), "qq");
         assert_eq!(Platform::Mochat.as_str(), "mochat");
+        assert_eq!(Platform::WebSocket.as_str(), "websocket");
         assert_eq!(Platform::ApiServer.as_str(), "api_server");
         assert_eq!(Platform::Webhook.as_str(), "webhook");
     }
@@ -331,6 +335,7 @@ mod tests {
             Platform::Weixin,
             Platform::QQ,
             Platform::Mochat,
+            Platform::WebSocket,
             Platform::ApiServer,
             Platform::Webhook,
         ];

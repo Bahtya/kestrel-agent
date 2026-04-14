@@ -18,8 +18,8 @@
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
-use tracing::{debug, info, warn};
 use tokio::time::sleep;
+use tracing::{debug, info, warn};
 
 /// Default maximum number of retry attempts.
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -201,7 +201,10 @@ impl RetryConfig {
 
 impl From<RetryPolicy> for RetryConfig {
     fn from(policy: RetryPolicy) -> Self {
-        let retry_on_server_error = policy.retryable_status_codes.iter().any(|c| (500..600).contains(c));
+        let retry_on_server_error = policy
+            .retryable_status_codes
+            .iter()
+            .any(|c| (500..600).contains(c));
         Self {
             max_retries: policy.max_retries,
             initial_backoff: policy.base_delay,
@@ -492,10 +495,7 @@ pub fn backoff_with_jitter(base: Duration, attempt: u32, max_delay: Duration) ->
 ///
 /// Uses [`RetryConfig`] for backward compatibility. New code should use
 /// `retry_with_policy` instead.
-pub async fn retry_with_backoff<F, Fut, T>(
-    config: &RetryConfig,
-    op: F,
-) -> anyhow::Result<T>
+pub async fn retry_with_backoff<F, Fut, T>(config: &RetryConfig, op: F) -> anyhow::Result<T>
 where
     F: Fn(u32) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
@@ -811,11 +811,26 @@ mod tests {
 
     #[test]
     fn test_extract_status_code() {
-        assert_eq!(extract_status_code("API error (429): rate limited"), Some(429));
-        assert_eq!(extract_status_code("Anthropic API error (503): unavailable"), Some(503));
-        assert_eq!(extract_status_code("API error (401): unauthorized"), Some(401));
-        assert_eq!(extract_status_code("API error (429 Too Many Requests): rate limited"), Some(429));
-        assert_eq!(extract_status_code("Anthropic API error (503 Service Unavailable): "), Some(503));
+        assert_eq!(
+            extract_status_code("API error (429): rate limited"),
+            Some(429)
+        );
+        assert_eq!(
+            extract_status_code("Anthropic API error (503): unavailable"),
+            Some(503)
+        );
+        assert_eq!(
+            extract_status_code("API error (401): unauthorized"),
+            Some(401)
+        );
+        assert_eq!(
+            extract_status_code("API error (429 Too Many Requests): rate limited"),
+            Some(429)
+        );
+        assert_eq!(
+            extract_status_code("Anthropic API error (503 Service Unavailable): "),
+            Some(503)
+        );
         assert_eq!(extract_status_code("Some other error"), None);
     }
 
@@ -855,9 +870,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_trips_after_threshold() {
-        let cb = CircuitBreaker::new(
-            CircuitBreakerConfig::default().with_failure_threshold(3),
-        );
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::default().with_failure_threshold(3));
         assert_eq!(cb.state_name(), "CLOSED");
 
         cb.record_failure();
@@ -872,9 +885,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_success_resets_failures() {
-        let cb = CircuitBreaker::new(
-            CircuitBreakerConfig::default().with_failure_threshold(3),
-        );
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::default().with_failure_threshold(3));
         cb.record_failure();
         cb.record_failure();
         assert_eq!(cb.failure_count(), 2);
@@ -935,9 +946,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_reset() {
-        let cb = CircuitBreaker::new(
-            CircuitBreakerConfig::default().with_failure_threshold(1),
-        );
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::default().with_failure_threshold(1));
         cb.record_failure();
         assert_eq!(cb.state_name(), "OPEN");
 
@@ -961,11 +970,9 @@ mod tests {
     #[tokio::test]
     async fn test_retry_succeeds_on_first_try() {
         let config = RetryConfig::default();
-        let result = retry_with_backoff(&config, |_attempt| async {
-            Ok::<_, anyhow::Error>(42)
-        })
-        .await
-        .unwrap();
+        let result = retry_with_backoff(&config, |_attempt| async { Ok::<_, anyhow::Error>(42) })
+            .await
+            .unwrap();
         assert_eq!(result, 42);
     }
 
@@ -1042,7 +1049,9 @@ mod tests {
     async fn test_retry_policy_retries_on_429() {
         use std::sync::atomic::{AtomicU32, Ordering};
         let calls = Arc::new(AtomicU32::new(0));
-        let policy = RetryPolicy::default().with_max_retries(3).with_jitter(false);
+        let policy = RetryPolicy::default()
+            .with_max_retries(3)
+            .with_jitter(false);
 
         let calls_clone = calls.clone();
         let result = retry_with_policy(&policy, None, move |_attempt| {
@@ -1066,7 +1075,9 @@ mod tests {
     async fn test_retry_policy_retries_on_503() {
         use std::sync::atomic::{AtomicU32, Ordering};
         let calls = Arc::new(AtomicU32::new(0));
-        let policy = RetryPolicy::default().with_max_retries(2).with_jitter(false);
+        let policy = RetryPolicy::default()
+            .with_max_retries(2)
+            .with_jitter(false);
 
         let calls_clone = calls.clone();
         let result = retry_with_policy(&policy, None, move |_attempt| {
@@ -1128,7 +1139,9 @@ mod tests {
     async fn test_retry_policy_retries_on_connection_error() {
         use std::sync::atomic::{AtomicU32, Ordering};
         let calls = Arc::new(AtomicU32::new(0));
-        let policy = RetryPolicy::default().with_max_retries(2).with_jitter(false);
+        let policy = RetryPolicy::default()
+            .with_max_retries(2)
+            .with_jitter(false);
 
         let calls_clone = calls.clone();
         let result = retry_with_policy(&policy, None, move |_attempt| {
@@ -1150,7 +1163,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_policy_exhausted() {
-        let policy = RetryPolicy::default().with_max_retries(1).with_jitter(false);
+        let policy = RetryPolicy::default()
+            .with_max_retries(1)
+            .with_jitter(false);
         let result = retry_with_policy(&policy, None, |_attempt| async {
             Err::<(), _>(anyhow::anyhow!("API error (500): internal error"))
         })
@@ -1167,7 +1182,9 @@ mod tests {
                 .with_failure_threshold(3)
                 .with_success_threshold(1),
         );
-        let policy = RetryPolicy::default().with_max_retries(0).with_jitter(false);
+        let policy = RetryPolicy::default()
+            .with_max_retries(0)
+            .with_jitter(false);
 
         let calls_clone = calls.clone();
         // Fail 3 times to trip the breaker (no retries so each call = 1 attempt).
@@ -1201,10 +1218,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_policy_success_records_to_circuit_breaker() {
-        let cb = CircuitBreaker::new(
-            CircuitBreakerConfig::default().with_failure_threshold(1),
-        );
-        let policy = RetryPolicy::default().with_max_retries(0).with_jitter(false);
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::default().with_failure_threshold(1));
+        let policy = RetryPolicy::default()
+            .with_max_retries(0)
+            .with_jitter(false);
 
         // Succeed.
         let result = retry_with_policy(&policy, Some(&cb), |_attempt| async {
@@ -1374,7 +1391,9 @@ mod tests {
                 .with_failure_threshold(3)
                 .with_success_threshold(1),
         );
-        let policy = RetryPolicy::default().with_max_retries(0).with_jitter(false);
+        let policy = RetryPolicy::default()
+            .with_max_retries(0)
+            .with_jitter(false);
 
         let calls_clone = calls.clone();
 

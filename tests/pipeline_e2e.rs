@@ -10,9 +10,7 @@ use nanobot_bus::events::AgentEvent;
 use nanobot_bus::MessageBus;
 use nanobot_config::Config;
 use nanobot_core::{FunctionCall, MessageType, Platform, ToolCall, Usage};
-use nanobot_cron::{
-    CronPayload, CronSchedule, CronService, JobState, ScheduleKind,
-};
+use nanobot_cron::{CronPayload, CronSchedule, CronService, JobState, ScheduleKind};
 use nanobot_providers::base::{BoxStream, CompletionChunk};
 use nanobot_providers::{CompletionRequest, CompletionResponse, LlmProvider, ProviderRegistry};
 use nanobot_session::SessionManager;
@@ -86,10 +84,13 @@ impl LlmProvider for MockProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
-        self.responses
-            .get(idx)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("MockProvider exhausted: call {} but only {} responses", idx + 1, self.responses.len()))
+        self.responses.get(idx).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "MockProvider exhausted: call {} but only {} responses",
+                idx + 1,
+                self.responses.len()
+            )
+        })
     }
 
     async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<BoxStream> {
@@ -283,9 +284,7 @@ async fn test_pipeline_startup_flow() {
     });
 
     // Send a message to confirm the full pipeline is live
-    bus.publish_inbound(make_inbound("ping"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound("ping")).await.unwrap();
 
     let outbound = timeout(TEST_TIMEOUT, outbound_rx.recv())
         .await
@@ -387,12 +386,20 @@ async fn test_pipeline_tool_call_conversation_cycle() {
     for _ in 0..15 {
         match timeout(Duration::from_secs(2), event_rx.recv()).await {
             Ok(Ok(AgentEvent::Started { .. })) => saw_started = true,
-            Ok(Ok(AgentEvent::ToolCall { tool_name, iteration, .. })) => {
+            Ok(Ok(AgentEvent::ToolCall {
+                tool_name,
+                iteration,
+                ..
+            })) => {
                 assert_eq!(tool_name, "echo");
                 assert_eq!(iteration, 1);
                 saw_tool_call = true;
             }
-            Ok(Ok(AgentEvent::Completed { tool_calls, iterations, .. })) => {
+            Ok(Ok(AgentEvent::Completed {
+                tool_calls,
+                iterations,
+                ..
+            })) => {
                 assert_eq!(tool_calls, 1);
                 assert_eq!(iterations, 2);
                 saw_completed = true;
@@ -441,9 +448,7 @@ async fn test_pipeline_multi_turn_context_persistence() {
     });
 
     // Turn 1
-    bus.publish_inbound(make_inbound("Hi"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound("Hi")).await.unwrap();
     let out1 = timeout(TEST_TIMEOUT, outbound_rx.recv())
         .await
         .expect("Timeout on turn 1")
@@ -461,9 +466,7 @@ async fn test_pipeline_multi_turn_context_persistence() {
     assert_eq!(out2.content, "Turn 2: I remember our conversation.");
 
     // Turn 3
-    bus.publish_inbound(make_inbound("Bye"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound("Bye")).await.unwrap();
     let out3 = timeout(TEST_TIMEOUT, outbound_rx.recv())
         .await
         .expect("Timeout on turn 3")
@@ -482,7 +485,11 @@ async fn test_pipeline_multi_turn_context_persistence() {
     );
 
     // Verify message ordering and roles
-    let roles: Vec<String> = session.messages.iter().map(|m| format!("{:?}", m.role)).collect();
+    let roles: Vec<String> = session
+        .messages
+        .iter()
+        .map(|m| format!("{:?}", m.role))
+        .collect();
     // Pattern should alternate: User, Assistant, User, Assistant, User, Assistant
     assert!(
         roles.windows(2).all(|w| w[0] != w[1]),
@@ -551,8 +558,12 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
     }
     #[async_trait]
     impl Tool for CountingTool {
-        fn name(&self) -> &str { "counter" }
-        fn description(&self) -> &str { "Count" }
+        fn name(&self) -> &str {
+            "counter"
+        }
+        fn description(&self) -> &str {
+            "Count"
+        }
         fn parameters_schema(&self) -> Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
@@ -563,7 +574,9 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
     }
 
     let tool_reg = ToolRegistry::new();
-    tool_reg.register(CountingTool { counter: counter_clone });
+    tool_reg.register(CountingTool {
+        counter: counter_clone,
+    });
 
     let agent_loop = AgentLoop::new(config, bus.clone(), session_mgr, provider_reg, tool_reg);
     let mut outbound_rx = bus.consume_outbound().await.unwrap();
@@ -575,19 +588,25 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
     // Turn 1
     bus.publish_inbound(make_inbound("Hello")).await.unwrap();
     let out1 = timeout(TEST_TIMEOUT, outbound_rx.recv())
-        .await.expect("T1 timeout").expect("T1 closed");
+        .await
+        .expect("T1 timeout")
+        .expect("T1 closed");
     assert_eq!(out1.content, "Welcome!");
 
     // Turn 2 — triggers counter tool
     bus.publish_inbound(make_inbound("Count")).await.unwrap();
     let out2 = timeout(TEST_TIMEOUT, outbound_rx.recv())
-        .await.expect("T2 timeout").expect("T2 closed");
+        .await
+        .expect("T2 timeout")
+        .expect("T2 closed");
     assert_eq!(out2.content, "Counter is at 1.");
 
     // Turn 3
     bus.publish_inbound(make_inbound("Done")).await.unwrap();
     let out3 = timeout(TEST_TIMEOUT, outbound_rx.recv())
-        .await.expect("T3 timeout").expect("T3 closed");
+        .await
+        .expect("T3 timeout")
+        .expect("T3 closed");
     assert_eq!(out3.content, "Done!");
 
     // Verify counter was called exactly once
@@ -604,11 +623,7 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
 #[tokio::test]
 async fn test_pipeline_subagent_parallel_spawn() {
     let config = Arc::new(make_config());
-    let provider = MockProvider::multi(vec![
-        "Sub-result A",
-        "Sub-result B",
-        "Sub-result C",
-    ]);
+    let provider = MockProvider::multi(vec!["Sub-result A", "Sub-result B", "Sub-result C"]);
     let provider_reg = Arc::new(make_provider_registry(provider));
     let tool_reg = Arc::new(ToolRegistry::new());
 
@@ -705,7 +720,9 @@ async fn test_pipeline_subagent_error_isolation() {
     struct FailProvider;
     #[async_trait]
     impl LlmProvider for FailProvider {
-        fn name(&self) -> &str { "fail-mock" }
+        fn name(&self) -> &str {
+            "fail-mock"
+        }
         async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
             Err(anyhow::anyhow!("Simulated sub-agent failure"))
         }
@@ -719,7 +736,9 @@ async fn test_pipeline_subagent_error_isolation() {
             };
             Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
         }
-        fn supports_model(&self, _model: &str) -> bool { true }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
     }
 
     // Use a shared call counter to alternate success/failure
@@ -729,7 +748,9 @@ async fn test_pipeline_subagent_error_isolation() {
     }
     #[async_trait]
     impl LlmProvider for AlternatingProvider {
-        fn name(&self) -> &str { "alt-mock" }
+        fn name(&self) -> &str {
+            "alt-mock"
+        }
         async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
             if n == 1 {
@@ -757,7 +778,9 @@ async fn test_pipeline_subagent_error_isolation() {
             };
             Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
         }
-        fn supports_model(&self, _model: &str) -> bool { true }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
     }
 
     let config = Arc::new(make_config());
@@ -831,7 +854,9 @@ fn test_pipeline_cron_add_and_tick_immediate() {
         deliver: true,
     };
 
-    let job = service.add_job(schedule, payload, Some("immediate-job".to_string())).unwrap();
+    let job = service
+        .add_job(schedule, payload, Some("immediate-job".to_string()))
+        .unwrap();
     assert_eq!(job.state, JobState::Active);
     assert!(job.next_run.is_some());
     assert_eq!(job.name, Some("immediate-job".to_string()));
@@ -873,14 +898,20 @@ fn test_pipeline_cron_recurring_every() {
         deliver: false,
     };
 
-    let job = service.add_job(schedule, payload, Some("recurring".to_string())).unwrap();
+    let job = service
+        .add_job(schedule, payload, Some("recurring".to_string()))
+        .unwrap();
 
     // First tick — next_run is now + 1ms, might not be due yet
     // Sleep a bit to ensure it's past
     std::thread::sleep(std::time::Duration::from_millis(5));
 
     let due1 = service.tick();
-    assert_eq!(due1.len(), 1, "First tick should find the recurring job due");
+    assert_eq!(
+        due1.len(),
+        1,
+        "First tick should find the recurring job due"
+    );
     assert_eq!(due1[0].payload.message, "Recurring task");
 
     // Record completion
@@ -895,8 +926,15 @@ fn test_pipeline_cron_recurring_every() {
 
     // Verify execution history
     let updated = service.get_job(&job.id).unwrap();
-    assert!(updated.history.len() >= 2, "Should have at least 2 history entries");
-    assert_eq!(updated.state, JobState::Active, "Recurring job stays active");
+    assert!(
+        updated.history.len() >= 2,
+        "Should have at least 2 history entries"
+    );
+    assert_eq!(
+        updated.state,
+        JobState::Active,
+        "Recurring job stays active"
+    );
 }
 
 #[tokio::test]
@@ -923,7 +961,9 @@ async fn test_pipeline_cron_with_bus_events() {
         deliver: true,
     };
 
-    service.add_job(schedule, payload, Some("bus-event-job".to_string())).unwrap();
+    service
+        .add_job(schedule, payload, Some("bus-event-job".to_string()))
+        .unwrap();
 
     // Tick fires the job and emits CronFired event
     let due = service.tick();
@@ -936,7 +976,11 @@ async fn test_pipeline_cron_with_bus_events() {
         .expect("Event channel closed");
 
     match event {
-        AgentEvent::CronFired { job_id, job_name, message } => {
+        AgentEvent::CronFired {
+            job_id,
+            job_name,
+            message,
+        } => {
             assert!(!job_id.is_empty());
             assert_eq!(job_name, Some("bus-event-job".to_string()));
             assert_eq!(message, "Scheduled greeting");
@@ -966,14 +1010,19 @@ fn test_pipeline_cron_mark_completed_with_result() {
         deliver: false,
     };
 
-    let job = service.add_job(schedule, payload, Some("result-recorder".to_string())).unwrap();
+    let job = service
+        .add_job(schedule, payload, Some("result-recorder".to_string()))
+        .unwrap();
 
     // Tick to fire
     let due = service.tick();
     assert_eq!(due.len(), 1);
 
     // Record a successful result
-    service.mark_completed(&job.id, Some("Execution result: 42 items processed".to_string()));
+    service.mark_completed(
+        &job.id,
+        Some("Execution result: 42 items processed".to_string()),
+    );
 
     // Verify history
     let updated = service.get_job(&job.id).unwrap();
@@ -1008,7 +1057,9 @@ fn test_pipeline_cron_list_and_state() {
             chat_id: None,
             deliver: false,
         };
-        service.add_job(schedule, payload, Some(format!("job-{}", i))).unwrap();
+        service
+            .add_job(schedule, payload, Some(format!("job-{}", i)))
+            .unwrap();
     }
 
     // List all jobs
@@ -1050,7 +1101,8 @@ async fn test_pipeline_cron_to_agent_full_flow() {
     // Set up agent stack
     let config = make_config();
     let session_mgr = SessionManager::new(tmp.path().to_path_buf()).unwrap();
-    let provider_reg = make_provider_registry(MockProvider::simple("Cron response: all systems go"));
+    let provider_reg =
+        make_provider_registry(MockProvider::simple("Cron response: all systems go"));
     let tool_reg = ToolRegistry::new();
 
     let agent_loop = AgentLoop::new(config, bus.clone(), session_mgr, provider_reg, tool_reg);
@@ -1076,7 +1128,8 @@ async fn test_pipeline_cron_to_agent_full_flow() {
         chat_id: Some("chat_cron".to_string()),
         deliver: true,
     };
-    cron.add_job(schedule, payload, Some("status-check".to_string())).unwrap();
+    cron.add_job(schedule, payload, Some("status-check".to_string()))
+        .unwrap();
 
     // Tick fires the job → emits CronFired event on bus
     let due = cron.tick();
@@ -1089,7 +1142,9 @@ async fn test_pipeline_cron_to_agent_full_flow() {
         .expect("Timeout on CronFired event")
         .expect("Event channel closed");
     match event {
-        AgentEvent::CronFired { job_name, message, .. } => {
+        AgentEvent::CronFired {
+            job_name, message, ..
+        } => {
             assert_eq!(job_name, Some("status-check".to_string()));
             assert_eq!(message, "Check system status");
         }

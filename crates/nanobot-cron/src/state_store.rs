@@ -56,7 +56,10 @@ impl FileStateStore {
             HashMap::new()
         };
 
-        Ok(Self { path, cache: parking_lot::Mutex::new(cache) })
+        Ok(Self {
+            path,
+            cache: parking_lot::Mutex::new(cache),
+        })
     }
 
     /// Flush the in-memory cache to disk.
@@ -319,7 +322,9 @@ mod tests {
 
         {
             let store = FileStateStore::new(path.clone()).unwrap();
-            store.save_state("persist", &make_state("persist", true, 99)).unwrap();
+            store
+                .save_state("persist", &make_state("persist", true, 99))
+                .unwrap();
         }
 
         // Create a new instance from the same file

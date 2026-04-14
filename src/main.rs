@@ -74,6 +74,12 @@ enum Commands {
 
     /// Show current configuration and status.
     Status,
+
+    /// Daemon management commands (Unix only).
+    Daemon {
+        #[command(subcommand)]
+        subcommand: DaemonSubcommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -105,32 +111,62 @@ enum ConfigSubcommand {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[derive(Subcommand)]
+enum DaemonSubcommand {
+    /// Start the daemon (daemonize then run gateway).
+    Start,
+
+    /// Stop the running daemon.
+    Stop,
+
+    /// Restart the daemon (stop + start).
+    Restart,
+
+    /// Check daemon status.
+    Status,
+}
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
-        )
-        .init();
+    // For daemon start, we must fork BEFORE starting the tokio runtime.
+    // fork() only copies the calling thread — tokio worker threads are lost.
+    // All other commands need the runtime, so we defer its creation.
+    let is_daemon_start = matches!(
+        &cli.command,
+        Commands::Daemon {
+            subcommand: DaemonSubcommand::Start
+        }
+    );
+
+    if !is_daemon_start {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+            )
+            .init();
+    }
 
     // Load configuration
     let config = nanobot_config::load_config(cli.config.as_deref())?;
 
     match cli.command {
         Commands::Agent { message } => {
-            commands::agent::run(config, message).await?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::agent::run(config, message))?;
         }
         Commands::Gateway { channels } => {
-            commands::gateway::run(config, channels).await?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::gateway::run(config, channels))?;
         }
         Commands::Serve { port } => {
-            commands::serve::run(config, port).await?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::serve::run(config, port))?;
         }
         Commands::Heartbeat => {
-            commands::heartbeat::run(config).await?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::heartbeat::run(config))?;
         }
         Commands::Health => {
             commands::health::check(&config)?;
@@ -156,6 +192,41 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             commands::status::run(&config)?;
+        }
+        Commands::Daemon { subcommand } => {
+            let action = match subcommand {
+                DaemonSubcommand::Start => commands::daemon::DaemonAction::Start,
+                DaemonSubcommand::Stop => commands::daemon::DaemonAction::Stop,
+                DaemonSubcommand::Restart => commands::daemon::DaemonAction::Restart,
+                DaemonSubcommand::Status => commands::daemon::DaemonAction::Status,
+            };
+            match action {
+                commands::daemon::DaemonAction::Start => {
+                    // Fork happens HERE — before any tokio runtime exists.
+                    let handles = commands::daemon::handle_daemon_command(action, config.clone())?
+                        .expect("Start always returns Some(DaemonHandles)");
+
+                    // Install SIGHUP ignore handler before tokio runtime — closes the
+                    // window where default SIGHUP would kill the daemon during startup
+                    nanobot_daemon::signal::install_early_sighup_handler();
+
+                    // Now start tokio runtime in the daemon process
+                    let rt = tokio::runtime::Runtime::new()?;
+                    let result = rt.block_on(commands::gateway::run(config, vec![]));
+
+                    // Drop log_guard first to flush remaining log lines,
+                    // then pid_file releases the flock and cleans up.
+                    drop(handles.log_guard);
+                    if let Err(e) = handles.pid_file.clean() {
+                        eprintln!("Failed to clean PID file: {e}");
+                    }
+
+                    result?;
+                }
+                _ => {
+                    commands::daemon::handle_daemon_command(action, config)?;
+                }
+            }
         }
     }
 

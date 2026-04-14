@@ -13,9 +13,7 @@ use nanobot_bus::MessageBus;
 use nanobot_config::Config;
 use nanobot_core::{FunctionCall, MessageType, Platform, ToolCall, Usage};
 use nanobot_providers::base::{BoxStream, CompletionChunk};
-use nanobot_providers::{
-    CompletionRequest, CompletionResponse, LlmProvider, ProviderRegistry,
-};
+use nanobot_providers::{CompletionRequest, CompletionResponse, LlmProvider, ProviderRegistry};
 use nanobot_session::SessionManager;
 use nanobot_tools::{Tool, ToolError, ToolRegistry};
 use serde_json::Value;
@@ -67,17 +65,13 @@ impl LlmProvider for MockProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
-        let resp = self
-            .responses
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| {
-                panic!(
-                    "MockProvider called {} times but only has {} responses",
-                    idx + 1,
-                    self.responses.len()
-                )
-            });
+        let resp = self.responses.get(idx).cloned().unwrap_or_else(|| {
+            panic!(
+                "MockProvider called {} times but only has {} responses",
+                idx + 1,
+                self.responses.len()
+            )
+        });
         Ok(resp)
     }
 
@@ -157,7 +151,10 @@ impl Tool for WeatherTool {
         })
     }
     async fn execute(&self, args: Value) -> Result<String, ToolError> {
-        let city = args.get("city").and_then(|v| v.as_str()).unwrap_or("Unknown");
+        let city = args
+            .get("city")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown");
         Ok(format!("Weather in {}: Sunny, 22C", city))
     }
 }
@@ -208,7 +205,8 @@ async fn test_e2e_simple_message_flow() {
 
     let tmp = tempfile::tempdir().unwrap();
     let session_mgr = SessionManager::new(tmp.path().to_path_buf()).unwrap();
-    let provider_reg = make_provider_registry(MockProvider::simple("Hello! I am a deterministic mock."));
+    let provider_reg =
+        make_provider_registry(MockProvider::simple("Hello! I am a deterministic mock."));
     let tool_reg = ToolRegistry::new();
 
     let agent_loop = AgentLoop::new(config, bus.clone(), session_mgr, provider_reg, tool_reg);
@@ -218,7 +216,9 @@ async fn test_e2e_simple_message_flow() {
     let agent_handle = tokio::spawn(async move { agent_loop.run().await.unwrap() });
 
     // Send inbound message
-    bus.publish_inbound(make_inbound("Hi there!")).await.unwrap();
+    bus.publish_inbound(make_inbound("Hi there!"))
+        .await
+        .unwrap();
 
     // Receive outbound
     let outbound = timeout(TEST_TIMEOUT, outbound_rx.recv())
@@ -317,7 +317,11 @@ async fn test_e2e_tool_call_flow() {
                 assert_eq!(tool_name, "weather");
                 saw_tool_call = true;
             }
-            Ok(Ok(AgentEvent::Completed { tool_calls, iterations, .. })) => {
+            Ok(Ok(AgentEvent::Completed {
+                tool_calls,
+                iterations,
+                ..
+            })) => {
                 assert_eq!(tool_calls, 1);
                 assert_eq!(iterations, 2);
                 saw_completed = true;

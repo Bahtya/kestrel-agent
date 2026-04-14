@@ -162,7 +162,10 @@ async fn test_anthropic_non_streaming_tool_calls() {
     let provider = make_provider(port);
 
     let response = provider.complete(make_request(false)).await.unwrap();
-    assert_eq!(response.content.as_deref(), Some("Let me check the weather."));
+    assert_eq!(
+        response.content.as_deref(),
+        Some("Let me check the weather.")
+    );
     let tool_calls = response.tool_calls.unwrap();
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(tool_calls[0].id, "toolu_abc");

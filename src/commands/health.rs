@@ -33,7 +33,11 @@ pub fn check(_config: &Config) -> Result<()> {
         println!(
             "Last snapshot ({}): {}",
             snapshot.timestamp.format("%Y-%m-%d %H:%M:%S"),
-            if snapshot.healthy { "HEALTHY" } else { "UNHEALTHY" }
+            if snapshot.healthy {
+                "HEALTHY"
+            } else {
+                "UNHEALTHY"
+            }
         );
 
         if !snapshot.checks.is_empty() {

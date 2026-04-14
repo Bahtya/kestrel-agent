@@ -42,7 +42,7 @@ pub async fn run(config: Config, port_override: Option<u16>) -> Result<()> {
         tool_registry.clone(),
     );
 
-    let agent_handle = tokio::spawn(async move {
+    let _agent_handle = tokio::spawn(async move {
         if let Err(e) = agent_loop.run().await {
             tracing::error!("Agent loop error: {}", e);
         }
@@ -57,7 +57,7 @@ pub async fn run(config: Config, port_override: Option<u16>) -> Result<()> {
         tool_registry,
         port_override,
     );
-    let api_handle = tokio::spawn(async move {
+    let _api_handle = tokio::spawn(async move {
         if let Err(e) = server.run().await {
             tracing::error!("API server error: {}", e);
         }
@@ -65,15 +65,40 @@ pub async fn run(config: Config, port_override: Option<u16>) -> Result<()> {
 
     info!("API server running on port {}", effective_port);
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received shutdown signal");
+    // ── Wait for shutdown signal ──────────────────────────────
+    #[cfg(target_family = "unix")]
+    {
+        loop {
+            let sig = nanobot_daemon::signal::wait_for_signal().await;
+            match sig {
+                nanobot_daemon::signal::ShutdownSignal::Graceful => {
+                    info!("Received graceful shutdown signal (SIGTERM)");
+                    break;
+                }
+                nanobot_daemon::signal::ShutdownSignal::Fast => {
+                    info!("Received fast shutdown signal (SIGINT)");
+                    break;
+                }
+                nanobot_daemon::signal::ShutdownSignal::Reload => {
+                    info!("Received SIGHUP (log rotation placeholder)");
+                    continue;
+                }
+            }
         }
-        _ = agent_handle => {
-            info!("Agent loop exited");
-        }
-        _ = api_handle => {
-            info!("API server exited");
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal");
+            }
+            _ = _agent_handle => {
+                info!("Agent loop exited");
+            }
+            _ = _api_handle => {
+                info!("API server exited");
+            }
         }
     }
 

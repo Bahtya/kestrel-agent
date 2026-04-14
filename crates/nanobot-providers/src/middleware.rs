@@ -99,10 +99,7 @@ impl MiddlewareConfig {
     }
 
     /// Create with custom retry and rate-limit bucket.
-    pub fn with_retry_and_rate_limit(
-        retry: RetryConfig,
-        requests_per_minute: u64,
-    ) -> Self {
+    pub fn with_retry_and_rate_limit(retry: RetryConfig, requests_per_minute: u64) -> Self {
         use crate::rate_limit::TokenBucket;
         use std::time::Duration;
         Self {
@@ -196,7 +193,10 @@ impl LlmProvider for ProviderMiddleware {
 
         // 2. Rate limit: acquire a token (may block)
         self.config.rate_limiter.acquire().await;
-        debug!(provider = self.inner.name(), "Rate limit token acquired for complete()");
+        debug!(
+            provider = self.inner.name(),
+            "Rate limit token acquired for complete()"
+        );
 
         // 3. Retry with exponential backoff + circuit breaker recording
         let inner = self.inner.clone();
@@ -234,7 +234,10 @@ impl LlmProvider for ProviderMiddleware {
 
         // 2. Rate limit: acquire a token (may block)
         self.config.rate_limiter.acquire().await;
-        debug!(provider = self.inner.name(), "Rate limit token acquired for complete_stream()");
+        debug!(
+            provider = self.inner.name(),
+            "Rate limit token acquired for complete_stream()"
+        );
 
         // 3. Retry with exponential backoff + circuit breaker recording
         // Note: we only retry the initial HTTP connection/stream-open.
@@ -302,7 +305,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for MockProvider {
-        fn name(&self) -> &str { "mock_middleware" }
+        fn name(&self) -> &str {
+            "mock_middleware"
+        }
 
         async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -333,7 +338,9 @@ mod tests {
             Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
         }
 
-        fn supports_model(&self, _model: &str) -> bool { true }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
     }
 
     /// Mock provider that returns 503 errors for testing 503-specific retry.
@@ -357,7 +364,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for MockProvider503 {
-        fn name(&self) -> &str { "mock_503" }
+        fn name(&self) -> &str {
+            "mock_503"
+        }
 
         async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
             let n = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -388,7 +397,9 @@ mod tests {
             Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
         }
 
-        fn supports_model(&self, _model: &str) -> bool { true }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
     }
 
     // -------------------------------------------------------------------
@@ -637,10 +648,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_middleware_config_with_circuit_breaker() {
-        let config = MiddlewareConfig::default_unlimited()
-            .with_circuit_breaker();
+        let config = MiddlewareConfig::default_unlimited().with_circuit_breaker();
         assert!(config.circuit_breaker.is_some());
-        assert_eq!(config.circuit_breaker.as_ref().unwrap().state_name(), "CLOSED");
+        assert_eq!(
+            config.circuit_breaker.as_ref().unwrap().state_name(),
+            "CLOSED"
+        );
     }
 
     #[tokio::test]
@@ -648,14 +661,15 @@ mod tests {
         let cb_config = CircuitBreakerConfig::default()
             .with_failure_threshold(10)
             .with_reset_timeout(Duration::from_secs(60));
-        let config = MiddlewareConfig::default_unlimited()
-            .with_circuit_breaker_config(cb_config);
+        let config = MiddlewareConfig::default_unlimited().with_circuit_breaker_config(cb_config);
         assert!(config.circuit_breaker.is_some());
     }
 
     #[tokio::test]
     async fn test_middleware_from_retry_policy() {
-        let policy = RetryPolicy::default().with_max_retries(5).with_jitter(false);
+        let policy = RetryPolicy::default()
+            .with_max_retries(5)
+            .with_jitter(false);
         let config = MiddlewareConfig::from_retry_policy(policy);
         assert_eq!(config.retry.max_retries, 5);
         assert!(config.circuit_breaker.is_some());

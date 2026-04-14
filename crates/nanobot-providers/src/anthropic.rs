@@ -394,23 +394,24 @@ impl LlmProvider for AnthropicProvider {
                     .context("Failed to parse Anthropic response")?;
 
                 // Extract text content
-                let content = api_resp
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .and_then(|blocks| {
-                        blocks
-                            .iter()
-                            .filter_map(|b| {
-                                if b.get("type")?.as_str()? == "text" {
-                                    b.get("text")?.as_str().map(String::from)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .next()
-                    });
+                let content =
+                    api_resp
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .and_then(|blocks| {
+                            blocks
+                                .iter()
+                                .filter_map(|b| {
+                                    if b.get("type")?.as_str()? == "text" {
+                                        b.get("text")?.as_str().map(String::from)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .next()
+                        });
 
                 // Extract tool calls
                 let tool_calls = api_resp

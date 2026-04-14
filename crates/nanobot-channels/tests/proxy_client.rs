@@ -1,11 +1,11 @@
 //! Integration tests for config loading with env var expansion
 //! and gateway wiring.
 
+use nanobot_bus::MessageBus;
 use nanobot_channels::base::BaseChannel;
 use nanobot_channels::platforms::telegram::TelegramChannel;
 use nanobot_channels::registry::ChannelRegistry;
 use nanobot_channels::ChannelManager;
-use nanobot_bus::MessageBus;
 use nanobot_config::loader::{expand_env_vars, load_config};
 use nanobot_core::Platform;
 

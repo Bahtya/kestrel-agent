@@ -103,7 +103,12 @@ impl HealthSnapshot {
 
         format!(
             "{}: {} healthy, {} degraded, {} failed, {} skipped ({} total)",
-            status, healthy, degraded, failed, skipped, self.checks.len()
+            status,
+            healthy,
+            degraded,
+            failed,
+            skipped,
+            self.checks.len()
         )
     }
 }
@@ -173,9 +178,7 @@ pub struct HealthCheckRegistry {
 impl HealthCheckRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
-        Self {
-            checks: Vec::new(),
-        }
+        Self { checks: Vec::new() }
     }
 
     /// Register a health check component.
@@ -183,10 +186,7 @@ impl HealthCheckRegistry {
         let name = check.component_name().to_string();
         // Prevent duplicates
         if let Some(_existing) = self.checks.iter().find(|c| c.component_name() == name) {
-            tracing::warn!(
-                "Health check '{}' already registered, replacing",
-                name
-            );
+            tracing::warn!("Health check '{}' already registered, replacing", name);
             self.checks.retain(|c| c.component_name() != name);
         }
         self.checks.push(check);
@@ -304,12 +304,8 @@ impl FullHealthReport {
                         CheckStatus::Skipped => "skipped".to_string(),
                     },
                     message: c.message.clone(),
-                    consecutive_failures: failure
-                        .map(|f| f.consecutive_failures)
-                        .unwrap_or(0),
-                    restart_pending: failure
-                        .map(|f| f.restart_pending)
-                        .unwrap_or(false),
+                    consecutive_failures: failure.map(|f| f.consecutive_failures).unwrap_or(0),
+                    restart_pending: failure.map(|f| f.restart_pending).unwrap_or(false),
                 }
             })
             .collect();
@@ -344,7 +340,12 @@ mod tests {
 
     #[test]
     fn test_check_status_serde() {
-        for status in &[CheckStatus::Healthy, CheckStatus::Degraded, CheckStatus::Unhealthy, CheckStatus::Skipped] {
+        for status in &[
+            CheckStatus::Healthy,
+            CheckStatus::Degraded,
+            CheckStatus::Unhealthy,
+            CheckStatus::Skipped,
+        ] {
             let json = serde_json::to_string(status).unwrap();
             let back: CheckStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(*status, back);
@@ -455,28 +456,24 @@ mod tests {
 
     #[test]
     fn test_health_snapshot_summary_degraded() {
-        let checks = vec![
-            HealthCheckResult {
-                component: "a".to_string(),
-                status: CheckStatus::Degraded,
-                message: "partial".to_string(),
-                timestamp: Local::now(),
-            },
-        ];
+        let checks = vec![HealthCheckResult {
+            component: "a".to_string(),
+            status: CheckStatus::Degraded,
+            message: "partial".to_string(),
+            timestamp: Local::now(),
+        }];
         let snap = HealthSnapshot::from_checks(checks);
         assert!(snap.summary().starts_with("degraded:"));
     }
 
     #[test]
     fn test_health_snapshot_summary_unhealthy() {
-        let checks = vec![
-            HealthCheckResult {
-                component: "a".to_string(),
-                status: CheckStatus::Unhealthy,
-                message: "down".to_string(),
-                timestamp: Local::now(),
-            },
-        ];
+        let checks = vec![HealthCheckResult {
+            component: "a".to_string(),
+            status: CheckStatus::Unhealthy,
+            message: "down".to_string(),
+            timestamp: Local::now(),
+        }];
         let snap = HealthSnapshot::from_checks(checks);
         assert!(snap.summary().starts_with("unhealthy:"));
     }

@@ -162,7 +162,11 @@ impl SkillStore {
             }
         }
 
-        info!("Loaded {} skill(s) from {}", loaded.len(), self.root.display());
+        info!(
+            "Loaded {} skill(s) from {}",
+            loaded.len(),
+            self.root.display()
+        );
         Ok(loaded)
     }
 
@@ -201,14 +205,10 @@ impl SkillStore {
         if self.root.exists() {
             let files = collect_md_files(&self.root)?;
             for path in files {
-                let already_known = self
-                    .by_name
-                    .values()
-                    .any(|s| s.source_path == path);
+                let already_known = self.by_name.values().any(|s| s.source_path == path);
 
                 if !already_known {
-                    let relative =
-                        path.strip_prefix(&self.root).unwrap_or(&path).to_path_buf();
+                    let relative = path.strip_prefix(&self.root).unwrap_or(&path).to_path_buf();
                     if let Ok(skill) = Self::parse_skill_file(&path, &relative) {
                         info!(
                             "Discovered new skill '{}' at {}",
@@ -346,8 +346,8 @@ fn collect_md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read dir: {}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("Failed to read dir: {}", dir.display()))?;
 
     for entry in entries {
         let entry = entry.context("Failed to read dir entry")?;
@@ -418,10 +418,7 @@ fn parse_parameters(frontmatter: &serde_yaml::Value) -> Vec<SkillParameter> {
                     .and_then(|d| d.as_str())
                     .unwrap_or("")
                     .to_string();
-                let required = v
-                    .get("required")
-                    .and_then(|r| r.as_bool())
-                    .unwrap_or(false);
+                let required = v.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
                 Some(SkillParameter {
                     name,
                     description,
@@ -872,17 +869,9 @@ mod tests {
 
         // Bump mtime and overwrite.
         let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
-        filetime::set_file_mtime(
-            &path,
-            filetime::FileTime::from_system_time(new_time),
-        )
-        .unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(new_time)).unwrap();
         fs::write(&path, "---\nname: test\n---\nUpdated.").unwrap();
-        filetime::set_file_mtime(
-            &path,
-            filetime::FileTime::from_system_time(new_time),
-        )
-        .unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(new_time)).unwrap();
 
         let reloaded = store.reload_changed().unwrap();
         assert_eq!(reloaded, vec!["test"]);
@@ -921,8 +910,7 @@ mod tests {
 
     #[test]
     fn test_yaml_string_array_present() {
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str("tags:\n  - a\n  - b\n").unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str("tags:\n  - a\n  - b\n").unwrap();
         assert_eq!(yaml_string_array(&yaml, "tags"), vec!["a", "b"]);
     }
 

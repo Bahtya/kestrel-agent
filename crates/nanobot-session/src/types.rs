@@ -663,11 +663,7 @@ mod tests {
     #[test]
     fn test_search_notes_by_title() {
         let mut session = Session::new("test:notes".to_string());
-        session.save_note(
-            "api design".to_string(),
-            "Use REST".to_string(),
-            vec![],
-        );
+        session.save_note("api design".to_string(), "Use REST".to_string(), vec![]);
         session.save_note("database".to_string(), "Use SQLite".to_string(), vec![]);
 
         let results = session.search_notes("api");
@@ -678,7 +674,11 @@ mod tests {
     #[test]
     fn test_search_notes_by_content() {
         let mut session = Session::new("test:notes".to_string());
-        session.save_note("n1".to_string(), "Use PostgreSQL for production".to_string(), vec![]);
+        session.save_note(
+            "n1".to_string(),
+            "Use PostgreSQL for production".to_string(),
+            vec![],
+        );
 
         let results = session.search_notes("postgresql");
         assert_eq!(results.len(), 1);

@@ -140,7 +140,8 @@ impl SkillWatcher {
     pub fn new(root: PathBuf) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let mut watcher = notify::recommended_watcher(tx).context("Failed to create file watcher")?;
+        let mut watcher =
+            notify::recommended_watcher(tx).context("Failed to create file watcher")?;
 
         watcher
             .watch(&root, notify::RecursiveMode::Recursive)
@@ -159,10 +160,7 @@ impl SkillWatcher {
         while let Ok(result) = self.rx.try_recv() {
             if let Ok(event) = result {
                 for path in &event.paths {
-                    if path
-                        .extension()
-                        .is_some_and(|ext| ext == "md")
-                    {
+                    if path.extension().is_some_and(|ext| ext == "md") {
                         paths.insert(path.clone());
                     }
                 }
@@ -229,8 +227,10 @@ impl SkillLoader {
         let files = collect_md_files(&self.root)?;
 
         // Prune cache entries for files that no longer exist.
-        let file_set: Vec<PathBuf> =
-            files.iter().map(|p| p.canonicalize().unwrap_or_else(|_| p.clone())).collect();
+        let file_set: Vec<PathBuf> = files
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect();
         self.cache.retain(|k, _| file_set.contains(k));
 
         let mut skills = Vec::new();
@@ -255,9 +255,7 @@ impl SkillLoader {
             if let Some(entry) = self.cache.get(&canonical) {
                 if entry.content_hash == hash {
                     debug!("Cache hit for {}", path.display());
-                    if let Some(prev) =
-                        seen_names.insert(entry.skill.name.clone(), path.clone())
-                    {
+                    if let Some(prev) = seen_names.insert(entry.skill.name.clone(), path.clone()) {
                         warn!(
                             "Duplicate skill name '{}' — file {} shadows {}",
                             entry.skill.name,
@@ -272,10 +270,7 @@ impl SkillLoader {
             }
 
             // Cache miss or content changed — parse the file.
-            let relative = path
-                .strip_prefix(&self.root)
-                .unwrap_or(path)
-                .to_path_buf();
+            let relative = path.strip_prefix(&self.root).unwrap_or(path).to_path_buf();
             match Self::parse_skill(&content, path, &relative) {
                 Ok(skill) => {
                     debug!(
@@ -284,9 +279,7 @@ impl SkillLoader {
                         skill.category,
                         relative.display()
                     );
-                    if let Some(prev) =
-                        seen_names.insert(skill.name.clone(), path.clone())
-                    {
+                    if let Some(prev) = seen_names.insert(skill.name.clone(), path.clone()) {
                         warn!(
                             "Duplicate skill name '{}' — file {} shadows {}",
                             skill.name,
@@ -410,10 +403,7 @@ impl SkillLoader {
                     adj.entry(dep.as_str()).or_default().push(name);
                     *in_degree.entry(name).or_insert(0) += 1;
                 } else {
-                    warn!(
-                        "Skill '{}' depends on '{}' which is not loaded",
-                        name, dep
-                    );
+                    warn!("Skill '{}' depends on '{}' which is not loaded", name, dep);
                 }
             }
         }
@@ -456,10 +446,7 @@ impl SkillLoader {
                 .filter(|n| !result.contains(&n.to_string()))
                 .map(|n| n.to_string())
                 .collect();
-            warn!(
-                "Circular dependency detected among skills: {:?}",
-                remaining
-            );
+            warn!("Circular dependency detected among skills: {:?}", remaining);
             result.extend(remaining);
         }
 
@@ -524,10 +511,7 @@ impl SkillLoader {
                     if dep_skill.version.is_none() {
                         warnings.push(VersionWarning {
                             skill_name: skill.name.clone(),
-                            message: format!(
-                                "Dependency '{}' has no version declared",
-                                dep
-                            ),
+                            message: format!("Dependency '{}' has no version declared", dep),
                         });
                     }
                 }
@@ -581,7 +565,10 @@ impl SkillLoader {
     pub fn invalidate_by_name(&mut self, name: &str) {
         if let Some(skill) = self.by_name.remove(name) {
             // Find and remove from path cache.
-            let canonical = skill.source_path.canonicalize().unwrap_or(skill.source_path.clone());
+            let canonical = skill
+                .source_path
+                .canonicalize()
+                .unwrap_or(skill.source_path.clone());
             self.cache.remove(&canonical);
             self.rebuild_dependents();
         }
@@ -642,11 +629,7 @@ impl SkillLoader {
         names
     }
 
-    fn collect_dependents_recursive(
-        &self,
-        name: &str,
-        result: &mut HashSet<String>,
-    ) {
+    fn collect_dependents_recursive(&self, name: &str, result: &mut HashSet<String>) {
         if result.contains(name) {
             return;
         }
@@ -685,7 +668,10 @@ impl SkillLoader {
         }
         let watcher = SkillWatcher::new(self.root.clone())?;
         self.watcher = Some(watcher);
-        info!("Started watching {} for skill file changes", self.root.display());
+        info!(
+            "Started watching {} for skill file changes",
+            self.root.display()
+        );
         Ok(())
     }
 
@@ -720,8 +706,7 @@ impl SkillLoader {
                         .values()
                         .find(|s| {
                             s.source_path == *p
-                                || s.source_path.canonicalize().ok()
-                                    == p.canonicalize().ok()
+                                || s.source_path.canonicalize().ok() == p.canonicalize().ok()
                         })
                         .map(|s| s.name.clone())
                 })
@@ -748,10 +733,9 @@ impl SkillLoader {
             .cache
             .values()
             .filter_map(|entry| {
-                let current_mtime =
-                    std::fs::metadata(&entry.skill.source_path)
-                        .ok()
-                        .and_then(|m| m.modified().ok());
+                let current_mtime = std::fs::metadata(&entry.skill.source_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
                 if current_mtime != entry.skill.modified_at {
                     Some(entry.skill.source_path.clone())
                 } else {
@@ -767,16 +751,11 @@ impl SkillLoader {
         // Check for new files.
         if self.root.exists() {
             let files = collect_md_files(&self.root)?;
-            let cached_paths: HashSet<PathBuf> = self
-                .cache
-                .keys()
-                .cloned()
-                .collect();
+            let cached_paths: HashSet<PathBuf> = self.cache.keys().cloned().collect();
 
             let mut new_paths = Vec::new();
             for file in &files {
-                let canonical =
-                    file.canonicalize().unwrap_or_else(|_| file.clone());
+                let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
                 if !cached_paths.contains(&canonical) {
                     new_paths.push(canonical);
                 }
@@ -790,27 +769,19 @@ impl SkillLoader {
         }
 
         if !changed_paths.is_empty() {
-            let names_before: HashSet<String> =
-                self.by_name.keys().cloned().collect();
+            let names_before: HashSet<String> = self.by_name.keys().cloned().collect();
             self.load_all()?;
-            let names_after: HashSet<String> =
-                self.by_name.keys().cloned().collect();
+            let names_after: HashSet<String> = self.by_name.keys().cloned().collect();
 
             // Names that are new or were reloaded.
-            reloaded = names_after
-                .difference(&names_before)
-                .cloned()
-                .collect();
+            reloaded = names_after.difference(&names_before).cloned().collect();
 
             // Also include names whose cache was invalidated (changed content).
             for path in &changed_paths {
                 if let Some(name) = self
                     .by_name
                     .values()
-                    .find(|s| {
-                        s.source_path.canonicalize().ok()
-                            == path.canonicalize().ok()
-                    })
+                    .find(|s| s.source_path.canonicalize().ok() == path.canonicalize().ok())
                     .map(|s| s.name.clone())
                 {
                     if !reloaded.contains(&name) {
@@ -824,11 +795,7 @@ impl SkillLoader {
             self.load_all()?;
             let count_after = self.by_name.len();
             if count_after > count_before {
-                reloaded = self
-                    .by_name
-                    .keys()
-                    .cloned()
-                    .collect();
+                reloaded = self.by_name.keys().cloned().collect();
             }
         }
 
@@ -872,9 +839,7 @@ impl SkillLoader {
             });
 
         if name.is_empty() {
-            anyhow::bail!(
-                "Skill name is empty (no frontmatter 'name' and file stem is empty)"
-            );
+            anyhow::bail!("Skill name is empty (no frontmatter 'name' and file stem is empty)");
         }
 
         if name.contains(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
@@ -920,8 +885,7 @@ impl SkillLoader {
             .and_then(|v| v.as_str())
             .map(String::from);
         let dependencies = yaml_string_array(&frontmatter, "dependencies");
-        let modified_at =
-            std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        let modified_at = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
 
         Ok(Skill {
             name,
@@ -952,8 +916,8 @@ fn collect_md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read dir: {}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("Failed to read dir: {}", dir.display()))?;
 
     for entry in entries {
         let entry = entry.context("Failed to read dir entry")?;
@@ -991,9 +955,7 @@ fn parse_frontmatter(content: &str) -> Result<(serde_yaml::Value, String)> {
     }
 
     let after_first = &trimmed[3..];
-    let end = after_first
-        .find("---")
-        .context("Unclosed frontmatter")?;
+    let end = after_first.find("---").context("Unclosed frontmatter")?;
 
     let frontmatter_str = &after_first[..end];
     let body = after_first[end + 3..].to_string();
@@ -1008,10 +970,7 @@ fn parse_frontmatter(content: &str) -> Result<(serde_yaml::Value, String)> {
 ///
 /// Skips parameters with empty names (logs a warning).
 fn parse_parameters(frontmatter: &serde_yaml::Value) -> Vec<SkillParameter> {
-    let params = match frontmatter
-        .get("parameters")
-        .and_then(|v| v.as_sequence())
-    {
+    let params = match frontmatter.get("parameters").and_then(|v| v.as_sequence()) {
         Some(seq) => seq,
         None => return Vec::new(),
     };
@@ -1033,10 +992,7 @@ fn parse_parameters(frontmatter: &serde_yaml::Value) -> Vec<SkillParameter> {
                     .and_then(|d| d.as_str())
                     .unwrap_or("")
                     .to_string();
-                let required = v
-                    .get("required")
-                    .and_then(|r| r.as_bool())
-                    .unwrap_or(false);
+                let required = v.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
                 Some(SkillParameter {
                     name,
                     description,
@@ -1148,12 +1104,23 @@ mod tests {
     #[test]
     fn test_version_parse_trimmed() {
         let v = Version::parse("  1.0.0  ").unwrap();
-        assert_eq!(v, Version { major: 1, minor: 0, patch: 0 });
+        assert_eq!(
+            v,
+            Version {
+                major: 1,
+                minor: 0,
+                patch: 0
+            }
+        );
     }
 
     #[test]
     fn test_version_display() {
-        let v = Version { major: 1, minor: 2, patch: 3 };
+        let v = Version {
+            major: 1,
+            minor: 2,
+            patch: 3,
+        };
         assert_eq!(format!("{}", v), "1.2.3");
     }
 
@@ -1242,8 +1209,7 @@ mod tests {
 
     #[test]
     fn test_parse_parameters_string_shorthand() {
-        let yaml =
-            serde_yaml::from_str("parameters:\n  - query\n  - limit\n").unwrap();
+        let yaml = serde_yaml::from_str("parameters:\n  - query\n  - limit\n").unwrap();
         let params = parse_parameters(&yaml);
         assert_eq!(params.len(), 2);
         assert!(!params[0].required);
@@ -1279,8 +1245,7 @@ mod tests {
 
     #[test]
     fn test_yaml_string_array_present() {
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str("tags:\n  - a\n  - b\n").unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str("tags:\n  - a\n  - b\n").unwrap();
         assert_eq!(yaml_string_array(&yaml, "tags"), vec!["a", "b"]);
     }
 
@@ -1328,8 +1293,7 @@ mod tests {
 
     #[test]
     fn test_load_all_nonexistent_dir() {
-        let mut loader =
-            SkillLoader::new(PathBuf::from("/tmp/no_such_skills_dir_xyz"));
+        let mut loader = SkillLoader::new(PathBuf::from("/tmp/no_such_skills_dir_xyz"));
         let skills = loader.load_all().unwrap();
         assert!(skills.is_empty());
     }
@@ -1429,10 +1393,7 @@ mod tests {
         let mut loader = SkillLoader::new(tmp.path().to_path_buf());
         loader.load_all().unwrap();
 
-        assert_eq!(
-            loader.get("c").unwrap().dependencies,
-            vec!["a", "b"]
-        );
+        assert_eq!(loader.get("c").unwrap().dependencies, vec!["a", "b"]);
     }
 
     #[test]
@@ -1698,10 +1659,11 @@ mod tests {
         let warnings = loader.check_versions();
         // base has no version (1 warning) + top depends on base which has no version (1 warning)
         assert_eq!(warnings.len(), 2);
-        let messages: Vec<&str> =
-            warnings.iter().map(|w| w.message.as_str()).collect();
+        let messages: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
         assert!(messages.iter().any(|m| m.contains("No version declared")));
-        assert!(messages.iter().any(|m| m.contains("Dependency 'base' has no version")));
+        assert!(messages
+            .iter()
+            .any(|m| m.contains("Dependency 'base' has no version")));
     }
 
     #[test]
@@ -1803,16 +1765,8 @@ mod tests {
     #[test]
     fn test_invalidate_pattern() {
         let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "devops/a.md",
-            "---\nname: a\n---\nA.",
-        );
-        write_skill(
-            tmp.path(),
-            "monitor/b.md",
-            "---\nname: b\n---\nB.",
-        );
+        write_skill(tmp.path(), "devops/a.md", "---\nname: a\n---\nA.");
+        write_skill(tmp.path(), "monitor/b.md", "---\nname: b\n---\nB.");
 
         let mut loader = SkillLoader::new(tmp.path().to_path_buf());
         loader.load_all().unwrap();
@@ -2092,10 +2046,7 @@ mod tests {
         let mut loader = SkillLoader::new(tmp.path().to_path_buf());
         loader.load_all().unwrap();
 
-        assert_eq!(
-            loader.get("deploy").unwrap().tags,
-            vec!["deploy", "cicd"]
-        );
+        assert_eq!(loader.get("deploy").unwrap().tags, vec!["deploy", "cicd"]);
     }
 
     #[test]
@@ -2195,11 +2146,7 @@ mod tests {
     #[test]
     fn test_invalidate_all_forces_full_reload() {
         let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "a.md",
-            "---\nname: a\n---\nAlpha.",
-        );
+        write_skill(tmp.path(), "a.md", "---\nname: a\n---\nAlpha.");
 
         let mut loader = SkillLoader::new(tmp.path().to_path_buf());
         loader.load_all().unwrap();
@@ -2261,11 +2208,7 @@ mod tests {
         loader.load_all().unwrap();
         assert_eq!(loader.len(), 1);
 
-        write_skill(
-            tmp.path(),
-            "second.md",
-            "---\nname: second\n---\nSecond.",
-        );
+        write_skill(tmp.path(), "second.md", "---\nname: second\n---\nSecond.");
 
         loader.load_all().unwrap();
         assert_eq!(loader.len(), 2);
@@ -2320,16 +2263,8 @@ mod tests {
     #[test]
     fn test_duplicate_name_last_wins() {
         let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "a.md",
-            "---\nname: dup\n---\nFirst.",
-        );
-        write_skill(
-            tmp.path(),
-            "b.md",
-            "---\nname: dup\n---\nSecond.",
-        );
+        write_skill(tmp.path(), "a.md", "---\nname: dup\n---\nFirst.");
+        write_skill(tmp.path(), "b.md", "---\nname: dup\n---\nSecond.");
 
         let mut loader = SkillLoader::new(tmp.path().to_path_buf());
         let skills = loader.load_all().unwrap();
@@ -2426,7 +2361,11 @@ mod tests {
     #[test]
     fn test_watcher_detects_new_file() {
         let tmp = tempfile::tempdir().unwrap();
-        write_skill(tmp.path(), "existing.md", "---\nname: existing\n---\nExisting.");
+        write_skill(
+            tmp.path(),
+            "existing.md",
+            "---\nname: existing\n---\nExisting.",
+        );
 
         let mut loader = SkillLoader::new(tmp.path().to_path_buf());
         loader.load_all().unwrap();
@@ -2436,7 +2375,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Add a new file.
-        write_skill(tmp.path(), "new_skill.md", "---\nname: new_skill\n---\nNew.");
+        write_skill(
+            tmp.path(),
+            "new_skill.md",
+            "---\nname: new_skill\n---\nNew.",
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -2463,26 +2406,14 @@ mod tests {
         assert!(!loader.is_watching());
 
         // Modify file mtime to trigger reload.
-        let new_time =
-            std::time::SystemTime::now() + std::time::Duration::from_secs(10);
-        filetime::set_file_mtime(
-            &path,
-            filetime::FileTime::from_system_time(new_time),
-        )
-        .unwrap();
+        let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(new_time)).unwrap();
         fs::write(&path, "---\nname: fallback\n---\nUpdated.").unwrap();
-        filetime::set_file_mtime(
-            &path,
-            filetime::FileTime::from_system_time(new_time),
-        )
-        .unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(new_time)).unwrap();
 
         let reloaded = loader.reload_changed().unwrap();
         assert!(reloaded.contains(&"fallback".to_string()));
-        assert_eq!(
-            loader.get("fallback").unwrap().instructions,
-            "Updated."
-        );
+        assert_eq!(loader.get("fallback").unwrap().instructions, "Updated.");
     }
 
     #[test]

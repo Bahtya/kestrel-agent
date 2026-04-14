@@ -18,8 +18,8 @@
 
 use crate::schema::{
     AgentDefaults, ApiConfig, ChannelsConfig, Config, CronConfig, CustomProviderConfig,
-    DiscordConfig, DreamConfig, HeartbeatConfig, McpServerConfig, ProvidersConfig,
-    SecurityConfig, TelegramConfig,
+    DiscordConfig, DreamConfig, HeartbeatConfig, McpServerConfig, ProvidersConfig, SecurityConfig,
+    TelegramConfig,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -71,7 +71,9 @@ pub struct ValidationReport {
 
 impl ValidationReport {
     fn new() -> Self {
-        Self { findings: Vec::new() }
+        Self {
+            findings: Vec::new(),
+        }
     }
 
     fn error(&mut self, path: impl Into<String>, message: impl Into<String>) {
@@ -97,12 +99,18 @@ impl ValidationReport {
 
     /// Only error-level findings.
     pub fn errors(&self) -> Vec<&ValidationFinding> {
-        self.findings.iter().filter(|f| f.severity == Severity::Error).collect()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
+            .collect()
     }
 
     /// Only warning-level findings.
     pub fn warnings(&self) -> Vec<&ValidationFinding> {
-        self.findings.iter().filter(|f| f.severity == Severity::Warning).collect()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Warning)
+            .collect()
     }
 
     /// Whether there are no errors.
@@ -297,7 +305,10 @@ fn validate_url(url: &str, path: &str, report: &mut ValidationReport) {
 fn validate_url_require_https(url: &str, path: &str, report: &mut ValidationReport) {
     validate_url(url, path, report);
     if url.starts_with("http://") {
-        report.warning(path, "URL uses HTTP instead of HTTPS — credentials may be exposed in transit");
+        report.warning(
+            path,
+            "URL uses HTTP instead of HTTPS — credentials may be exposed in transit",
+        );
     }
 }
 
@@ -342,7 +353,10 @@ fn validate_providers(
     if let Some(ref p) = providers.openrouter {
         has_provider = true;
         if p.api_key.as_deref().is_none_or(|k| k.is_empty()) {
-            report.warning("providers.openrouter.api_key", "API key is empty or missing");
+            report.warning(
+                "providers.openrouter.api_key",
+                "API key is empty or missing",
+            );
         }
     }
 
@@ -384,7 +398,10 @@ fn validate_providers(
         has_provider = true;
         if let Some(ref url) = p.base_url {
             if url.is_empty() {
-                report.warning("providers.ollama.base_url", "base_url is empty (default: http://localhost:11434)");
+                report.warning(
+                    "providers.ollama.base_url",
+                    "base_url is empty (default: http://localhost:11434)",
+                );
             }
         }
     }
@@ -393,15 +410,24 @@ fn validate_providers(
     if let Some(ref p) = providers.azure_openai {
         has_provider = true;
         if p.api_key.as_deref().is_none_or(|k| k.is_empty()) {
-            report.warning("providers.azure_openai.api_key", "API key is empty or missing");
+            report.warning(
+                "providers.azure_openai.api_key",
+                "API key is empty or missing",
+            );
         }
         if p.endpoint.as_deref().is_none_or(|e| e.is_empty()) {
-            report.error("providers.azure_openai.endpoint", "Azure endpoint is required");
+            report.error(
+                "providers.azure_openai.endpoint",
+                "Azure endpoint is required",
+            );
         } else if let Some(ref ep) = p.endpoint {
             validate_url(ep, "providers.azure_openai.endpoint", report);
         }
         if p.deployment.as_deref().is_none_or(|d| d.is_empty()) {
-            report.error("providers.azure_openai.deployment", "Deployment name is required");
+            report.error(
+                "providers.azure_openai.deployment",
+                "Deployment name is required",
+            );
         }
     }
 
@@ -428,7 +454,10 @@ fn validate_providers(
             );
         }
         if cp.base_url.is_empty() {
-            report.error(format!("{prefix}.base_url"), "Custom provider base_url is empty");
+            report.error(
+                format!("{prefix}.base_url"),
+                "Custom provider base_url is empty",
+            );
         } else {
             validate_url(&cp.base_url, &format!("{prefix}.base_url"), report);
         }
@@ -441,15 +470,26 @@ fn validate_providers(
     }
 
     if !has_provider {
-        report.error("providers", "No LLM provider configured — at least one provider is required");
+        report.error(
+            "providers",
+            "No LLM provider configured — at least one provider is required",
+        );
     }
 }
 
-fn validate_api_key_prefix(key: &str, path: &str, expected_prefix: &str, report: &mut ValidationReport) {
+fn validate_api_key_prefix(
+    key: &str,
+    path: &str,
+    expected_prefix: &str,
+    report: &mut ValidationReport,
+) {
     if !key.starts_with(expected_prefix) {
         report.warning(
             path,
-            format!("API key does not start with expected prefix '{}'", expected_prefix),
+            format!(
+                "API key does not start with expected prefix '{}'",
+                expected_prefix
+            ),
         );
     }
 }
@@ -480,7 +520,10 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if s.enabled {
             has_enabled_channel = true;
             if s.bot_token.as_deref().is_none_or(|t| t.is_empty()) {
-                report.error("channels.slack.bot_token", "Slack bot_token is required when enabled");
+                report.error(
+                    "channels.slack.bot_token",
+                    "Slack bot_token is required when enabled",
+                );
             }
         }
     }
@@ -490,13 +533,22 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if m.enabled {
             has_enabled_channel = true;
             if m.homeserver.as_deref().is_none_or(|h| h.is_empty()) {
-                report.error("channels.matrix.homeserver", "Matrix homeserver URL is required when enabled");
+                report.error(
+                    "channels.matrix.homeserver",
+                    "Matrix homeserver URL is required when enabled",
+                );
             }
             if m.user_id.as_deref().is_none_or(|u| u.is_empty()) {
-                report.error("channels.matrix.user_id", "Matrix user_id is required when enabled");
+                report.error(
+                    "channels.matrix.user_id",
+                    "Matrix user_id is required when enabled",
+                );
             }
             if m.access_token.is_none() && m.password.is_none() {
-                report.error("channels.matrix", "Either access_token or password is required for Matrix");
+                report.error(
+                    "channels.matrix",
+                    "Either access_token or password is required for Matrix",
+                );
             }
         }
     }
@@ -506,20 +558,46 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if e.enabled {
             has_enabled_channel = true;
             if e.imap_host.as_deref().is_none_or(|h| h.is_empty()) {
-                report.error("channels.email.imap_host", "IMAP host is required when email is enabled");
+                report.error(
+                    "channels.email.imap_host",
+                    "IMAP host is required when email is enabled",
+                );
             }
             if e.smtp_host.as_deref().is_none_or(|h| h.is_empty()) {
-                report.error("channels.email.smtp_host", "SMTP host is required when email is enabled");
+                report.error(
+                    "channels.email.smtp_host",
+                    "SMTP host is required when email is enabled",
+                );
             }
             if e.username.as_deref().is_none_or(|u| u.is_empty()) {
-                report.error("channels.email.username", "Username is required when email is enabled");
+                report.error(
+                    "channels.email.username",
+                    "Username is required when email is enabled",
+                );
             }
             if e.port == 0 {
-                report.warning("channels.email.port", "Email port is 0 — will use default (587 for SMTP)");
+                report.warning(
+                    "channels.email.port",
+                    "Email port is 0 — will use default (587 for SMTP)",
+                );
             } else if !(1..=65535).contains(&e.port) {
-                report.error("channels.email.port", format!("Port must be between 1 and 65535, got {}", e.port));
-            } else if e.port != 25 && e.port != 465 && e.port != 587 && e.port != 993 && e.port != 995 {
-                report.warning("channels.email.port", format!("Port {} is non-standard for email (common: 25, 465, 587, 993, 995)", e.port));
+                report.error(
+                    "channels.email.port",
+                    format!("Port must be between 1 and 65535, got {}", e.port),
+                );
+            } else if e.port != 25
+                && e.port != 465
+                && e.port != 587
+                && e.port != 993
+                && e.port != 995
+            {
+                report.warning(
+                    "channels.email.port",
+                    format!(
+                        "Port {} is non-standard for email (common: 25, 465, 587, 993, 995)",
+                        e.port
+                    ),
+                );
             }
         }
     }
@@ -529,7 +607,10 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if d.enabled {
             has_enabled_channel = true;
             if d.webhook.as_deref().is_none_or(|w| w.is_empty()) {
-                report.error("channels.dingtalk.webhook", "Webhook URL is required when DingTalk is enabled");
+                report.error(
+                    "channels.dingtalk.webhook",
+                    "Webhook URL is required when DingTalk is enabled",
+                );
             } else if let Some(ref url) = d.webhook {
                 validate_url_require_https(url, "channels.dingtalk.webhook", report);
             }
@@ -541,10 +622,16 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if f.enabled {
             has_enabled_channel = true;
             if f.app_id.as_deref().is_none_or(|a| a.is_empty()) {
-                report.error("channels.feishu.app_id", "App ID is required when Feishu is enabled");
+                report.error(
+                    "channels.feishu.app_id",
+                    "App ID is required when Feishu is enabled",
+                );
             }
             if f.app_secret.as_deref().is_none_or(|s| s.is_empty()) {
-                report.error("channels.feishu.app_secret", "App secret is required when Feishu is enabled");
+                report.error(
+                    "channels.feishu.app_secret",
+                    "App secret is required when Feishu is enabled",
+                );
             }
         }
     }
@@ -554,10 +641,16 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if w.enabled {
             has_enabled_channel = true;
             if w.corp_id.as_deref().is_none_or(|c| c.is_empty()) {
-                report.error("channels.wecom.corp_id", "Corp ID is required when WeCom is enabled");
+                report.error(
+                    "channels.wecom.corp_id",
+                    "Corp ID is required when WeCom is enabled",
+                );
             }
             if w.secret.as_deref().is_none_or(|s| s.is_empty()) {
-                report.error("channels.wecom.secret", "Secret is required when WeCom is enabled");
+                report.error(
+                    "channels.wecom.secret",
+                    "Secret is required when WeCom is enabled",
+                );
             }
         }
     }
@@ -567,7 +660,10 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if w.enabled {
             has_enabled_channel = true;
             if w.app_id.as_deref().is_none_or(|a| a.is_empty()) {
-                report.error("channels.weixin.app_id", "App ID is required when WeChat is enabled");
+                report.error(
+                    "channels.weixin.app_id",
+                    "App ID is required when WeChat is enabled",
+                );
             }
         }
     }
@@ -577,7 +673,10 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if q.enabled {
             has_enabled_channel = true;
             if q.app_id.as_deref().is_none_or(|a| a.is_empty()) {
-                report.error("channels.qq.app_id", "App ID is required when QQ is enabled");
+                report.error(
+                    "channels.qq.app_id",
+                    "App ID is required when QQ is enabled",
+                );
             }
         }
     }
@@ -587,7 +686,10 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         if m.enabled {
             has_enabled_channel = true;
             if m.webhook_url.as_deref().is_none_or(|u| u.is_empty()) {
-                report.error("channels.mochat.webhook_url", "Webhook URL is required when Mochat is enabled");
+                report.error(
+                    "channels.mochat.webhook_url",
+                    "Webhook URL is required when Mochat is enabled",
+                );
             } else if let Some(ref url) = m.webhook_url {
                 validate_url_require_https(url, "channels.mochat.webhook_url", report);
             }
@@ -608,27 +710,45 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
     // WhatsApp
     if channels.whatsapp.as_ref().is_some_and(|w| w.enabled) {
         has_enabled_channel = true;
-        report.warning("channels.whatsapp", "WhatsApp channel is not yet implemented");
+        report.warning(
+            "channels.whatsapp",
+            "WhatsApp channel is not yet implemented",
+        );
     }
 
     if !has_enabled_channel {
-        report.warning("channels", "No channel is enabled — gateway will run in local-only mode");
+        report.warning(
+            "channels",
+            "No channel is enabled — gateway will run in local-only mode",
+        );
     }
 }
 
 fn validate_telegram(tg: &TelegramConfig, report: &mut ValidationReport) {
     if tg.token.is_empty() {
-        report.error("channels.telegram.token", "Bot token is required when Telegram is enabled");
+        report.error(
+            "channels.telegram.token",
+            "Bot token is required when Telegram is enabled",
+        );
     } else if !tg.token.contains(':') {
-        report.warning("channels.telegram.token", "Token format looks invalid — expected '123456:ABC-DEF'");
+        report.warning(
+            "channels.telegram.token",
+            "Token format looks invalid — expected '123456:ABC-DEF'",
+        );
     }
 }
 
 fn validate_discord(dc: &DiscordConfig, report: &mut ValidationReport) {
     if dc.token.is_empty() {
-        report.error("channels.discord.token", "Bot token is required when Discord is enabled");
+        report.error(
+            "channels.discord.token",
+            "Bot token is required when Discord is enabled",
+        );
     } else if dc.token.len() < 20 {
-        report.warning("channels.discord.token", "Token looks too short — expected a longer bot token");
+        report.warning(
+            "channels.discord.token",
+            "Token looks too short — expected a longer bot token",
+        );
     }
 }
 
@@ -649,14 +769,20 @@ fn validate_agent(agent: &AgentDefaults, report: &mut ValidationReport) {
     if !(0.0..=2.0).contains(&agent.temperature) {
         report.error(
             "agent.temperature",
-            format!("Temperature must be between 0.0 and 2.0, got {}", agent.temperature),
+            format!(
+                "Temperature must be between 0.0 and 2.0, got {}",
+                agent.temperature
+            ),
         );
     }
 
     if agent.max_tokens == 0 {
         report.error("agent.max_tokens", "max_tokens must be > 0");
     } else if agent.max_tokens > 128_000 {
-        report.warning("agent.max_tokens", "max_tokens > 128000 may not be supported by all models");
+        report.warning(
+            "agent.max_tokens",
+            "max_tokens > 128000 may not be supported by all models",
+        );
     }
 
     if agent.max_iterations == 0 {
@@ -669,7 +795,10 @@ fn validate_agent(agent: &AgentDefaults, report: &mut ValidationReport) {
     }
 
     if agent.tool_timeout == 0 {
-        report.warning("agent.tool_timeout", "tool_timeout of 0 means tools will timeout immediately");
+        report.warning(
+            "agent.tool_timeout",
+            "tool_timeout of 0 means tools will timeout immediately",
+        );
     }
 
     if let Some(ref workspace) = agent.workspace {
@@ -686,14 +815,23 @@ fn validate_agent(agent: &AgentDefaults, report: &mut ValidationReport) {
 fn validate_dream(dream: &DreamConfig, report: &mut ValidationReport) {
     if dream.enabled {
         if dream.interval_secs == 0 {
-            report.error("dream.interval_secs", "Dream interval must be > 0 when dream is enabled");
+            report.error(
+                "dream.interval_secs",
+                "Dream interval must be > 0 when dream is enabled",
+            );
         } else if dream.interval_secs < 60 {
-            report.warning("dream.interval_secs", "Dream interval < 60s may be too frequent and waste tokens");
+            report.warning(
+                "dream.interval_secs",
+                "Dream interval < 60s may be too frequent and waste tokens",
+            );
         }
 
         if let Some(ref model) = dream.model {
             if model.is_empty() {
-                report.warning("dream.model", "Dream model is set but empty — will fall back to agent model");
+                report.warning(
+                    "dream.model",
+                    "Dream model is set but empty — will fall back to agent model",
+                );
             }
         }
     }
@@ -706,11 +844,20 @@ fn validate_dream(dream: &DreamConfig, report: &mut ValidationReport) {
 fn validate_heartbeat(heartbeat: &HeartbeatConfig, report: &mut ValidationReport) {
     if heartbeat.enabled {
         if heartbeat.interval_secs == 0 {
-            report.error("heartbeat.interval_secs", "Heartbeat interval must be > 0 when heartbeat is enabled");
+            report.error(
+                "heartbeat.interval_secs",
+                "Heartbeat interval must be > 0 when heartbeat is enabled",
+            );
         } else if heartbeat.interval_secs < 10 {
-            report.warning("heartbeat.interval_secs", "Heartbeat interval < 10s may cause excessive load");
+            report.warning(
+                "heartbeat.interval_secs",
+                "Heartbeat interval < 10s may cause excessive load",
+            );
         } else if heartbeat.interval_secs > 86400 {
-            report.warning("heartbeat.interval_secs", "Heartbeat interval > 86400s (24h) means checks will be very infrequent");
+            report.warning(
+                "heartbeat.interval_secs",
+                "Heartbeat interval > 86400s (24h) means checks will be very infrequent",
+            );
         }
     }
 }
@@ -722,9 +869,15 @@ fn validate_heartbeat(heartbeat: &HeartbeatConfig, report: &mut ValidationReport
 fn validate_cron(cron: &CronConfig, report: &mut ValidationReport) {
     if cron.enabled {
         if cron.tick_secs == 0 {
-            report.error("cron.tick_secs", "Cron tick interval must be > 0 when cron is enabled");
+            report.error(
+                "cron.tick_secs",
+                "Cron tick interval must be > 0 when cron is enabled",
+            );
         } else if cron.tick_secs < 5 {
-            report.warning("cron.tick_secs", "Cron tick < 5s is very aggressive and may waste CPU");
+            report.warning(
+                "cron.tick_secs",
+                "Cron tick < 5s is very aggressive and may waste CPU",
+            );
         }
 
         if let Some(ref path) = cron.state_file {
@@ -742,14 +895,14 @@ fn validate_cron(cron: &CronConfig, report: &mut ValidationReport) {
 fn validate_security(security: &SecurityConfig, report: &mut ValidationReport) {
     for (i, cidr) in security.ssrf_whitelist.iter().enumerate() {
         if cidr.is_empty() {
-            report.warning(
-                format!("security.ssrf_whitelist[{i}]"),
-                "Empty CIDR entry",
-            );
+            report.warning(format!("security.ssrf_whitelist[{i}]"), "Empty CIDR entry");
         } else if cidr.parse::<ipnet::IpNet>().is_err() {
             report.warning(
                 format!("security.ssrf_whitelist[{i}]"),
-                format!("'{}' is not a valid CIDR (expected e.g. '10.0.0.0/8')", cidr),
+                format!(
+                    "'{}' is not a valid CIDR (expected e.g. '10.0.0.0/8')",
+                    cidr
+                ),
             );
         }
     }
@@ -763,7 +916,10 @@ fn validate_security(security: &SecurityConfig, report: &mut ValidationReport) {
         } else if cidr.parse::<ipnet::IpNet>().is_err() {
             report.warning(
                 format!("security.blocked_networks[{i}]"),
-                format!("'{}' is not a valid CIDR (expected e.g. '192.168.0.0/16')", cidr),
+                format!(
+                    "'{}' is not a valid CIDR (expected e.g. '192.168.0.0/16')",
+                    cidr
+                ),
             );
         }
     }
@@ -773,7 +929,10 @@ fn validate_security(security: &SecurityConfig, report: &mut ValidationReport) {
 // MCP server validation
 // ---------------------------------------------------------------------------
 
-fn validate_mcp_servers(servers: &std::collections::HashMap<String, McpServerConfig>, report: &mut ValidationReport) {
+fn validate_mcp_servers(
+    servers: &std::collections::HashMap<String, McpServerConfig>,
+    report: &mut ValidationReport,
+) {
     for (name, srv) in servers {
         let prefix = format!("mcp_servers.{name}");
 
@@ -799,7 +958,10 @@ fn validate_mcp_servers(servers: &std::collections::HashMap<String, McpServerCon
             other => {
                 report.error(
                     format!("{prefix}.transport"),
-                    format!("Unknown transport '{}'. Must be 'stdio', 'sse', or 'http'", other),
+                    format!(
+                        "Unknown transport '{}'. Must be 'stdio', 'sse', or 'http'",
+                        other
+                    ),
                 );
             }
         }
@@ -839,18 +1001,24 @@ fn validate_api(api: &ApiConfig, report: &mut ValidationReport) {
     if api.max_body_size == 0 {
         report.error("api.max_body_size", "Max body size must be > 0");
     } else if api.max_body_size < 1024 {
-        report.warning("api.max_body_size", "Max body size < 1KB may reject legitimate requests");
+        report.warning(
+            "api.max_body_size",
+            "Max body size < 1KB may reject legitimate requests",
+        );
     }
     if api.allowed_origins.is_empty() {
-        report.warning("api.allowed_origins", "No CORS origins configured — API may reject browser requests");
+        report.warning(
+            "api.allowed_origins",
+            "No CORS origins configured — API may reject browser requests",
+        );
     } else {
         for (i, origin) in api.allowed_origins.iter().enumerate() {
             if origin.is_empty() {
-                report.warning(
-                    format!("api.allowed_origins[{i}]"),
-                    "Empty origin entry",
-                );
-            } else if origin != "*" && !origin.starts_with("http://") && !origin.starts_with("https://") {
+                report.warning(format!("api.allowed_origins[{i}]"), "Empty origin entry");
+            } else if origin != "*"
+                && !origin.starts_with("http://")
+                && !origin.starts_with("https://")
+            {
                 report.warning(
                     format!("api.allowed_origins[{i}]"),
                     format!("Origin '{}' should be '*' or start with http(s)://", origin),
@@ -874,16 +1042,36 @@ fn validate_cross_field(
 
     // Build list of configured provider names
     let mut configured: Vec<&str> = Vec::new();
-    if providers.openai.is_some() { configured.push("openai"); }
-    if providers.anthropic.is_some() { configured.push("anthropic"); }
-    if providers.openrouter.is_some() { configured.push("openrouter"); }
-    if providers.ollama.is_some() { configured.push("ollama"); }
-    if providers.deepseek.is_some() { configured.push("deepseek"); }
-    if providers.gemini.is_some() { configured.push("gemini"); }
-    if providers.groq.is_some() { configured.push("groq"); }
-    if providers.moonshot.is_some() { configured.push("moonshot"); }
-    if providers.minimax.is_some() { configured.push("minimax"); }
-    if providers.azure_openai.is_some() { configured.push("azure_openai"); }
+    if providers.openai.is_some() {
+        configured.push("openai");
+    }
+    if providers.anthropic.is_some() {
+        configured.push("anthropic");
+    }
+    if providers.openrouter.is_some() {
+        configured.push("openrouter");
+    }
+    if providers.ollama.is_some() {
+        configured.push("ollama");
+    }
+    if providers.deepseek.is_some() {
+        configured.push("deepseek");
+    }
+    if providers.gemini.is_some() {
+        configured.push("gemini");
+    }
+    if providers.groq.is_some() {
+        configured.push("groq");
+    }
+    if providers.moonshot.is_some() {
+        configured.push("moonshot");
+    }
+    if providers.minimax.is_some() {
+        configured.push("minimax");
+    }
+    if providers.azure_openai.is_some() {
+        configured.push("azure_openai");
+    }
     for cp in custom {
         configured.push(&cp.name);
     }
@@ -907,7 +1095,9 @@ fn validate_cross_field(
         channels.qq.as_ref().is_some_and(|q| q.enabled),
         channels.mochat.as_ref().is_some_and(|m| m.enabled),
         channels.whatsapp.as_ref().is_some_and(|w| w.enabled),
-    ].iter().any(|&v| v);
+    ]
+    .iter()
+    .any(|&v| v);
 
     if has_enabled_channel && configured.is_empty() {
         report.warning(
@@ -929,7 +1119,11 @@ fn validate_cross_field(
     // Custom providers match by model_patterns
     if !matched {
         for cp in custom {
-            if cp.model_patterns.iter().any(|p| model_lower.contains(&p.to_lowercase())) {
+            if cp
+                .model_patterns
+                .iter()
+                .any(|p| model_lower.contains(&p.to_lowercase()))
+            {
                 matched = true;
                 break;
             }
@@ -981,7 +1175,11 @@ fn validate_cross_field(
                 }
                 if !dream_matched {
                     for cp in custom {
-                        if cp.model_patterns.iter().any(|p| dm_lower.contains(&p.to_lowercase())) {
+                        if cp
+                            .model_patterns
+                            .iter()
+                            .any(|p| dm_lower.contains(&p.to_lowercase()))
+                        {
                             dream_matched = true;
                             break;
                         }
@@ -1090,7 +1288,10 @@ mod tests {
             path: "agent.model".to_string(),
             message: "cannot be empty".to_string(),
         };
-        assert_eq!(format!("{}", finding), "[ERROR] agent.model: cannot be empty");
+        assert_eq!(
+            format!("{}", finding),
+            "[ERROR] agent.model: cannot be empty"
+        );
     }
 
     #[test]
@@ -1137,7 +1338,10 @@ mod tests {
             no_proxy: None,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "providers.openai.api_key"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "providers.openai.api_key"));
     }
 
     #[test]
@@ -1150,7 +1354,10 @@ mod tests {
             no_proxy: None,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "providers.openai.api_key" && w.message.contains("sk-")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "providers.openai.api_key" && w.message.contains("sk-")));
     }
 
     #[test]
@@ -1163,7 +1370,10 @@ mod tests {
             no_proxy: None,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "providers.anthropic.api_key" && w.message.contains("sk-ant-")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "providers.anthropic.api_key" && w.message.contains("sk-ant-")));
     }
 
     #[test]
@@ -1236,7 +1446,10 @@ mod tests {
             no_proxy: None,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "providers.ollama.base_url"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "providers.ollama.base_url"));
     }
 
     // -------------------------------------------------------------------
@@ -1263,7 +1476,10 @@ mod tests {
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "channels.telegram.token"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.telegram.token"));
     }
 
     #[test]
@@ -1277,7 +1493,10 @@ mod tests {
             streaming: false,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "channels.telegram.token"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.telegram.token"));
     }
 
     #[test]
@@ -1292,7 +1511,10 @@ mod tests {
         });
         let report = validate(&config);
         // Should not error on token since disabled
-        assert!(report.errors().iter().all(|e| e.path != "channels.telegram.token"));
+        assert!(report
+            .errors()
+            .iter()
+            .all(|e| e.path != "channels.telegram.token"));
     }
 
     #[test]
@@ -1306,7 +1528,10 @@ mod tests {
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "channels.discord.token"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.discord.token"));
     }
 
     #[test]
@@ -1319,7 +1544,10 @@ mod tests {
             streaming: false,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "channels.discord.token"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.discord.token"));
     }
 
     #[test]
@@ -1333,7 +1561,10 @@ mod tests {
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "channels.slack.bot_token"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.slack.bot_token"));
     }
 
     #[test]
@@ -1391,7 +1622,10 @@ mod tests {
         config.agent.temperature = -0.5;
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "agent.temperature"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "agent.temperature"));
     }
 
     #[test]
@@ -1400,7 +1634,10 @@ mod tests {
         config.agent.temperature = 3.0;
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "agent.temperature"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "agent.temperature"));
     }
 
     #[test]
@@ -1426,7 +1663,10 @@ mod tests {
         let mut config = make_valid_config();
         config.agent.max_tokens = 200_000;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "agent.max_tokens"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "agent.max_tokens"));
     }
 
     #[test]
@@ -1435,7 +1675,10 @@ mod tests {
         config.agent.max_iterations = 0;
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "agent.max_iterations"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "agent.max_iterations"));
     }
 
     #[test]
@@ -1443,7 +1686,10 @@ mod tests {
         let mut config = make_valid_config();
         config.agent.tool_timeout = 0;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "agent.tool_timeout"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "agent.tool_timeout"));
     }
 
     #[test]
@@ -1451,7 +1697,10 @@ mod tests {
         let mut config = make_valid_config();
         config.agent.workspace = Some(String::new());
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "agent.workspace"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "agent.workspace"));
     }
 
     // -------------------------------------------------------------------
@@ -1465,7 +1714,10 @@ mod tests {
         config.dream.interval_secs = 0;
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "dream.interval_secs"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "dream.interval_secs"));
     }
 
     #[test]
@@ -1474,7 +1726,10 @@ mod tests {
         config.dream.enabled = true;
         config.dream.interval_secs = 30;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "dream.interval_secs"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "dream.interval_secs"));
     }
 
     #[test]
@@ -1483,7 +1738,10 @@ mod tests {
         config.dream.enabled = false;
         config.dream.interval_secs = 0;
         let report = validate(&config);
-        assert!(report.errors().iter().all(|e| e.path != "dream.interval_secs"));
+        assert!(report
+            .errors()
+            .iter()
+            .all(|e| e.path != "dream.interval_secs"));
     }
 
     #[test]
@@ -1506,7 +1764,10 @@ mod tests {
         config.heartbeat.interval_secs = 0;
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "heartbeat.interval_secs"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "heartbeat.interval_secs"));
     }
 
     #[test]
@@ -1515,7 +1776,10 @@ mod tests {
         config.heartbeat.enabled = true;
         config.heartbeat.interval_secs = 5;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "heartbeat.interval_secs"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "heartbeat.interval_secs"));
     }
 
     #[test]
@@ -1524,7 +1788,10 @@ mod tests {
         config.heartbeat.enabled = true;
         config.heartbeat.interval_secs = 100_000;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "heartbeat.interval_secs" && w.message.contains("24h")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "heartbeat.interval_secs" && w.message.contains("24h")));
     }
 
     #[test]
@@ -1533,7 +1800,10 @@ mod tests {
         config.heartbeat.enabled = false;
         config.heartbeat.interval_secs = 0;
         let report = validate(&config);
-        assert!(report.errors().iter().all(|e| e.path != "heartbeat.interval_secs"));
+        assert!(report
+            .errors()
+            .iter()
+            .all(|e| e.path != "heartbeat.interval_secs"));
     }
 
     // -------------------------------------------------------------------
@@ -1574,7 +1844,10 @@ mod tests {
         config.cron.enabled = true;
         config.cron.state_file = Some(String::new());
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "cron.state_file"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "cron.state_file"));
     }
 
     // -------------------------------------------------------------------
@@ -1584,10 +1857,14 @@ mod tests {
     #[test]
     fn test_security_valid_cidr() {
         let mut config = make_valid_config();
-        config.security.ssrf_whitelist = vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()];
+        config.security.ssrf_whitelist =
+            vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()];
         config.security.blocked_networks = vec!["192.168.0.0/16".to_string()];
         let report = validate(&config);
-        assert!(report.warnings().iter().all(|w| !w.path.starts_with("security.")));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| !w.path.starts_with("security.")));
     }
 
     #[test]
@@ -1595,7 +1872,11 @@ mod tests {
         let mut config = make_valid_config();
         config.security.ssrf_whitelist = vec!["not-a-cidr".to_string()];
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "security.ssrf_whitelist[0]" && w.message.contains("not a valid CIDR")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "security.ssrf_whitelist[0]"
+                && w.message.contains("not a valid CIDR")));
     }
 
     #[test]
@@ -1603,7 +1884,10 @@ mod tests {
         let mut config = make_valid_config();
         config.security.blocked_networks = vec![String::new()];
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "security.blocked_networks[0]"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "security.blocked_networks[0]"));
     }
 
     #[test]
@@ -1611,7 +1895,10 @@ mod tests {
         let mut config = make_valid_config();
         config.security.ssrf_whitelist = vec!["::1/128".to_string(), "fd00::/8".to_string()];
         let report = validate(&config);
-        assert!(report.warnings().iter().all(|w| !w.path.starts_with("security.")));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| !w.path.starts_with("security.")));
     }
 
     // -------------------------------------------------------------------
@@ -1621,13 +1908,16 @@ mod tests {
     #[test]
     fn test_mcp_stdio_valid() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("fs".to_string(), McpServerConfig {
-            transport: "stdio".to_string(),
-            command: Some("mcp-fs".to_string()),
-            args: None,
-            url: None,
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "fs".to_string(),
+            McpServerConfig {
+                transport: "stdio".to_string(),
+                command: Some("mcp-fs".to_string()),
+                args: None,
+                url: None,
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(report.is_valid(), "Unexpected errors: {}", report);
     }
@@ -1635,28 +1925,37 @@ mod tests {
     #[test]
     fn test_mcp_stdio_missing_command() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("fs".to_string(), McpServerConfig {
-            transport: "stdio".to_string(),
-            command: None,
-            args: None,
-            url: None,
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "fs".to_string(),
+            McpServerConfig {
+                transport: "stdio".to_string(),
+                command: None,
+                args: None,
+                url: None,
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "mcp_servers.fs.command"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "mcp_servers.fs.command"));
     }
 
     #[test]
     fn test_mcp_sse_valid() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("remote".to_string(), McpServerConfig {
-            transport: "sse".to_string(),
-            command: None,
-            args: None,
-            url: Some("https://mcp.example.com/sse".to_string()),
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "remote".to_string(),
+            McpServerConfig {
+                transport: "sse".to_string(),
+                command: None,
+                args: None,
+                url: Some("https://mcp.example.com/sse".to_string()),
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(report.is_valid(), "Unexpected errors: {}", report);
     }
@@ -1664,31 +1963,44 @@ mod tests {
     #[test]
     fn test_mcp_http_missing_url() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("remote".to_string(), McpServerConfig {
-            transport: "http".to_string(),
-            command: None,
-            args: None,
-            url: None,
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "remote".to_string(),
+            McpServerConfig {
+                transport: "http".to_string(),
+                command: None,
+                args: None,
+                url: None,
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "mcp_servers.remote.url"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "mcp_servers.remote.url"));
     }
 
     #[test]
     fn test_mcp_unknown_transport() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("bad".to_string(), McpServerConfig {
-            transport: "grpc".to_string(),
-            command: None,
-            args: None,
-            url: None,
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "bad".to_string(),
+            McpServerConfig {
+                transport: "grpc".to_string(),
+                command: None,
+                args: None,
+                url: None,
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "mcp_servers.bad.transport" && e.message.contains("Unknown transport")));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "mcp_servers.bad.transport"
+                && e.message.contains("Unknown transport")));
     }
 
     // -------------------------------------------------------------------
@@ -1713,7 +2025,10 @@ mod tests {
         });
         config.agent.model = "gpt-4o".to_string(); // gpt keywords → openai, but only anthropic configured
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "agent.model" && w.message.contains("may not match")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "agent.model" && w.message.contains("may not match")));
     }
 
     #[test]
@@ -1824,7 +2139,10 @@ mod tests {
             no_proxy: None,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "providers.openai.api_key"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "providers.openai.api_key"));
     }
 
     // -------------------------------------------------------------------
@@ -1871,7 +2189,10 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.errors().iter().any(|e| e.path == "channels.dingtalk.webhook"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.dingtalk.webhook"));
     }
 
     #[test]
@@ -1883,7 +2204,10 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.errors().iter().all(|e| e.path != "channels.dingtalk.webhook"));
+        assert!(report
+            .errors()
+            .iter()
+            .all(|e| e.path != "channels.dingtalk.webhook"));
     }
 
     // -------------------------------------------------------------------
@@ -1898,7 +2222,10 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.errors().iter().any(|e| e.path == "channels.mochat.webhook_url"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.mochat.webhook_url"));
     }
 
     // -------------------------------------------------------------------
@@ -1915,7 +2242,10 @@ mod tests {
             no_proxy: None,
         });
         let report = validate(&config);
-        assert!(report.errors().iter().any(|e| e.path == "providers.openai.base_url"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "providers.openai.base_url"));
     }
 
     #[test]
@@ -1928,7 +2258,10 @@ mod tests {
             api_version: None,
         });
         let report = validate(&config);
-        assert!(report.errors().iter().any(|e| e.path == "providers.azure_openai.endpoint"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "providers.azure_openai.endpoint"));
     }
 
     // -------------------------------------------------------------------
@@ -1954,7 +2287,10 @@ mod tests {
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "custom_providers[1].name" && e.message.contains("Duplicate")));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "custom_providers[1].name" && e.message.contains("Duplicate")));
     }
 
     // -------------------------------------------------------------------
@@ -1972,7 +2308,10 @@ mod tests {
             no_proxy: None,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "custom_providers[0].model_patterns"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "custom_providers[0].model_patterns"));
     }
 
     // -------------------------------------------------------------------
@@ -1991,7 +2330,10 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "channels.email.port" && w.message.contains("0")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.email.port" && w.message.contains("0")));
     }
 
     #[test]
@@ -2006,7 +2348,10 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "channels.email.port" && w.message.contains("non-standard")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.email.port" && w.message.contains("non-standard")));
     }
 
     #[test]
@@ -2021,7 +2366,10 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().all(|w| w.path != "channels.email.port"));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| w.path != "channels.email.port"));
     }
 
     // -------------------------------------------------------------------
@@ -2037,7 +2385,11 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "channels.dingtalk.webhook" && w.message.contains("HTTP instead of HTTPS")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.dingtalk.webhook"
+                && w.message.contains("HTTP instead of HTTPS")));
     }
 
     #[test]
@@ -2048,7 +2400,11 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "channels.mochat.webhook_url" && w.message.contains("HTTP instead of HTTPS")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.mochat.webhook_url"
+                && w.message.contains("HTTP instead of HTTPS")));
     }
 
     #[test]
@@ -2062,7 +2418,11 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "channels.matrix.homeserver" && w.message.contains("HTTP instead of HTTPS")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.matrix.homeserver"
+                && w.message.contains("HTTP instead of HTTPS")));
     }
 
     #[test]
@@ -2076,7 +2436,10 @@ mod tests {
             enabled: true,
         });
         let report = validate(&config);
-        assert!(report.warnings().iter().all(|w| w.path != "channels.matrix.homeserver"));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| w.path != "channels.matrix.homeserver"));
     }
 
     // -------------------------------------------------------------------
@@ -2089,7 +2452,10 @@ mod tests {
         config.agent.model = "gpt 4o".to_string();
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "agent.model" && e.message.contains("whitespace")));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "agent.model" && e.message.contains("whitespace")));
     }
 
     // -------------------------------------------------------------------
@@ -2101,7 +2467,10 @@ mod tests {
         let mut config = make_valid_config();
         config.agent.max_iterations = 1000;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "agent.max_iterations" && w.message.contains("very high")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "agent.max_iterations" && w.message.contains("very high")));
     }
 
     // -------------------------------------------------------------------
@@ -2113,7 +2482,10 @@ mod tests {
         let mut config = make_valid_config();
         config.api.allowed_origins = vec!["example.com".to_string()];
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "api.allowed_origins[0]" && w.message.contains("should be")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "api.allowed_origins[0]" && w.message.contains("should be")));
     }
 
     #[test]
@@ -2121,7 +2493,10 @@ mod tests {
         let mut config = make_valid_config();
         config.api.allowed_origins = vec!["*".to_string()];
         let report = validate(&config);
-        assert!(report.warnings().iter().all(|w| !w.path.starts_with("api.allowed_origins")));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| !w.path.starts_with("api.allowed_origins")));
     }
 
     #[test]
@@ -2129,7 +2504,10 @@ mod tests {
         let mut config = make_valid_config();
         config.api.allowed_origins = vec!["https://example.com".to_string()];
         let report = validate(&config);
-        assert!(report.warnings().iter().all(|w| !w.path.starts_with("api.allowed_origins")));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| !w.path.starts_with("api.allowed_origins")));
     }
 
     #[test]
@@ -2137,7 +2515,10 @@ mod tests {
         let mut config = make_valid_config();
         config.api.max_body_size = 512;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "api.max_body_size" && w.message.contains("1KB")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "api.max_body_size" && w.message.contains("1KB")));
     }
 
     // -------------------------------------------------------------------
@@ -2150,7 +2531,10 @@ mod tests {
         config.dream.enabled = true;
         config.dream.model = Some("claude-3".to_string()); // only openai configured
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "dream.model" && w.message.contains("may not match")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "dream.model" && w.message.contains("may not match")));
     }
 
     #[test]
@@ -2186,7 +2570,9 @@ providers:
 "#;
         let findings = validate_raw_env_vars(yaml);
         assert!(!findings.is_empty());
-        assert!(findings.iter().any(|f| f.message.contains("THIS_VAR_DOES_NOT_EXIST_XYZ")));
+        assert!(findings
+            .iter()
+            .any(|f| f.message.contains("THIS_VAR_DOES_NOT_EXIST_XYZ")));
         assert_eq!(findings[0].severity, Severity::Warning);
     }
 
@@ -2200,7 +2586,11 @@ providers:
     api_key: ${PROBABLY_MISSING_VAR_ABC:-fallback-key}
 "#;
         let findings = validate_raw_env_vars(yaml);
-        assert!(findings.is_empty(), "Expected no findings for var with default, got: {:?}", findings);
+        assert!(
+            findings.is_empty(),
+            "Expected no findings for var with default, got: {:?}",
+            findings
+        );
     }
 
     #[test]
@@ -2214,7 +2604,11 @@ providers:
 "#;
         let findings = validate_raw_env_vars(yaml);
         std::env::remove_var("NANOBOT_TEST_SET_VAR");
-        assert!(findings.is_empty(), "Expected no findings for set var, got: {:?}", findings);
+        assert!(
+            findings.is_empty(),
+            "Expected no findings for set var, got: {:?}",
+            findings
+        );
     }
 
     #[test]
@@ -2242,10 +2636,13 @@ channels:
 "#;
         let findings = validate_raw_env_vars(yaml);
         assert_eq!(findings.len(), 2);
-        let names: Vec<&str> = findings.iter().map(|f| {
-            // Extract var name from message
-            f.message.split('\'').nth(1).unwrap_or("")
-        }).collect();
+        let names: Vec<&str> = findings
+            .iter()
+            .map(|f| {
+                // Extract var name from message
+                f.message.split('\'').nth(1).unwrap_or("")
+            })
+            .collect();
         assert!(names.contains(&"MISSING_AAA"));
         assert!(names.contains(&"MISSING_BBB"));
     }
@@ -2265,7 +2662,11 @@ channels:
         std::env::remove_var("MISSING_WITH_EMPTY_DEFAULT");
         let yaml = "key: ${MISSING_WITH_EMPTY_DEFAULT:-}\n";
         let findings = validate_raw_env_vars(yaml);
-        assert!(findings.is_empty(), "Expected no warning for var with empty default, got: {:?}", findings);
+        assert!(
+            findings.is_empty(),
+            "Expected no warning for var with empty default, got: {:?}",
+            findings
+        );
     }
 
     // -------------------------------------------------------------------
@@ -2295,7 +2696,10 @@ channels:
         let config = make_valid_config(); // has openai provider + telegram enabled
         let report = validate(&config);
         assert!(report.is_valid(), "Unexpected errors: {}", report);
-        assert!(report.warnings().iter().all(|w| !w.message.contains("no LLM provider")));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| !w.message.contains("no LLM provider")));
     }
 
     // -------------------------------------------------------------------
@@ -2318,7 +2722,10 @@ channels:
         config.agent.max_iterations = 500;
         let report = validate(&config);
         assert!(report.is_valid());
-        assert!(report.warnings().iter().all(|w| w.path != "agent.max_iterations"));
+        assert!(report
+            .warnings()
+            .iter()
+            .all(|w| w.path != "agent.max_iterations"));
     }
 
     #[test]
@@ -2326,7 +2733,10 @@ channels:
         let mut config = make_valid_config();
         config.agent.max_iterations = 501;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "agent.max_iterations" && w.message.contains("very high")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "agent.max_iterations" && w.message.contains("very high")));
     }
 
     #[test]
@@ -2361,7 +2771,10 @@ channels:
         config.dream.enabled = true;
         config.dream.interval_secs = 59;
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "dream.interval_secs"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "dream.interval_secs"));
     }
 
     #[test]
@@ -2369,7 +2782,10 @@ channels:
         let mut config = make_valid_config();
         config.api.allowed_origins = vec![];
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "api.allowed_origins"));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "api.allowed_origins"));
     }
 
     #[test]
@@ -2378,52 +2794,73 @@ channels:
         config.api.max_body_size = 0;
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "api.max_body_size"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "api.max_body_size"));
     }
 
     #[test]
     fn test_mcp_empty_command_error() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("bad".to_string(), McpServerConfig {
-            transport: "stdio".to_string(),
-            command: Some(String::new()),
-            args: None,
-            url: None,
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "bad".to_string(),
+            McpServerConfig {
+                transport: "stdio".to_string(),
+                command: Some(String::new()),
+                args: None,
+                url: None,
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "mcp_servers.bad.command"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "mcp_servers.bad.command"));
     }
 
     #[test]
     fn test_mcp_sse_empty_url_error() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("bad".to_string(), McpServerConfig {
-            transport: "sse".to_string(),
-            command: None,
-            args: None,
-            url: Some(String::new()),
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "bad".to_string(),
+            McpServerConfig {
+                transport: "sse".to_string(),
+                command: None,
+                args: None,
+                url: Some(String::new()),
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "mcp_servers.bad.url"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "mcp_servers.bad.url"));
     }
 
     #[test]
     fn test_mcp_sse_invalid_url_error() {
         let mut config = make_valid_config();
-        config.mcp_servers.insert("bad".to_string(), McpServerConfig {
-            transport: "http".to_string(),
-            command: None,
-            args: None,
-            url: Some("not-a-url".to_string()),
-            env: HashMap::new(),
-        });
+        config.mcp_servers.insert(
+            "bad".to_string(),
+            McpServerConfig {
+                transport: "http".to_string(),
+                command: None,
+                args: None,
+                url: Some("not-a-url".to_string()),
+                env: HashMap::new(),
+            },
+        );
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "mcp_servers.bad.url"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "mcp_servers.bad.url"));
     }
 
     #[test]
@@ -2436,7 +2873,10 @@ channels:
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "channels.feishu.app_id"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.feishu.app_id"));
     }
 
     #[test]
@@ -2449,7 +2889,10 @@ channels:
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "channels.feishu.app_secret"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.feishu.app_secret"));
     }
 
     #[test]
@@ -2482,7 +2925,10 @@ channels:
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "channels.weixin.app_id"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.weixin.app_id"));
     }
 
     #[test]
@@ -2496,7 +2942,10 @@ channels:
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report.errors().iter().any(|e| e.path == "channels.qq.app_id"));
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.qq.app_id"));
     }
 
     #[test]
@@ -2512,7 +2961,10 @@ channels:
         });
         let report = validate(&config);
         // port=1 is in range [1, 65535] but non-standard
-        assert!(report.warnings().iter().any(|w| w.path == "channels.email.port" && w.message.contains("non-standard")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "channels.email.port" && w.message.contains("non-standard")));
     }
 
     #[test]
@@ -2520,6 +2972,10 @@ channels:
         let mut config = make_valid_config();
         config.security.blocked_networks = vec!["not-valid".to_string()];
         let report = validate(&config);
-        assert!(report.warnings().iter().any(|w| w.path == "security.blocked_networks[0]" && w.message.contains("not a valid CIDR")));
+        assert!(report
+            .warnings()
+            .iter()
+            .any(|w| w.path == "security.blocked_networks[0]"
+                && w.message.contains("not a valid CIDR")));
     }
 }

@@ -148,10 +148,7 @@ pub enum AgentEvent {
     },
 
     /// Heartbeat requests a component restart.
-    RestartRequested {
-        component: String,
-        reason: String,
-    },
+    RestartRequested { component: String, reason: String },
 
     /// Gateway is reconnecting (possibly with resume).
     GatewayReconnecting {
@@ -167,9 +164,7 @@ pub enum AgentEvent {
     },
 
     /// Gateway starting a fresh identify (old session lost).
-    GatewayReidentify {
-        platform: String,
-    },
+    GatewayReidentify { platform: String },
 
     /// Health status changed (transition between healthy/degraded/unhealthy).
     HealthStatusChanged {

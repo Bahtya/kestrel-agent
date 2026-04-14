@@ -146,7 +146,10 @@ impl CronService {
 
         drop(store);
         if caught_up > 0 {
-            info!("Recovered {} job(s) that were due during downtime", caught_up);
+            info!(
+                "Recovered {} job(s) that were due during downtime",
+                caught_up
+            );
             let _ = self.persist();
         }
     }
@@ -393,7 +396,9 @@ impl CronService {
 
     /// Mark a job as completed with a result.
     pub fn mark_completed(&self, job_id: &str, result: Option<String>) {
-        let is_error = result.as_ref().is_some_and(|r| r.starts_with("error:") || r.starts_with("Error"));
+        let is_error = result
+            .as_ref()
+            .is_some_and(|r| r.starts_with("error:") || r.starts_with("Error"));
         let mut store = self.store.lock();
         if let Some(job) = store.jobs.iter_mut().find(|j| j.id == job_id) {
             if let Some(last_run) = job.history.last_mut() {
@@ -431,9 +436,8 @@ impl CronService {
             CRON_TICK_INTERVAL_SECS
         );
 
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            CRON_TICK_INTERVAL_SECS,
-        ));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(CRON_TICK_INTERVAL_SECS));
 
         while *self.running.read().await {
             interval.tick().await;
@@ -493,7 +497,12 @@ impl CronService {
             next_run: job.next_run.map(|dt| dt.with_timezone(&chrono::Utc)),
             is_active: job.state == JobState::Active,
             run_count: job.history.len() as u64,
-            last_error: job.history.iter().rev().find(|r| !r.success).and_then(|r| r.result.clone()),
+            last_error: job
+                .history
+                .iter()
+                .rev()
+                .find(|r| !r.success)
+                .and_then(|r| r.result.clone()),
         }
     }
 
@@ -652,7 +661,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let job = svc
-            .add_job(make_at_schedule(false), make_payload(), Some("test".to_string()))
+            .add_job(
+                make_at_schedule(false),
+                make_payload(),
+                Some("test".to_string()),
+            )
             .unwrap();
         assert_eq!(job.name.as_deref(), Some("test"));
         assert_eq!(job.state, JobState::Active);
@@ -687,12 +700,20 @@ mod tests {
     fn test_list_jobs() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.add_job(make_at_schedule(false), make_payload(), Some("a".to_string()))
-            .unwrap();
+        svc.add_job(
+            make_at_schedule(false),
+            make_payload(),
+            Some("a".to_string()),
+        )
+        .unwrap();
         svc.add_job(make_every_schedule(), make_payload(), Some("b".to_string()))
             .unwrap();
-        svc.add_job(make_cron_schedule("0 0 * * * * *"), make_payload(), Some("c".to_string()))
-            .unwrap();
+        svc.add_job(
+            make_cron_schedule("0 0 * * * * *"),
+            make_payload(),
+            Some("c".to_string()),
+        )
+        .unwrap();
         let jobs = svc.list_jobs();
         assert_eq!(jobs.len(), 3);
     }
@@ -702,7 +723,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let job = svc
-            .add_job(make_at_schedule(false), make_payload(), Some("findme".to_string()))
+            .add_job(
+                make_at_schedule(false),
+                make_payload(),
+                Some("findme".to_string()),
+            )
             .unwrap();
         let found = svc.get_job(&job.id).unwrap();
         assert_eq!(found.name.as_deref(), Some("findme"));
@@ -716,7 +741,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let job = svc
-            .add_job(make_every_schedule(), make_payload(), Some("orig".to_string()))
+            .add_job(
+                make_every_schedule(),
+                make_payload(),
+                Some("orig".to_string()),
+            )
             .unwrap();
 
         let new_schedule = CronSchedule {
@@ -862,11 +891,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let _job = svc
-            .add_job(
-                make_cron_schedule("0 0 * * * * *"),
-                make_payload(),
-                None,
-            )
+            .add_job(make_cron_schedule("0 0 * * * * *"), make_payload(), None)
             .unwrap();
 
         // Manually set next_run to the past
@@ -956,7 +981,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let job = svc
-            .add_job(make_every_schedule(), make_payload(), Some("orig".to_string()))
+            .add_job(
+                make_every_schedule(),
+                make_payload(),
+                Some("orig".to_string()),
+            )
             .unwrap();
         svc.update_job(&job.id, None, Some(make_payload_with("new")), None, None)
             .unwrap();
@@ -1200,7 +1229,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let job = svc
-            .add_job(make_every_schedule(), make_payload(), Some("stateful".to_string()))
+            .add_job(
+                make_every_schedule(),
+                make_payload(),
+                Some("stateful".to_string()),
+            )
             .unwrap();
 
         let state = svc.get_job_state(&job.id).unwrap();
@@ -1311,7 +1344,11 @@ mod tests {
         let job_id = {
             let svc = make_service(dir.path());
             let job = svc
-                .add_job(make_every_schedule(), make_payload(), Some("survive".to_string()))
+                .add_job(
+                    make_every_schedule(),
+                    make_payload(),
+                    Some("survive".to_string()),
+                )
                 .unwrap();
 
             // Simulate some runs
@@ -1339,7 +1376,11 @@ mod tests {
         let job_id = {
             let svc = make_service(dir.path());
             let job = svc
-                .add_job(make_every_schedule(), make_payload(), Some("late".to_string()))
+                .add_job(
+                    make_every_schedule(),
+                    make_payload(),
+                    Some("late".to_string()),
+                )
                 .unwrap();
 
             // Manually set next_run to the past and persist
@@ -1378,7 +1419,11 @@ mod tests {
         let svc = CronService::with_state_store(dir.path().to_path_buf(), mem_store).unwrap();
 
         let job = svc
-            .add_job(make_every_schedule(), make_payload(), Some("custom".to_string()))
+            .add_job(
+                make_every_schedule(),
+                make_payload(),
+                Some("custom".to_string()),
+            )
             .unwrap();
 
         let state = svc.get_job_state(&job.id).unwrap();
@@ -1447,8 +1492,7 @@ mod tests {
         let svc = make_service(dir.path());
 
         // Create 3 jobs due now (past "at" schedule)
-        let past_ts = (Local::now() - chrono::Duration::seconds(10))
-            .timestamp_millis();
+        let past_ts = (Local::now() - chrono::Duration::seconds(10)).timestamp_millis();
 
         let mut job_ids = Vec::new();
         for (i, pri) in [0u32, 200, 50].iter().enumerate() {

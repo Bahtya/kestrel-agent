@@ -129,7 +129,10 @@ fn build_manager_with_mock(
 
     let mut registry = ChannelRegistry::new();
     registry.register(&platform_name, move || {
-        Box::new(MockChannel::new(platform_for_closure.clone(), sent_clone.clone()))
+        Box::new(MockChannel::new(
+            platform_for_closure.clone(),
+            sent_clone.clone(),
+        ))
     });
 
     let manager = ChannelManager::new(registry, bus.clone());
@@ -147,7 +150,9 @@ async fn test_outbound_routing_single_message() {
 
     // Start the mock telegram channel
     manager.start_channel("telegram").await.unwrap();
-    assert!(manager.running_channel_names().contains(&"telegram".to_string()));
+    assert!(manager
+        .running_channel_names()
+        .contains(&"telegram".to_string()));
 
     // Spawn outbound consumer in background
     let cm = Arc::new(manager);
@@ -344,10 +349,16 @@ async fn test_stop_all_multiple_channels() {
 
     let mut registry = ChannelRegistry::new();
     registry.register("telegram", move || {
-        Box::new(MockChannel::new(Platform::Telegram, telegram_sent_clone.clone()))
+        Box::new(MockChannel::new(
+            Platform::Telegram,
+            telegram_sent_clone.clone(),
+        ))
     });
     registry.register("discord", move || {
-        Box::new(MockChannel::new(Platform::Discord, discord_sent_clone.clone()))
+        Box::new(MockChannel::new(
+            Platform::Discord,
+            discord_sent_clone.clone(),
+        ))
     });
 
     let manager = ChannelManager::new(registry, bus);
@@ -377,7 +388,10 @@ async fn test_full_roundtrip_inbound_to_outbound() {
 
     let mut registry = ChannelRegistry::new();
     registry.register("telegram", move || {
-        Box::new(MockChannel::new(Platform::Telegram, telegram_sent_clone.clone()))
+        Box::new(MockChannel::new(
+            Platform::Telegram,
+            telegram_sent_clone.clone(),
+        ))
     });
 
     let manager = ChannelManager::new(registry, bus.clone());
@@ -450,7 +464,10 @@ async fn test_full_roundtrip_inbound_to_outbound() {
 /// echo replies as outbound messages. Returns a shutdown handle.
 fn spawn_mock_agent(
     bus: MessageBus,
-) -> (tokio::task::JoinHandle<()>, tokio::sync::watch::Sender<bool>) {
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::watch::Sender<bool>,
+) {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     let handle = tokio::spawn(async move {
@@ -504,7 +521,10 @@ async fn test_gateway_mock_agent_single_message() {
 
     let mut registry = ChannelRegistry::new();
     registry.register("telegram", move || {
-        Box::new(MockChannel::new(Platform::Telegram, telegram_sent_clone.clone()))
+        Box::new(MockChannel::new(
+            Platform::Telegram,
+            telegram_sent_clone.clone(),
+        ))
     });
 
     let manager = ChannelManager::new(registry, bus.clone());
@@ -542,7 +562,12 @@ async fn test_gateway_mock_agent_single_message() {
 
     // Verify the reply reached the mock channel
     let recorded = telegram_sent.lock().unwrap().clone();
-    assert_eq!(recorded.len(), 1, "Expected exactly 1 message, got {:?}", recorded);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "Expected exactly 1 message, got {:?}",
+        recorded
+    );
     assert_eq!(recorded[0].0, "chat_100");
     assert_eq!(recorded[0].1, "Echo: Hello gateway!");
     assert_eq!(recorded[0].2, Some("msg_in_1".to_string()));
@@ -625,13 +650,23 @@ async fn test_gateway_mock_agent_multi_platform() {
 
     // Verify Telegram received its reply
     let tg_recorded = telegram_sent.lock().unwrap().clone();
-    assert_eq!(tg_recorded.len(), 1, "Telegram should have 1 message, got {:?}", tg_recorded);
+    assert_eq!(
+        tg_recorded.len(),
+        1,
+        "Telegram should have 1 message, got {:?}",
+        tg_recorded
+    );
     assert_eq!(tg_recorded[0].0, "tg_chat_1");
     assert_eq!(tg_recorded[0].1, "Echo: From Telegram");
 
     // Verify Discord received its reply
     let dc_recorded = discord_sent.lock().unwrap().clone();
-    assert_eq!(dc_recorded.len(), 1, "Discord should have 1 message, got {:?}", dc_recorded);
+    assert_eq!(
+        dc_recorded.len(),
+        1,
+        "Discord should have 1 message, got {:?}",
+        dc_recorded
+    );
     assert_eq!(dc_recorded[0].0, "dc_channel_1");
     assert_eq!(dc_recorded[0].1, "Echo: From Discord");
 
@@ -652,7 +687,10 @@ async fn test_gateway_mock_agent_burst_messages() {
 
     let mut registry = ChannelRegistry::new();
     registry.register("telegram", move || {
-        Box::new(MockChannel::new(Platform::Telegram, telegram_sent_clone.clone()))
+        Box::new(MockChannel::new(
+            Platform::Telegram,
+            telegram_sent_clone.clone(),
+        ))
     });
 
     let manager = ChannelManager::new(registry, bus.clone());
@@ -692,13 +730,26 @@ async fn test_gateway_mock_agent_burst_messages() {
 
     // All 10 echoes should have been routed back
     let recorded = telegram_sent.lock().unwrap().clone();
-    assert_eq!(recorded.len(), 10, "Expected 10 messages, got {}", recorded.len());
+    assert_eq!(
+        recorded.len(),
+        10,
+        "Expected 10 messages, got {}",
+        recorded.len()
+    );
 
     // Verify ordering and content
     for (i, call) in recorded.iter().enumerate() {
         assert_eq!(call.0, "chat_burst", "Message {i} has wrong chat_id");
-        assert_eq!(call.1, format!("Echo: Message {i}"), "Message {i} has wrong content");
-        assert_eq!(call.2, Some(format!("msg_burst_{i}")), "Message {i} has wrong reply_to");
+        assert_eq!(
+            call.1,
+            format!("Echo: Message {i}"),
+            "Message {i} has wrong content"
+        );
+        assert_eq!(
+            call.2,
+            Some(format!("msg_burst_{i}")),
+            "Message {i} has wrong reply_to"
+        );
     }
 
     // Cleanup
@@ -767,7 +818,11 @@ async fn test_gateway_mock_agent_cross_platform_isolation() {
 
     // Discord should have zero
     let dc_recorded = discord_sent.lock().unwrap().clone();
-    assert!(dc_recorded.is_empty(), "Discord should have 0 messages, got {:?}", dc_recorded);
+    assert!(
+        dc_recorded.is_empty(),
+        "Discord should have 0 messages, got {:?}",
+        dc_recorded
+    );
 
     // Cleanup
     let _ = agent_shutdown.send(true);
@@ -786,7 +841,10 @@ async fn test_gateway_graceful_shutdown() {
 
     let mut registry = ChannelRegistry::new();
     registry.register("telegram", move || {
-        Box::new(MockChannel::new(Platform::Telegram, telegram_sent_clone.clone()))
+        Box::new(MockChannel::new(
+            Platform::Telegram,
+            telegram_sent_clone.clone(),
+        ))
     });
 
     let manager = ChannelManager::new(registry, bus.clone());

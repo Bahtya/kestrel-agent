@@ -112,7 +112,9 @@ impl SessionManager {
         self.store.lock().save(&session)?;
 
         // Also persist notes to dedicated note store
-        self.note_store.lock().save_notes(&session.key, &session.notes)?;
+        self.note_store
+            .lock()
+            .save_notes(&session.key, &session.notes)?;
 
         // Update cache
         self.sessions.insert(session.key.clone(), session);
@@ -198,11 +200,8 @@ impl SessionManager {
 
         // Also check persisted sessions not currently in memory
         if let Ok(disk_results) = self.note_store.lock().search_notes(query) {
-            let in_memory_keys: std::collections::HashSet<String> = self
-                .sessions
-                .iter()
-                .map(|e| e.key().clone())
-                .collect();
+            let in_memory_keys: std::collections::HashSet<String> =
+                self.sessions.iter().map(|e| e.key().clone()).collect();
 
             for (key, note) in disk_results {
                 if !in_memory_keys.contains(&key) {
@@ -225,11 +224,8 @@ impl SessionManager {
         }
 
         if let Ok(disk_results) = self.note_store.lock().search_notes_by_tag(tag) {
-            let in_memory_keys: std::collections::HashSet<String> = self
-                .sessions
-                .iter()
-                .map(|e| e.key().clone())
-                .collect();
+            let in_memory_keys: std::collections::HashSet<String> =
+                self.sessions.iter().map(|e| e.key().clone()).collect();
 
             for (key, note) in disk_results {
                 if !in_memory_keys.contains(&key) {

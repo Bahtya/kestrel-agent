@@ -93,7 +93,10 @@ impl SkillsLoader {
     /// Recursively walks `skills_dir` and loads every `.md` file.
     pub fn load_all(&mut self) -> Result<Vec<Skill>> {
         if !self.skills_dir.exists() {
-            debug!("Skills directory does not exist: {}", self.skills_dir.display());
+            debug!(
+                "Skills directory does not exist: {}",
+                self.skills_dir.display()
+            );
             return Ok(Vec::new());
         }
 
@@ -148,14 +151,15 @@ impl SkillsLoader {
             let md_files = collect_md_files(&self.skills_dir)?;
             for path in md_files {
                 // Try to load and see if it's already known by source_path.
-                let already_known = self
-                    .skills
-                    .values()
-                    .any(|s| s.source_path == path);
+                let already_known = self.skills.values().any(|s| s.source_path == path);
 
                 if !already_known {
                     if let Ok(skill) = Self::load_skill_file(&path) {
-                        info!("Discovered new skill '{}' at {}", skill.name, path.display());
+                        info!(
+                            "Discovered new skill '{}' at {}",
+                            skill.name,
+                            path.display()
+                        );
                         reloaded.push(skill.name.clone());
                         self.skills.insert(skill.name.clone(), skill);
                     }
@@ -232,7 +236,9 @@ impl SkillsLoader {
     /// Each skill becomes a function the LLM can call. The function's
     /// description is the skill's description, and its parameters come
     /// from the skill's `parameters` field.
-    pub fn skills_to_function_definitions(skills: &[Skill]) -> Vec<nanobot_core::FunctionDefinition> {
+    pub fn skills_to_function_definitions(
+        skills: &[Skill],
+    ) -> Vec<nanobot_core::FunctionDefinition> {
         skills
             .iter()
             .map(|skill| {
@@ -284,8 +290,8 @@ fn collect_md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read dir: {}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("Failed to read dir: {}", dir.display()))?;
 
     for entry in entries {
         let entry = entry.context("Failed to read dir entry")?;
@@ -303,9 +309,7 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 
 /// Get the modification time of a file (if available).
 fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 /// Parse the `parameters` field from frontmatter.
@@ -336,10 +340,7 @@ fn parse_parameters(frontmatter: &serde_yaml::Value) -> Vec<SkillParameter> {
                     .and_then(|d| d.as_str())
                     .unwrap_or("")
                     .to_string();
-                let required = v
-                    .get("required")
-                    .and_then(|r| r.as_bool())
-                    .unwrap_or(false);
+                let required = v.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
                 Some(SkillParameter {
                     name,
                     description,
@@ -442,7 +443,10 @@ mod tests {
         let input = "---\nname: deploy\ndescription: Deploy the app\nparameters:\n  - name: env\n    description: Target environment\n    required: true\ntags:\n  - deploy\n  - cicd\n---\nDeploy to {env}.";
         let (fm, body) = parse_frontmatter(input).unwrap();
         assert_eq!(fm.get("name").unwrap().as_str(), Some("deploy"));
-        assert_eq!(fm.get("description").unwrap().as_str(), Some("Deploy the app"));
+        assert_eq!(
+            fm.get("description").unwrap().as_str(),
+            Some("Deploy the app")
+        );
         let params = fm.get("parameters").unwrap().as_sequence().unwrap();
         assert_eq!(params.len(), 1);
         assert_eq!(body.trim(), "Deploy to {env}.");
@@ -647,7 +651,11 @@ parameters:
     #[test]
     fn test_load_all_name_from_file_stem_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        write_skill(tmp.path(), "my_awesome_skill.md", "---\n---\nNo name in frontmatter.");
+        write_skill(
+            tmp.path(),
+            "my_awesome_skill.md",
+            "---\n---\nNo name in frontmatter.",
+        );
 
         let mut loader = SkillsLoader::new(tmp.path().to_path_buf());
         let skills = loader.load_all().unwrap();
@@ -658,7 +666,11 @@ parameters:
     #[test]
     fn test_load_all_no_frontmatter() {
         let tmp = tempfile::tempdir().unwrap();
-        write_skill(tmp.path(), "plain.md", "Just plain markdown, no frontmatter at all.");
+        write_skill(
+            tmp.path(),
+            "plain.md",
+            "Just plain markdown, no frontmatter at all.",
+        );
 
         let mut loader = SkillsLoader::new(tmp.path().to_path_buf());
         let skills = loader.load_all().unwrap();
@@ -739,7 +751,10 @@ parameters:
 
         let mut loader = SkillsLoader::new(tmp.path().to_path_buf());
         loader.load_all().unwrap();
-        assert_eq!(loader.skills().get("test").unwrap().instructions, "Original content.");
+        assert_eq!(
+            loader.skills().get("test").unwrap().instructions,
+            "Original content."
+        );
 
         // Modify the file (bump mtime).
         // On some systems, writes within the same second may have the same mtime,
@@ -754,7 +769,10 @@ parameters:
 
         let reloaded = loader.reload_changed().unwrap();
         assert_eq!(reloaded, vec!["test"]);
-        assert_eq!(loader.skills().get("test").unwrap().instructions, "Updated content.");
+        assert_eq!(
+            loader.skills().get("test").unwrap().instructions,
+            "Updated content."
+        );
     }
 
     #[test]
@@ -821,13 +839,11 @@ parameters:
             name: "deploy".to_string(),
             description: "Deploy the application".to_string(),
             instructions: String::new(),
-            parameters: vec![
-                SkillParameter {
-                    name: "env".to_string(),
-                    description: "Target environment".to_string(),
-                    required: true,
-                },
-            ],
+            parameters: vec![SkillParameter {
+                name: "env".to_string(),
+                description: "Target environment".to_string(),
+                required: true,
+            }],
             requires_bin: vec![],
             requires_env: vec![],
             tags: vec![],
@@ -838,7 +854,10 @@ parameters:
         let defs = SkillsLoader::skills_to_function_definitions(&skills);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "skill_deploy");
-        assert_eq!(defs[0].description.as_deref(), Some("Deploy the application"));
+        assert_eq!(
+            defs[0].description.as_deref(),
+            Some("Deploy the application")
+        );
 
         let params = defs[0].parameters.as_ref().unwrap();
         assert_eq!(params["required"].as_array().unwrap().len(), 1);

@@ -109,8 +109,7 @@ mod intents {
     /// MESSAGE_CONTENT = 1 << 15
     pub const MESSAGE_CONTENT: i64 = 1 << 15;
     /// Combined intents for a text-based bot.
-    pub const TEXT_BOT: i64 =
-        GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT;
+    pub const TEXT_BOT: i64 = GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT;
 }
 
 /// A generic Gateway payload.
@@ -317,8 +316,7 @@ impl DiscordChannel {
         match &proxy_url {
             Some(url) => {
                 info!("Discord HTTP client using proxy: {}", url);
-                let proxy = reqwest::Proxy::all(url)
-                    .expect("Failed to create proxy from env var");
+                let proxy = reqwest::Proxy::all(url).expect("Failed to create proxy from env var");
                 reqwest::Client::builder()
                     .proxy(proxy)
                     .build()
@@ -455,10 +453,7 @@ impl DiscordChannel {
                 debug!("Discord read receipt sent");
             }
             Ok(r) => {
-                debug!(
-                    "Discord read receipt non-204 status: {}",
-                    r.status()
-                );
+                debug!("Discord read receipt non-204 status: {}", r.status());
             }
             Err(e) => {
                 debug!("Discord read receipt request failed: {e}");
@@ -692,7 +687,10 @@ impl DiscordChannel {
                 error!("Failed to send IDENTIFY: {}", e);
                 return SessionOutcome::ResumableDisconnect;
             }
-            info!("Discord Gateway IDENTIFY sent (intents: {})", intents::TEXT_BOT);
+            info!(
+                "Discord Gateway IDENTIFY sent (intents: {})",
+                intents::TEXT_BOT
+            );
             Self::emit_gateway_event(
                 event_tx,
                 AgentEvent::GatewayReidentify {
@@ -1016,10 +1014,7 @@ impl BaseChannel for DiscordChannel {
                 auth_header: format!("Bot {token}"),
             };
             tokio::spawn(async move {
-                Self::run_gateway(
-                    token, handler, running, event_tx, gateway_url, rest,
-                )
-                .await;
+                Self::run_gateway(token, handler, running, event_tx, gateway_url, rest).await;
             });
             info!("Discord Gateway listener spawned");
         }
@@ -1141,16 +1136,9 @@ impl BaseChannel for DiscordChannel {
         })
     }
 
-    async fn send_reaction(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-        emoji: &str,
-    ) -> Result<()> {
+    async fn send_reaction(&self, chat_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let encoded = percent_encode_emoji(emoji);
-        let path = format!(
-            "/channels/{chat_id}/messages/{message_id}/reactions/{encoded}/@me"
-        );
+        let path = format!("/channels/{chat_id}/messages/{message_id}/reactions/{encoded}/@me");
         let url = format!("{}{}", self.api_base(), path);
         let mut req = self.client.put(&url);
         if let Some(auth) = self.auth_header() {
@@ -1252,11 +1240,7 @@ impl DiscordChannel {
     ///
     /// Uses `DELETE /channels/{channel_id}/messages/{message_id}`.
     /// Only the bot's own messages can be deleted (unless has MANAGE_MESSAGES).
-    pub async fn delete_message(
-        &self,
-        channel_id: &str,
-        message_id: &str,
-    ) -> Result<SendResult> {
+    pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<SendResult> {
         debug!(
             "Deleting Discord message {} in channel {}",
             message_id, channel_id
@@ -1516,7 +1500,10 @@ mod tests {
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["content"], "");
-        assert_eq!(json["embed"]["image"]["url"], "https://example.com/new_img.png");
+        assert_eq!(
+            json["embed"]["image"]["url"],
+            "https://example.com/new_img.png"
+        );
         assert_eq!(json["embed"]["description"], "updated caption");
     }
 
@@ -1588,7 +1575,8 @@ mod tests {
 
     #[test]
     fn test_make_error_result_service_unavailable() {
-        let result = DiscordChannel::make_error_result(StatusCode::SERVICE_UNAVAILABLE, "overloaded");
+        let result =
+            DiscordChannel::make_error_result(StatusCode::SERVICE_UNAVAILABLE, "overloaded");
         assert!(!result.success);
         assert!(result.retryable);
     }
@@ -1710,11 +1698,13 @@ mod tests {
     #[test]
     fn test_backoff_sequence() {
         let mut backoff = 1u64;
-        let sequence: Vec<u64> = (0..10).map(|_| {
-            let current = backoff;
-            backoff = next_backoff(backoff);
-            current
-        }).collect();
+        let sequence: Vec<u64> = (0..10)
+            .map(|_| {
+                let current = backoff;
+                backoff = next_backoff(backoff);
+                current
+            })
+            .collect();
         assert_eq!(sequence, vec![1, 2, 4, 8, 16, 32, 60, 60, 60, 60]);
     }
 
@@ -1725,9 +1715,18 @@ mod tests {
     #[test]
     fn test_session_outcome_variants() {
         // Verify all variants exist and can be compared
-        assert_eq!(SessionOutcome::ResumableDisconnect, SessionOutcome::ResumableDisconnect);
-        assert_eq!(SessionOutcome::InvalidSessionResumable, SessionOutcome::InvalidSessionResumable);
-        assert_eq!(SessionOutcome::InvalidSessionNotResumable, SessionOutcome::InvalidSessionNotResumable);
+        assert_eq!(
+            SessionOutcome::ResumableDisconnect,
+            SessionOutcome::ResumableDisconnect
+        );
+        assert_eq!(
+            SessionOutcome::InvalidSessionResumable,
+            SessionOutcome::InvalidSessionResumable
+        );
+        assert_eq!(
+            SessionOutcome::InvalidSessionNotResumable,
+            SessionOutcome::InvalidSessionNotResumable
+        );
         assert_eq!(SessionOutcome::Shutdown, SessionOutcome::Shutdown);
         assert_eq!(SessionOutcome::Fatal, SessionOutcome::Fatal);
 
@@ -1817,7 +1816,11 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         match event {
-            AgentEvent::GatewayReconnecting { platform, attempt, resumable } => {
+            AgentEvent::GatewayReconnecting {
+                platform,
+                attempt,
+                resumable,
+            } => {
                 assert_eq!(platform, "discord");
                 assert_eq!(attempt, 1);
                 assert!(resumable);
@@ -1853,7 +1856,10 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         match event {
-            AgentEvent::GatewayResumed { platform, session_id } => {
+            AgentEvent::GatewayResumed {
+                platform,
+                session_id,
+            } => {
                 assert_eq!(platform, "discord");
                 assert_eq!(session_id, "sess_xyz");
             }
@@ -1942,7 +1948,11 @@ mod tests {
 
         // 3. Disconnect (ResumableDisconnect) — state preserved
         // 4. Reconnect with RESUME (using saved session_id + seq)
-        let resume = build_resume_payload("token", state.session_id.as_ref().unwrap(), state.last_seq.unwrap());
+        let resume = build_resume_payload(
+            "token",
+            state.session_id.as_ref().unwrap(),
+            state.last_seq.unwrap(),
+        );
         assert_eq!(resume["op"], opcodes::RESUME);
         assert_eq!(resume["d"]["session_id"], "sess_initial");
         assert_eq!(resume["d"]["seq"], 3);

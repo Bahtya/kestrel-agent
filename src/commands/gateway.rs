@@ -2,6 +2,8 @@
 //!
 //! Wires together: bus, channels, agent loop, session manager,
 //! provider registry, tool registry, heartbeat, and API server.
+//!
+//! Supports daemon mode when launched via `nanobot-rs daemon start`.
 
 use std::sync::Arc;
 
@@ -19,6 +21,8 @@ use nanobot_tools::builtins;
 use tracing::info;
 
 /// Run the gateway — starts all components and connects them via the bus.
+///
+/// PID file management is handled by the `daemon start` command, not here.
 pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
     info!("Starting nanobot gateway...");
 
@@ -111,21 +115,21 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
     );
 
     // ── Spawn background tasks ────────────────────────────────
-    let agent_handle = tokio::spawn(async move {
+    let _agent_handle = tokio::spawn(async move {
         if let Err(e) = agent_loop.run().await {
             tracing::error!("Agent loop error: {}", e);
         }
     });
 
     let outbound_cm = channel_manager.clone();
-    let outbound_handle = tokio::spawn(async move {
+    let _outbound_handle = tokio::spawn(async move {
         outbound_cm.run_outbound_consumer().await;
     });
 
     // ── Typing indicator lifecycle ──────────────────────────────
     let typing_cm = channel_manager.clone();
     let mut typing_event_rx = bus.subscribe_events();
-    let typing_handle = tokio::spawn(async move {
+    let _typing_handle = tokio::spawn(async move {
         loop {
             match typing_event_rx.recv().await {
                 Ok(AgentEvent::Started { session_key }) => {
@@ -145,7 +149,7 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
     });
 
     let heartbeat_enabled = config.heartbeat.enabled;
-    let heartbeat_handle = tokio::spawn(async move {
+    let _heartbeat_handle = tokio::spawn(async move {
         if heartbeat_enabled {
             if let Err(e) = heartbeat.run().await {
                 tracing::error!("Heartbeat error: {}", e);
@@ -156,7 +160,7 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
         }
     });
 
-    let api_handle = tokio::spawn(async move {
+    let _api_handle = tokio::spawn(async move {
         if let Err(e) = api_server.run().await {
             tracing::error!("API server error: {}", e);
         }
@@ -166,24 +170,49 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
     info!("Press Ctrl+C to stop");
 
     // ── Wait for shutdown signal ──────────────────────────────
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received shutdown signal");
+    #[cfg(target_family = "unix")]
+    {
+        loop {
+            let sig = nanobot_daemon::signal::wait_for_signal().await;
+            match sig {
+                nanobot_daemon::signal::ShutdownSignal::Graceful => {
+                    info!("Received graceful shutdown signal (SIGTERM)");
+                    break;
+                }
+                nanobot_daemon::signal::ShutdownSignal::Fast => {
+                    info!("Received fast shutdown signal (SIGINT)");
+                    break;
+                }
+                nanobot_daemon::signal::ShutdownSignal::Reload => {
+                    info!("Received SIGHUP (log rotation placeholder — not yet implemented)");
+                    // Keep running; future sprint will add config reload
+                    continue;
+                }
+            }
         }
-        _ = agent_handle => {
-            info!("Agent loop exited");
-        }
-        _ = outbound_handle => {
-            info!("Outbound consumer exited");
-        }
-        _ = heartbeat_handle => {
-            info!("Heartbeat exited");
-        }
-        _ = api_handle => {
-            info!("API server exited");
-        }
-        _ = typing_handle => {
-            info!("Typing handler exited");
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal");
+            }
+            _ = _agent_handle => {
+                info!("Agent loop exited");
+            }
+            _ = _outbound_handle => {
+                info!("Outbound consumer exited");
+            }
+            _ = _heartbeat_handle => {
+                info!("Heartbeat exited");
+            }
+            _ = _api_handle => {
+                info!("API server exited");
+            }
+            _ = _typing_handle => {
+                info!("Typing handler exited");
+            }
         }
     }
 

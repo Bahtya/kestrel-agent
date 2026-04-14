@@ -44,8 +44,8 @@ impl HeartbeatService {
     /// Create a new heartbeat service with default state directory.
     pub fn new(config: nanobot_config::Config) -> Self {
         let interval_secs = config.heartbeat.interval_secs.max(DEFAULT_INTERVAL_SECS);
-        let data_dir = nanobot_config::paths::get_data_dir()
-            .unwrap_or_else(|_| std::env::temp_dir());
+        let data_dir =
+            nanobot_config::paths::get_data_dir().unwrap_or_else(|_| std::env::temp_dir());
         let state_path = data_dir.join("heartbeat_state.json");
         let state = load_state(&state_path).unwrap_or_default();
 
@@ -145,10 +145,7 @@ impl HeartbeatService {
             match self.run_checks().await {
                 Ok(snapshot) => {
                     if snapshot.healthy && !snapshot.degraded {
-                        debug!(
-                            "Heartbeat: all {} checks healthy",
-                            snapshot.checks.len()
-                        );
+                        debug!("Heartbeat: all {} checks healthy", snapshot.checks.len());
                     } else if snapshot.healthy && snapshot.degraded {
                         warn!(
                             "Heartbeat: {} degraded: {}",
@@ -210,10 +207,7 @@ impl HeartbeatService {
         // Emit state change notification if status transitioned
         if let Some(ref prev) = previous_status {
             if prev != &current_status {
-                info!(
-                    "Health status changed: {} → {}",
-                    prev, current_status
-                );
+                info!("Health status changed: {} → {}", prev, current_status);
                 if let Some(bus) = &self.bus {
                     bus.emit_event(AgentEvent::HealthStatusChanged {
                         from: prev.clone(),
@@ -322,7 +316,11 @@ impl HeartbeatService {
                                 f.last_restart_at = Some(Local::now());
                                 f.backoff_secs = (f.backoff_secs * 2).min(MAX_BACKOFF_SECS);
                                 new_restart_count += 1;
-                                restarts.push((f.component.clone(), check.message.clone(), backoff));
+                                restarts.push((
+                                    f.component.clone(),
+                                    check.message.clone(),
+                                    backoff,
+                                ));
                             }
                         } else {
                             // New component failure entry
@@ -337,11 +335,19 @@ impl HeartbeatService {
                                     INITIAL_BACKOFF_SECS
                                 },
                                 last_failure_at: Some(Local::now()),
-                                last_restart_at: if should_restart { Some(Local::now()) } else { None },
+                                last_restart_at: if should_restart {
+                                    Some(Local::now())
+                                } else {
+                                    None
+                                },
                             };
                             if should_restart {
                                 new_restart_count += 1;
-                                restarts.push((check.component.clone(), check.message.clone(), INITIAL_BACKOFF_SECS));
+                                restarts.push((
+                                    check.component.clone(),
+                                    check.message.clone(),
+                                    INITIAL_BACKOFF_SECS,
+                                ));
                             }
                             state.component_failures.push(state_entry);
                         }
@@ -764,8 +770,7 @@ mod tests {
     #[tokio::test]
     async fn test_restart_triggered_after_threshold() {
         let dir = tempfile::tempdir().unwrap();
-        let svc = make_service(dir.path())
-            .with_failures_before_restart(3);
+        let svc = make_service(dir.path()).with_failures_before_restart(3);
 
         svc.register_check(Arc::new(ToggleCheck::new("comp", false)));
 
@@ -785,8 +790,7 @@ mod tests {
     #[tokio::test]
     async fn test_restart_not_triggered_below_threshold() {
         let dir = tempfile::tempdir().unwrap();
-        let svc = make_service(dir.path())
-            .with_failures_before_restart(5);
+        let svc = make_service(dir.path()).with_failures_before_restart(5);
 
         svc.register_check(Arc::new(ToggleCheck::new("comp", false)));
 
@@ -802,8 +806,7 @@ mod tests {
     #[tokio::test]
     async fn test_exponential_backoff() {
         let dir = tempfile::tempdir().unwrap();
-        let svc = make_service(dir.path())
-            .with_failures_before_restart(2);
+        let svc = make_service(dir.path()).with_failures_before_restart(2);
 
         let check = Arc::new(ToggleCheck::new("comp", false));
         svc.register_check(check.clone());
@@ -829,8 +832,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_double_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let svc = make_service(dir.path())
-            .with_failures_before_restart(2);
+        let svc = make_service(dir.path()).with_failures_before_restart(2);
 
         svc.register_check(Arc::new(MockCheck {
             name: "comp".to_string(),
@@ -871,7 +873,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(event, AgentEvent::HeartbeatCheck { healthy: true, .. }));
+        assert!(matches!(
+            event,
+            AgentEvent::HeartbeatCheck { healthy: true, .. }
+        ));
     }
 
     #[tokio::test]
@@ -879,8 +884,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bus = MessageBus::new();
         let mut events_rx = bus.subscribe_events();
-        let mut svc = make_service(dir.path())
-            .with_failures_before_restart(2);
+        let mut svc = make_service(dir.path()).with_failures_before_restart(2);
         svc.set_bus(bus);
 
         svc.register_check(Arc::new(MockCheck {
@@ -898,7 +902,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            if matches!(event, AgentEvent::RestartRequested { component, .. } if component == "comp") {
+            if matches!(event, AgentEvent::RestartRequested { component, .. } if component == "comp")
+            {
                 got_restart = true;
             }
         }
@@ -924,7 +929,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(event, AgentEvent::HeartbeatCheck { healthy: true, .. }));
+        assert!(matches!(
+            event,
+            AgentEvent::HeartbeatCheck { healthy: true, .. }
+        ));
         assert_eq!(svc.state().restarts_requested, 0);
     }
 
@@ -1171,7 +1179,10 @@ mod tests {
                 _ => break,
             }
         }
-        assert_eq!(change_count, 0, "Should not emit change when status unchanged");
+        assert_eq!(
+            change_count, 0,
+            "Should not emit change when status unchanged"
+        );
     }
 
     // === ComponentStatusChanged events ===
@@ -1201,14 +1212,23 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            if let AgentEvent::ComponentStatusChanged { component, from, to, .. } = &event {
+            if let AgentEvent::ComponentStatusChanged {
+                component,
+                from,
+                to,
+                ..
+            } = &event
+            {
                 if component == "comp" && from == "Healthy" && to == "Unhealthy" {
                     got_component_change = true;
                     break;
                 }
             }
         }
-        assert!(got_component_change, "Expected ComponentStatusChanged event");
+        assert!(
+            got_component_change,
+            "Expected ComponentStatusChanged event"
+        );
     }
 
     #[tokio::test]
@@ -1234,7 +1254,10 @@ mod tests {
                 _ => break,
             }
         }
-        assert_eq!(component_changes, 0, "Should not emit ComponentStatusChanged when stable");
+        assert_eq!(
+            component_changes, 0,
+            "Should not emit ComponentStatusChanged when stable"
+        );
     }
 
     #[tokio::test]
@@ -1261,14 +1284,23 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            if let AgentEvent::ComponentStatusChanged { component, from, to, .. } = &event {
+            if let AgentEvent::ComponentStatusChanged {
+                component,
+                from,
+                to,
+                ..
+            } = &event
+            {
                 if component == "comp" && from == "Unhealthy" && to == "Healthy" {
                     got_recovery = true;
                     break;
                 }
             }
         }
-        assert!(got_recovery, "Expected ComponentStatusChanged recovery event");
+        assert!(
+            got_recovery,
+            "Expected ComponentStatusChanged recovery event"
+        );
     }
 
     // === Full health report ===

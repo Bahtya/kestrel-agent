@@ -319,7 +319,10 @@ mod tests {
 
         let result = store.store(entry).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected dimension 8"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected dimension 8"));
     }
 
     #[tokio::test]

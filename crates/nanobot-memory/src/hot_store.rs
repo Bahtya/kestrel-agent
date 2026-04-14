@@ -197,8 +197,16 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         .zip(b.iter())
         .map(|(x, y)| (f64::from(*x)) * (f64::from(*y)))
         .sum();
-    let norm_a: f64 = a.iter().map(|x| (f64::from(*x)).powi(2)).sum::<f64>().sqrt();
-    let norm_b: f64 = b.iter().map(|x| (f64::from(*x)).powi(2)).sum::<f64>().sqrt();
+    let norm_a: f64 = a
+        .iter()
+        .map(|x| (f64::from(*x)).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let norm_b: f64 = b
+        .iter()
+        .map(|x| (f64::from(*x)).powi(2))
+        .sum::<f64>()
+        .sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
@@ -356,15 +364,11 @@ mod tests {
     async fn test_search_by_confidence() {
         let (store, _dir) = make_test_store().await;
         store
-            .store(
-                MemoryEntry::new("high conf", MemoryCategory::Fact).with_confidence(0.9),
-            )
+            .store(MemoryEntry::new("high conf", MemoryCategory::Fact).with_confidence(0.9))
             .await
             .unwrap();
         store
-            .store(
-                MemoryEntry::new("low conf", MemoryCategory::Fact).with_confidence(0.3),
-            )
+            .store(MemoryEntry::new("low conf", MemoryCategory::Fact).with_confidence(0.3))
             .await
             .unwrap();
 

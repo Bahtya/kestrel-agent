@@ -190,23 +190,19 @@ mod tests {
 
     #[test]
     fn test_entry_with_confidence_clamps() {
-        let entry = MemoryEntry::new("x", MemoryCategory::AgentNote)
-            .with_confidence(1.5);
+        let entry = MemoryEntry::new("x", MemoryCategory::AgentNote).with_confidence(1.5);
         assert!((entry.confidence - 1.0).abs() < f64::EPSILON);
 
-        let entry = MemoryEntry::new("x", MemoryCategory::AgentNote)
-            .with_confidence(-0.5);
+        let entry = MemoryEntry::new("x", MemoryCategory::AgentNote).with_confidence(-0.5);
         assert!(entry.confidence.abs() < f64::EPSILON);
 
-        let entry = MemoryEntry::new("x", MemoryCategory::AgentNote)
-            .with_confidence(0.7);
+        let entry = MemoryEntry::new("x", MemoryCategory::AgentNote).with_confidence(0.7);
         assert!((entry.confidence - 0.7).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_entry_with_embedding() {
-        let entry = MemoryEntry::new("x", MemoryCategory::Fact)
-            .with_embedding(vec![0.1, 0.2, 0.3]);
+        let entry = MemoryEntry::new("x", MemoryCategory::Fact).with_embedding(vec![0.1, 0.2, 0.3]);
         assert_eq!(entry.embedding.as_deref(), Some([0.1, 0.2, 0.3].as_slice()));
     }
 
@@ -275,7 +271,10 @@ mod tests {
         assert_eq!(query.text.as_deref(), Some("rust"));
         assert_eq!(query.category, Some(MemoryCategory::Fact));
         assert_eq!(query.min_confidence, Some(0.5));
-        assert_eq!(query.embedding.as_deref(), Some([0.1_f32, 0.2_f32].as_slice()));
+        assert_eq!(
+            query.embedding.as_deref(),
+            Some([0.1_f32, 0.2_f32].as_slice())
+        );
         assert_eq!(query.limit, 5);
     }
 

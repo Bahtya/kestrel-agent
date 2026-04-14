@@ -100,8 +100,14 @@ mod tests {
         let config = MemoryConfig::default();
         assert_eq!(config.max_entries, 1000);
         assert_eq!(config.embedding_dim, 1536);
-        assert!(config.hot_store_path.to_string_lossy().contains(".nanobot-rs"));
-        assert!(config.warm_store_path.to_string_lossy().contains(".nanobot-rs"));
+        assert!(config
+            .hot_store_path
+            .to_string_lossy()
+            .contains(".nanobot-rs"));
+        assert!(config
+            .warm_store_path
+            .to_string_lossy()
+            .contains(".nanobot-rs"));
     }
 
     #[test]

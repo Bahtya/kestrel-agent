@@ -6,6 +6,17 @@
 use anyhow::{bail, Result};
 use nanobot_config::Config;
 
+/// Handles returned by [`do_start`] that must live for the daemon's lifetime.
+///
+/// Dropping `DaemonHandles` flushes remaining log lines (via `log_guard`)
+/// then releases the PID file lock.
+pub struct DaemonHandles {
+    /// PID file holding the flock — released on drop.
+    pub pid_file: nanobot_daemon::pid_file::PidFile,
+    /// Non-blocking log writer guard — flushes remaining logs on drop.
+    pub log_guard: nanobot_daemon::logging::LogGuard,
+}
+
 /// Actions for the `daemon` subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonAction {
@@ -31,13 +42,13 @@ pub enum DaemonAction {
 ///
 /// # Returns
 ///
-/// For `DaemonAction::Start`, returns `Ok(Some(PidFile))` so the caller
-/// can pass it to the gateway runner for cleanup on shutdown.
+/// For `DaemonAction::Start`, returns `Ok(Some(DaemonHandles))` so the caller
+/// can hold them for the process lifetime and drop on shutdown (flushing logs).
 /// For other actions, returns `Ok(None)`.
 pub fn handle_daemon_command(
     action: DaemonAction,
     config: Config,
-) -> Result<Option<nanobot_daemon::pid_file::PidFile>> {
+) -> Result<Option<DaemonHandles>> {
     match action {
         DaemonAction::Start => do_start(&config).map(Some),
         DaemonAction::Stop => do_stop(&config).map(|()| None),
@@ -46,15 +57,16 @@ pub fn handle_daemon_command(
     }
 }
 
-/// Perform daemonization: double-fork, PID file, redirect stdio.
+/// Perform daemonization: double-fork, PID file, redirect stdio, file logging.
 ///
 /// This must be called before the tokio runtime starts. After daemonize
 /// returns, the caller is the grandchild process (the actual daemon).
 /// The PID file is created AFTER daemonize to ensure it contains the
 /// correct (grandchild) PID.
 ///
-/// Returns a `PidFile` whose lock persists for the daemon's lifetime.
-fn do_start(config: &Config) -> Result<nanobot_daemon::pid_file::PidFile> {
+/// Returns [`DaemonHandles`] whose `log_guard` and `pid_file` must be held
+/// for the daemon's lifetime and dropped on shutdown.
+fn do_start(config: &Config) -> Result<DaemonHandles> {
     let pid_file_path = &config.daemon.pid_file;
     let log_dir = &config.daemon.log_dir;
     let working_dir = &config.daemon.working_directory;
@@ -71,17 +83,24 @@ fn do_start(config: &Config) -> Result<nanobot_daemon::pid_file::PidFile> {
 
     // NOW create PID file — after daemonize, so the PID is the grandchild's.
     // flock prevents double-start: if another instance holds the lock, we fail.
+    // But first, clean up stale PID file from a previous crashed instance.
+    if let Ok(Some(old_pid)) = nanobot_daemon::pid_file::PidFile::read_pid(pid_file_path) {
+        if !nanobot_daemon::pid_file::is_process_running(old_pid) {
+            let _ = std::fs::remove_file(pid_file_path);
+            // No tracing subscriber yet — stderr is redirected to log file
+            eprintln!("Cleaned stale PID file from crashed instance (pid={old_pid})");
+        }
+    }
     let pid_file = nanobot_daemon::pid_file::PidFile::create(pid_file_path)?;
 
     // Setup file logging in the daemon process
-    let _guard = nanobot_daemon::logging::setup_file_logging(log_dir, "info")?;
+    let log_guard = nanobot_daemon::logging::setup_file_logging(log_dir, "info")?;
     tracing::info!("Daemon started (pid={})", std::process::id());
 
-    // Store the logging guard in a global so it lives for the process lifetime.
-    // Box::leak is intentional — the guard must outlive all log calls.
-    Box::leak(Box::new(_guard));
-
-    Ok(pid_file)
+    Ok(DaemonHandles {
+        pid_file,
+        log_guard,
+    })
 }
 
 /// Stop the running daemon by sending SIGTERM.
@@ -123,29 +142,20 @@ fn do_restart(config: &Config) -> Result<()> {
         let _ = do_stop(config);
     }
 
-    // Re-exec ourselves: `nanobot-rs -c <config> daemon start`
+    // Re-exec: rebuild args replacing "restart" with "start"
     let exe = std::env::current_exe()?;
-    // Look for -c argument in our own args
-    let args: Vec<String> = std::env::args().collect();
-    let mut cmd = std::process::Command::new(&exe);
-    let mut found_config = false;
-    for i in 1..args.len() {
-        if args[i] == "-c" || args[i] == "--config" {
-            if i + 1 < args.len() {
-                cmd.arg("-c").arg(&args[i + 1]);
-                found_config = true;
+    let args: Vec<String> = std::env::args()
+        .skip(1) // skip program name
+        .map(|a| {
+            if a == "restart" {
+                "start".to_string()
+            } else {
+                a
             }
-        } else if args[i - 1] != "-c" && args[i - 1] != "--config" {
-            // Skip the old subcommand args
-        }
-    }
-    if !found_config {
-        // Try default config path
-        cmd.arg("-c").arg("/root/.nanobot-rs/config.yaml");
-    }
-    cmd.arg("daemon").arg("start");
+        })
+        .collect();
 
-    let child = cmd.spawn()?;
+    let child = std::process::Command::new(&exe).args(&args).spawn()?;
     println!("Restarted daemon (new process pid={})", child.id());
     Ok(())
 }
@@ -157,7 +167,9 @@ fn do_status(config: &Config) -> Result<()> {
             if nanobot_daemon::pid_file::is_process_running(pid) {
                 println!("Daemon is running (pid={pid})");
             } else {
-                println!("Daemon is NOT running (stale PID file: pid={pid})");
+                // Auto-clean stale PID file
+                let _ = std::fs::remove_file(&config.daemon.pid_file);
+                println!("Daemon is NOT running (cleaned stale PID file: pid={pid})");
             }
         }
         None => {

@@ -203,11 +203,20 @@ fn main() -> Result<()> {
             match action {
                 commands::daemon::DaemonAction::Start => {
                     // Fork happens HERE — before any tokio runtime exists.
-                    let _pid_file = commands::daemon::handle_daemon_command(action, config.clone())?
-                        .expect("Start always returns Some(PidFile)");
+                    let handles = commands::daemon::handle_daemon_command(action, config.clone())?
+                        .expect("Start always returns Some(DaemonHandles)");
                     // Now start tokio runtime in the daemon process
                     let rt = tokio::runtime::Runtime::new()?;
-                    rt.block_on(commands::gateway::run(config, vec![]))?;
+                    let result = rt.block_on(commands::gateway::run(config, vec![]));
+
+                    // Drop log_guard first to flush remaining log lines,
+                    // then pid_file releases the flock and cleans up.
+                    drop(handles.log_guard);
+                    if let Err(e) = handles.pid_file.clean() {
+                        eprintln!("Failed to clean PID file: {e}");
+                    }
+
+                    result?;
                 }
                 _ => {
                     commands::daemon::handle_daemon_command(action, config)?;

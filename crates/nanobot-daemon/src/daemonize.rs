@@ -65,7 +65,9 @@ pub fn daemonize(working_dir: &str, log_file: Option<&str>) -> Result<()> {
     // Redirect stdio to /dev/null (or log file for stderr)
     redirect_stdio(log_file)?;
 
-    tracing::info!("Daemonized successfully (pid={})", std::process::id());
+    // No tracing subscriber is installed yet — stderr is redirected to the log file,
+    // so eprintln! is the correct way to emit this message.
+    eprintln!("Daemonized successfully (pid={})", std::process::id());
     Ok(())
 }
 

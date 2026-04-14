@@ -3,8 +3,7 @@
 //! Wires together: bus, channels, agent loop, session manager,
 //! provider registry, tool registry, heartbeat, and API server.
 //!
-//! Supports both foreground and daemon modes. When `config.daemon.enabled`
-//! is true, the process daemonizes before starting components.
+//! Supports daemon mode when launched via `nanobot-rs daemon start`.
 
 use std::sync::Arc;
 
@@ -23,20 +22,8 @@ use tracing::info;
 
 /// Run the gateway — starts all components and connects them via the bus.
 ///
-/// When `config.daemon.enabled` is true, the process will daemonize (double-fork)
-/// before starting. In daemon mode, signal handling uses SIGTERM/SIGINT/SIGHUP
-/// instead of just Ctrl+C.
+/// PID file management is handled by the `daemon start` command, not here.
 pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
-    // Daemonize if configured (PID file is created in the daemon command handler
-    // for explicit `daemon start`, or here for config-driven daemon mode)
-    #[cfg(target_family = "unix")]
-    let _pid_guard = if config.daemon.enabled {
-        let pid = nanobot_daemon::pid_file::PidFile::create(&config.daemon.pid_file)?;
-        Some(pid)
-    } else {
-        None
-    };
-
     info!("Starting nanobot gateway...");
 
     // ── Shared bus ────────────────────────────────────────────
@@ -234,14 +221,6 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
     // ── Graceful shutdown ─────────────────────────────────────
     info!("Stopping all channels...");
     channel_manager.stop_all().await;
-
-    // Clean up PID file on exit
-    #[cfg(target_family = "unix")]
-    if let Some(guard) = _pid_guard {
-        if let Err(e) = guard.clean() {
-            tracing::warn!("Failed to clean PID file: {}", e);
-        }
-    }
 
     info!("Gateway shutting down");
     Ok(())

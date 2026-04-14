@@ -87,7 +87,10 @@ pub struct CompactionResult {
 /// For the `Summarize` strategy, older messages are replaced with a single
 /// system message containing a structured summary. For `Truncate`, older
 /// messages are simply dropped.
-pub fn compact_session(session: &mut Session, config: &CompactionConfig) -> Result<CompactionResult> {
+pub fn compact_session(
+    session: &mut Session,
+    config: &CompactionConfig,
+) -> Result<CompactionResult> {
     let tokens_before = session.estimated_tokens();
     let messages_before = session.messages.len();
 
@@ -128,10 +131,7 @@ pub fn compact_session(session: &mut Session, config: &CompactionConfig) -> Resu
 }
 
 /// Summarize older messages into a compact system message.
-fn compact_summarize(
-    session: &mut Session,
-    config: &CompactionConfig,
-) -> Result<CompactionResult> {
+fn compact_summarize(session: &mut Session, config: &CompactionConfig) -> Result<CompactionResult> {
     let messages_before = session.messages.len();
     let tokens_before = session.estimated_tokens();
 
@@ -205,7 +205,11 @@ fn compact_summarize(
     let tokens_after = session.estimated_tokens();
     info!(
         "Compacted session '{}': {} → {} messages, ~{} → ~{} estimated tokens",
-        session.key, messages_before, session.messages.len(), tokens_before, tokens_after
+        session.key,
+        messages_before,
+        session.messages.len(),
+        tokens_before,
+        tokens_after
     );
 
     Ok(CompactionResult {
@@ -218,10 +222,7 @@ fn compact_summarize(
 }
 
 /// Truncate older messages, keeping only recent ones.
-fn compact_truncate(
-    session: &mut Session,
-    config: &CompactionConfig,
-) -> Result<CompactionResult> {
+fn compact_truncate(session: &mut Session, config: &CompactionConfig) -> Result<CompactionResult> {
     let messages_before = session.messages.len();
     let tokens_before = session.estimated_tokens();
 
@@ -313,8 +314,12 @@ mod tests {
         let mut session = Session::new("test:compact".to_string());
         session.add_system_message("You are a helpful assistant.".to_string());
         for i in 0..count {
-            session.add_user_message(format!("User message number {} with some content to add tokens", i));
-            session.add_assistant_message(format!("Assistant response number {} with some detail", i));
+            session.add_user_message(format!(
+                "User message number {} with some content to add tokens",
+                i
+            ));
+            session
+                .add_assistant_message(format!("Assistant response number {} with some detail", i));
         }
         session
     }
@@ -332,7 +337,10 @@ mod tests {
     fn test_compaction_config_threshold() {
         let config = CompactionConfig::default();
         let threshold = config.threshold_tokens();
-        assert_eq!(threshold, (DEFAULT_CONTEXT_WINDOW_TOKENS as f64 * COMPACTION_THRESHOLD_RATIO) as usize);
+        assert_eq!(
+            threshold,
+            (DEFAULT_CONTEXT_WINDOW_TOKENS as f64 * COMPACTION_THRESHOLD_RATIO) as usize
+        );
     }
 
     #[test]
@@ -488,7 +496,9 @@ mod tests {
         let mut session = Session::new("test:notes_count".to_string());
         session.add_system_message("System".to_string());
         session.add_user_message("What database should we use?".to_string());
-        session.add_assistant_message("We decided to use PostgreSQL for the backend. You should add tests.".to_string());
+        session.add_assistant_message(
+            "We decided to use PostgreSQL for the backend. You should add tests.".to_string(),
+        );
         session.add_user_message("How do we handle migrations?".to_string());
         session.add_assistant_message("Let's use sqlx for migrations.".to_string());
         // Add enough to trigger compaction
@@ -538,7 +548,9 @@ mod tests {
         assert!(
             notes_after_second <= notes_after_first + r2.notes_extracted,
             "notes should be deduped, not accumulated: first={}, second={}, extracted={}",
-            notes_after_first, notes_after_second, r2.notes_extracted,
+            notes_after_first,
+            notes_after_second,
+            r2.notes_extracted,
         );
     }
 

@@ -40,10 +40,7 @@ pub fn validate(config: &Config) -> Result<()> {
         std::process::exit(1);
     }
 
-    println!(
-        "\nConfiguration is valid with {} warning(s).",
-        num_warnings
-    );
+    println!("\nConfiguration is valid with {} warning(s).", num_warnings);
     Ok(())
 }
 

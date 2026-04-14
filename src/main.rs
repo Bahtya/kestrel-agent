@@ -111,6 +111,21 @@ enum ConfigSubcommand {
     },
 }
 
+#[derive(Subcommand)]
+enum DaemonSubcommand {
+    /// Start the daemon (daemonize then run gateway).
+    Start,
+
+    /// Stop the running daemon.
+    Stop,
+
+    /// Restart the daemon (stop + start).
+    Restart,
+
+    /// Check daemon status.
+    Status,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -162,6 +177,15 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             commands::status::run(&config)?;
+        }
+        Commands::Daemon { subcommand } => {
+            let action = match subcommand {
+                DaemonSubcommand::Start => commands::daemon::DaemonAction::Start,
+                DaemonSubcommand::Stop => commands::daemon::DaemonAction::Stop,
+                DaemonSubcommand::Restart => commands::daemon::DaemonAction::Restart,
+                DaemonSubcommand::Status => commands::daemon::DaemonAction::Status,
+            };
+            commands::daemon::handle_daemon_command(action, config)?;
         }
     }
 

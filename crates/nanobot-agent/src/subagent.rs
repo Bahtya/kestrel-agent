@@ -140,7 +140,10 @@ pub enum TaskStatus {
 impl TaskStatus {
     /// Returns `true` if the task has reached a terminal state.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskStatus::Completed(_) | TaskStatus::Failed(_) | TaskStatus::Cancelled)
+        matches!(
+            self,
+            TaskStatus::Completed(_) | TaskStatus::Failed(_) | TaskStatus::Cancelled
+        )
     }
 }
 
@@ -570,11 +573,7 @@ impl SubAgentManager {
     /// Returns the final [`TaskStatus`], or `None` if the task ID is unknown.
     /// If `timeout` elapses before the task finishes, returns the current
     /// (non-terminal) status.
-    pub async fn wait_for(
-        &self,
-        id: &str,
-        timeout: Duration,
-    ) -> Option<TaskStatus> {
+    pub async fn wait_for(&self, id: &str, timeout: Duration) -> Option<TaskStatus> {
         // Snapshot the notify handle without holding the lock across the await.
         let notify = {
             let tasks = self.tasks.read().await;
@@ -790,11 +789,7 @@ impl SubAgentManager {
             task_config.agent.max_tokens = max_tokens;
         }
 
-        AgentRunner::new(
-            Arc::new(task_config),
-            self.providers.clone(),
-            tools.clone(),
-        )
+        AgentRunner::new(Arc::new(task_config), self.providers.clone(), tools.clone())
     }
 
     // ─── Inter-agent messaging ────────────────────────────────
@@ -825,7 +820,8 @@ impl SubAgentManager {
         let mut count = 0;
         for task in tasks.iter_mut() {
             if !task.status.is_terminal() {
-                task.mailbox.push(SubAgentMessage::new(from, content.clone()));
+                task.mailbox
+                    .push(SubAgentMessage::new(from, content.clone()));
                 count += 1;
             }
         }
@@ -875,12 +871,7 @@ impl SubAgentManager {
 
 #[async_trait]
 impl SubAgentSpawner for SubAgentManager {
-    async fn spawn(
-        &self,
-        name: &str,
-        prompt: &str,
-        context: Option<String>,
-    ) -> Result<String> {
+    async fn spawn(&self, name: &str, prompt: &str, context: Option<String>) -> Result<String> {
         // The shared `tasks` map is an Arc<RwLock<..>>, so cloning the manager
         // shell is cheap and shares the same underlying task list with any
         // existing Arc<Self> the caller may already hold.
@@ -909,7 +900,9 @@ impl SubAgentSpawner for SubAgentManager {
             tasks: self.tasks.clone(),
             manager_config: self.manager_config.clone(),
         });
-        let handle = arc_self.spawn_single(name, prompt, context, timeout_secs).await?;
+        let handle = arc_self
+            .spawn_single(name, prompt, context, timeout_secs)
+            .await?;
         Ok(handle.id)
     }
 
@@ -1302,8 +1295,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_status_and_cancel() {
-        let mgr = Arc::new(make_manager_with_delayed("slow result", Duration::from_secs(5)));
-        let handle = mgr.spawn_single("slow-task", "take your time", None, None)
+        let mgr = Arc::new(make_manager_with_delayed(
+            "slow result",
+            Duration::from_secs(5),
+        ));
+        let handle = mgr
+            .spawn_single("slow-task", "take your time", None, None)
             .await
             .unwrap();
 
@@ -1326,7 +1323,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_completed() {
         let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("done")));
-        let handle = mgr.spawn_single("fast-task", "quick work", None, None)
+        let handle = mgr
+            .spawn_single("fast-task", "quick work", None, None)
             .await
             .unwrap();
 
@@ -1349,7 +1347,12 @@ mod tests {
     async fn test_handle_with_context() {
         let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("context ok")));
         let handle = mgr
-            .spawn_single("ctx-task", "use context", Some("extra info".to_string()), None)
+            .spawn_single(
+                "ctx-task",
+                "use context",
+                Some("extra info".to_string()),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1456,10 +1459,13 @@ mod tests {
         // Actually use a very short timeout via direct construction
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            mgr.spawn_parallel(tasks, &ParallelSpawnConfig {
-                per_task_timeout_secs: 1, // 1s timeout, task takes 2s
-                ..Default::default()
-            }),
+            mgr.spawn_parallel(
+                tasks,
+                &ParallelSpawnConfig {
+                    per_task_timeout_secs: 1, // 1s timeout, task takes 2s
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .unwrap()
@@ -1546,9 +1552,12 @@ mod tests {
         config.agent.model = "mock-model".to_string();
         config.agent.max_iterations = 5;
         let mut reg = ProviderRegistry::new();
-        reg.register("fail-second", FailOnSecond {
-            call_count: AtomicU32::new(0),
-        });
+        reg.register(
+            "fail-second",
+            FailOnSecond {
+                call_count: AtomicU32::new(0),
+            },
+        );
         reg.set_default("fail-second");
         let mgr = SubAgentManager::new(
             Arc::new(config),
@@ -1589,12 +1598,24 @@ mod tests {
         let summary = mgr.spawn_parallel(tasks, &spawn_config).await.unwrap();
 
         // One task should fail, others should succeed
-        assert_eq!(summary.failed, 1, "Expected 1 failure, got {}", summary.failed);
-        assert_eq!(summary.succeeded, 2, "Expected 2 successes, got {}", summary.succeeded);
+        assert_eq!(
+            summary.failed, 1,
+            "Expected 1 failure, got {}",
+            summary.failed
+        );
+        assert_eq!(
+            summary.succeeded, 2,
+            "Expected 2 successes, got {}",
+            summary.succeeded
+        );
 
         // The failed task should have error info
         let failed_result = summary.results.iter().find(|r| !r.success).unwrap();
-        assert!(failed_result.output.contains("error") || failed_result.output.contains("Error") || failed_result.output.contains("fail"));
+        assert!(
+            failed_result.output.contains("error")
+                || failed_result.output.contains("Error")
+                || failed_result.output.contains("fail")
+        );
     }
 
     #[tokio::test]
@@ -1615,12 +1636,15 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            mgr.spawn_parallel(tasks, &ParallelSpawnConfig {
-                max_concurrent: 3,
-                per_task_timeout_secs: 10,
-                total_timeout_secs: Some(1), // 1s total, each task takes 500ms
-                ..Default::default()
-            }),
+            mgr.spawn_parallel(
+                tasks,
+                &ParallelSpawnConfig {
+                    max_concurrent: 3,
+                    per_task_timeout_secs: 10,
+                    total_timeout_secs: Some(1), // 1s total, each task takes 500ms
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .unwrap()
@@ -1759,8 +1783,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_status_from_for_spawn_status() {
-        assert_eq!(SpawnStatus::from(&TaskStatus::Pending), SpawnStatus::Running);
-        assert_eq!(SpawnStatus::from(&TaskStatus::Running), SpawnStatus::Running);
+        assert_eq!(
+            SpawnStatus::from(&TaskStatus::Pending),
+            SpawnStatus::Running
+        );
+        assert_eq!(
+            SpawnStatus::from(&TaskStatus::Running),
+            SpawnStatus::Running
+        );
         assert_eq!(
             SpawnStatus::from(&TaskStatus::Completed("ok".into())),
             SpawnStatus::Completed("ok".into())
@@ -1867,7 +1897,10 @@ mod tests {
         config.agent.model = "mock-model".to_string();
         config.agent.max_iterations = 5;
         let mut reg = ProviderRegistry::new();
-        reg.register("mock", DelayedProvider::new("result", Duration::from_secs(10)));
+        reg.register(
+            "mock",
+            DelayedProvider::new("result", Duration::from_secs(10)),
+        );
         reg.set_default("mock");
 
         let mgr = Arc::new(SubAgentManager::with_manager_config(
@@ -1900,7 +1933,8 @@ mod tests {
         // Provider takes 5 seconds, timeout is 100ms
         let mgr = Arc::new(make_manager_with_delayed("slow", Duration::from_secs(5)));
 
-        let handle = mgr.spawn_single("timed-task", "work", None, Some(1))
+        let handle = mgr
+            .spawn_single("timed-task", "work", None, Some(1))
             .await
             .unwrap();
 
@@ -1935,7 +1969,9 @@ mod tests {
         let mgr = make_manager_with_mock(MockProvider::simple("ok"));
         let id = mgr.spawn("worker", "test").await;
 
-        let sent = mgr.send_message(&id, "parent", "hello from parent".into()).await;
+        let sent = mgr
+            .send_message(&id, "parent", "hello from parent".into())
+            .await;
         assert!(sent);
         assert_eq!(mgr.mailbox_len(&id).await, 1);
     }
@@ -1997,7 +2033,9 @@ mod tests {
         // Complete one so it won't receive
         mgr.complete(&id3, "done".into()).await;
 
-        let received = mgr.broadcast_message("coordinator", "all hands".into()).await;
+        let received = mgr
+            .broadcast_message("coordinator", "all hands".into())
+            .await;
         assert_eq!(received, 2); // id3 is terminal
 
         assert_eq!(mgr.mailbox_len(&id1).await, 1);
@@ -2057,7 +2095,10 @@ mod tests {
 
         // Task should be tracked
         let status = spawner.status(&id).await.unwrap();
-        assert!(matches!(status, SpawnStatus::Running | SpawnStatus::Completed(_)));
+        assert!(matches!(
+            status,
+            SpawnStatus::Running | SpawnStatus::Completed(_)
+        ));
     }
 
     #[tokio::test]

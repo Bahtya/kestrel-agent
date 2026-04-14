@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chdir, close, dup2, fork, setsid, ForkResult};
 use std::fs::File;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::AsRawFd;
 
 /// Daemonize the current process using the classic double-fork technique.
 ///

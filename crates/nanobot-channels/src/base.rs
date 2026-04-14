@@ -59,12 +59,7 @@ pub trait BaseChannel: Send + Sync {
     /// Send a reaction emoji to a message.
     ///
     /// Default no-op — platforms that don't support reactions can ignore this.
-    async fn send_reaction(
-        &self,
-        _chat_id: &str,
-        _message_id: &str,
-        _emoji: &str,
-    ) -> Result<()> {
+    async fn send_reaction(&self, _chat_id: &str, _message_id: &str, _emoji: &str) -> Result<()> {
         Ok(())
     }
 

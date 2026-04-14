@@ -205,8 +205,8 @@ impl NotesStore {
             session_key
         );
 
-        let json = serde_json::to_string_pretty(notes)
-            .with_context(|| "Failed to serialize notes")?;
+        let json =
+            serde_json::to_string_pretty(notes).with_context(|| "Failed to serialize notes")?;
 
         let tmp_path = path.with_extension("notes.tmp");
         std::fs::write(&tmp_path, &json)
@@ -549,8 +549,13 @@ impl NotesManager {
         }
 
         // Remove stale compaction notes from a prior compaction cycle
-        let stale_titles = ["_compacted", "_compact_summary", "_compact_actions",
-            "_compact_decisions", "_compact_questions"];
+        let stale_titles = [
+            "_compacted",
+            "_compact_summary",
+            "_compact_actions",
+            "_compact_decisions",
+            "_compact_questions",
+        ];
         for title in &stale_titles {
             session.delete_note(title);
         }
@@ -649,7 +654,10 @@ impl NotesManager {
 /// so they don't accumulate across multiple compactions.
 ///
 /// Returns the number of notes created.
-pub fn extract_compaction_notes(session: &mut Session, old_messages: &[nanobot_session::SessionEntry]) -> usize {
+pub fn extract_compaction_notes(
+    session: &mut Session,
+    old_messages: &[nanobot_session::SessionEntry],
+) -> usize {
     // Remove any stale compaction notes from prior compaction cycles.
     let compaction_titles = [
         "_compaction_summary",
@@ -673,10 +681,7 @@ pub fn extract_compaction_notes(session: &mut Session, old_messages: &[nanobot_s
         .collect();
 
     if !topics.is_empty() {
-        let summary = format!(
-            "Discussed: {}",
-            topics.join("; ")
-        );
+        let summary = format!("Discussed: {}", topics.join("; "));
         if let Err(e) = NotesManager::save_structured_note(
             session,
             "_compaction_summary".to_string(),
@@ -691,7 +696,14 @@ pub fn extract_compaction_notes(session: &mut Session, old_messages: &[nanobot_s
     }
 
     // 2) Action items — lines containing "need to", "should", "TODO", "must"
-    let action_patterns = ["need to", "should", "todo", "must", "follow up", "action item"];
+    let action_patterns = [
+        "need to",
+        "should",
+        "todo",
+        "must",
+        "follow up",
+        "action item",
+    ];
     let action_items: Vec<String> = old_messages
         .iter()
         .filter(|m| m.role == nanobot_core::MessageRole::Assistant)
@@ -720,10 +732,20 @@ pub fn extract_compaction_notes(session: &mut Session, old_messages: &[nanobot_s
     }
 
     // 3) Decisions — lines containing "decided", "chose", "will use", "agreed"
-    let decision_patterns = ["decided", "chose", "will use", "agreed", "going with", "let's use"];
+    let decision_patterns = [
+        "decided",
+        "chose",
+        "will use",
+        "agreed",
+        "going with",
+        "let's use",
+    ];
     let decisions: Vec<String> = old_messages
         .iter()
-        .filter(|m| m.role == nanobot_core::MessageRole::Assistant || m.role == nanobot_core::MessageRole::User)
+        .filter(|m| {
+            m.role == nanobot_core::MessageRole::Assistant
+                || m.role == nanobot_core::MessageRole::User
+        })
         .flat_map(|m| m.content.lines())
         .filter(|line| {
             let lower = line.to_lowercase();
@@ -833,9 +855,18 @@ mod tests {
     #[test]
     fn test_note_format_from_tag() {
         assert_eq!(NoteFormat::from_tag("summary"), Some(NoteFormat::Summary));
-        assert_eq!(NoteFormat::from_tag("action_items"), Some(NoteFormat::ActionItems));
-        assert_eq!(NoteFormat::from_tag("decisions"), Some(NoteFormat::Decisions));
-        assert_eq!(NoteFormat::from_tag("open_questions"), Some(NoteFormat::OpenQuestions));
+        assert_eq!(
+            NoteFormat::from_tag("action_items"),
+            Some(NoteFormat::ActionItems)
+        );
+        assert_eq!(
+            NoteFormat::from_tag("decisions"),
+            Some(NoteFormat::Decisions)
+        );
+        assert_eq!(
+            NoteFormat::from_tag("open_questions"),
+            Some(NoteFormat::OpenQuestions)
+        );
         assert_eq!(NoteFormat::from_tag("unknown"), None);
         assert_eq!(NoteFormat::from_tag(""), None);
     }
@@ -886,10 +917,20 @@ mod tests {
     #[test]
     fn test_save_multiple_notes() {
         let mut session = make_session();
-        NotesManager::save_note(&mut session, "note1".to_string(), "First note".to_string(), vec![])
-            .unwrap();
-        NotesManager::save_note(&mut session, "note2".to_string(), "Second note".to_string(), vec![])
-            .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "note1".to_string(),
+            "First note".to_string(),
+            vec![],
+        )
+        .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "note2".to_string(),
+            "Second note".to_string(),
+            vec![],
+        )
+        .unwrap();
 
         let notes = NotesManager::load_notes(&session);
         assert_eq!(notes.len(), 2);
@@ -898,10 +939,20 @@ mod tests {
     #[test]
     fn test_update_existing_note() {
         let mut session = make_session();
-        NotesManager::save_note(&mut session, "key1".to_string(), "Original".to_string(), vec![])
-            .unwrap();
-        NotesManager::save_note(&mut session, "key1".to_string(), "Updated".to_string(), vec![])
-            .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "key1".to_string(),
+            "Original".to_string(),
+            vec![],
+        )
+        .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "key1".to_string(),
+            "Updated".to_string(),
+            vec![],
+        )
+        .unwrap();
 
         let notes = NotesManager::load_notes(&session);
         assert_eq!(notes.len(), 1);
@@ -954,8 +1005,13 @@ mod tests {
             vec!["tech".to_string()],
         )
         .unwrap();
-        NotesManager::save_note(&mut session, "style".to_string(), "Concise".to_string(), vec![])
-            .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "style".to_string(),
+            "Concise".to_string(),
+            vec![],
+        )
+        .unwrap();
 
         let ctx = NotesManager::format_notes_context(&session).unwrap();
         assert!(ctx.contains("## Session Notes"));
@@ -970,12 +1026,27 @@ mod tests {
     #[test]
     fn test_notes_by_tag() {
         let mut session = make_session();
-        NotesManager::save_note(&mut session, "n1".to_string(), "First".to_string(), vec!["cat_a".to_string()])
-            .unwrap();
-        NotesManager::save_note(&mut session, "n2".to_string(), "Second".to_string(), vec!["cat_b".to_string()])
-            .unwrap();
-        NotesManager::save_note(&mut session, "n3".to_string(), "Third".to_string(), vec!["cat_a".to_string()])
-            .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "n1".to_string(),
+            "First".to_string(),
+            vec!["cat_a".to_string()],
+        )
+        .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "n2".to_string(),
+            "Second".to_string(),
+            vec!["cat_b".to_string()],
+        )
+        .unwrap();
+        NotesManager::save_note(
+            &mut session,
+            "n3".to_string(),
+            "Third".to_string(),
+            vec!["cat_a".to_string()],
+        )
+        .unwrap();
 
         let cat_a = NotesManager::notes_by_tag(&session, "cat_a");
         assert_eq!(cat_a.len(), 2);
@@ -1070,9 +1141,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(NotesManager::notes_by_format(&session, NoteFormat::Summary).len(), 1);
-        assert_eq!(NotesManager::notes_by_format(&session, NoteFormat::ActionItems).len(), 1);
-        assert_eq!(NotesManager::notes_by_format(&session, NoteFormat::Decisions).len(), 0);
+        assert_eq!(
+            NotesManager::notes_by_format(&session, NoteFormat::Summary).len(),
+            1
+        );
+        assert_eq!(
+            NotesManager::notes_by_format(&session, NoteFormat::ActionItems).len(),
+            1
+        );
+        assert_eq!(
+            NotesManager::notes_by_format(&session, NoteFormat::Decisions).len(),
+            0
+        );
     }
 
     #[test]
@@ -1285,13 +1365,12 @@ mod tests {
     #[test]
     fn test_extract_compaction_notes_action_items() {
         let mut session = make_session();
-        let messages = vec![
-            nanobot_session::SessionEntry {
-                role: nanobot_core::MessageRole::Assistant,
-                content: "You should add tests for the API layer. We need to handle errors.".to_string(),
-                ..Default::default()
-            },
-        ];
+        let messages = vec![nanobot_session::SessionEntry {
+            role: nanobot_core::MessageRole::Assistant,
+            content: "You should add tests for the API layer. We need to handle errors."
+                .to_string(),
+            ..Default::default()
+        }];
 
         let count = extract_compaction_notes(&mut session, &messages);
         assert!(count >= 1);
@@ -1304,13 +1383,11 @@ mod tests {
     #[test]
     fn test_extract_compaction_notes_decisions() {
         let mut session = make_session();
-        let messages = vec![
-            nanobot_session::SessionEntry {
-                role: nanobot_core::MessageRole::Assistant,
-                content: "We decided to use Rust for the backend.".to_string(),
-                ..Default::default()
-            },
-        ];
+        let messages = vec![nanobot_session::SessionEntry {
+            role: nanobot_core::MessageRole::Assistant,
+            content: "We decided to use Rust for the backend.".to_string(),
+            ..Default::default()
+        }];
 
         let count = extract_compaction_notes(&mut session, &messages);
         assert!(count >= 1);
@@ -1438,8 +1515,16 @@ mod tests {
         let store = NotesStore::new(tmp.path().to_path_buf()).unwrap();
 
         let notes = vec![
-            Note::new("Architecture".into(), "Use microservices".into(), vec!["design".into()]),
-            Note::new("Language".into(), "Rust".into(), vec!["tech".into(), "backend".into()]),
+            Note::new(
+                "Architecture".into(),
+                "Use microservices".into(),
+                vec!["design".into()],
+            ),
+            Note::new(
+                "Language".into(),
+                "Rust".into(),
+                vec!["tech".into(), "backend".into()],
+            ),
         ];
 
         store.save("session:abc", &notes).unwrap();
@@ -1546,11 +1631,38 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = NotesStore::new(tmp.path().to_path_buf()).unwrap();
 
-        store.save("session:a", &[Note::new("A".into(), "content A".into(), vec!["alpha".into()])]).unwrap();
-        store.save("session:b", &[Note::new("B".into(), "content B".into(), vec!["beta".into()])]).unwrap();
+        store
+            .save(
+                "session:a",
+                &[Note::new(
+                    "A".into(),
+                    "content A".into(),
+                    vec!["alpha".into()],
+                )],
+            )
+            .unwrap();
+        store
+            .save(
+                "session:b",
+                &[Note::new(
+                    "B".into(),
+                    "content B".into(),
+                    vec!["beta".into()],
+                )],
+            )
+            .unwrap();
 
         // Modify session A
-        store.save("session:a", &[Note::new("A-mod".into(), "new content".into(), vec!["alpha".into()])]).unwrap();
+        store
+            .save(
+                "session:a",
+                &[Note::new(
+                    "A-mod".into(),
+                    "new content".into(),
+                    vec!["alpha".into()],
+                )],
+            )
+            .unwrap();
 
         // Session B should be unaffected
         let b_notes = store.load("session:b");
@@ -1661,7 +1773,7 @@ mod tests {
         let config = NoteCompactionConfig::new(20, 10);
         let removed = NotesManager::compact_with_config(&mut session, &config);
         assert_eq!(removed, 20); // 30 - 10 kept
-        // Should have: 1 compacted summary + 10 recent = 11
+                                 // Should have: 1 compacted summary + 10 recent = 11
         assert_eq!(session.notes.len(), 11);
 
         // The compacted note should be first
@@ -1678,15 +1790,27 @@ mod tests {
         let mut session = make_session();
         // Add 10 summary notes
         for i in 0..10 {
-            session.save_note(format!("summary_{}", i), format!("summary {}", i), vec!["summary".into()]);
+            session.save_note(
+                format!("summary_{}", i),
+                format!("summary {}", i),
+                vec!["summary".into()],
+            );
         }
         // Add 5 action notes
         for i in 0..5 {
-            session.save_note(format!("action_{}", i), format!("action {}", i), vec!["action_items".into()]);
+            session.save_note(
+                format!("action_{}", i),
+                format!("action {}", i),
+                vec!["action_items".into()],
+            );
         }
         // Add 10 uncategorized
         for i in 0..10 {
-            session.save_note(format!("misc_{}", i), format!("misc {}", i), vec!["other".into()]);
+            session.save_note(
+                format!("misc_{}", i),
+                format!("misc {}", i),
+                vec!["other".into()],
+            );
         }
         // Total: 25 notes, threshold 15, keep 5 recent
 
@@ -1706,7 +1830,11 @@ mod tests {
     fn test_compact_with_config_removes_stale_compaction() {
         let mut session = make_session();
         // Add a stale _compacted note
-        session.save_note("_compacted".into(), "old compaction".into(), vec!["_system".into()]);
+        session.save_note(
+            "_compacted".into(),
+            "old compaction".into(),
+            vec!["_system".into()],
+        );
         // Add enough notes to trigger compaction
         for i in 0..20 {
             session.save_note(format!("n{}", i), format!("note {}", i), vec![]);
@@ -1719,7 +1847,11 @@ mod tests {
         assert_eq!(removed, 16);
 
         // Should only have 1 _compacted note (the new one)
-        let compacted_count = session.notes.iter().filter(|n| n.title == "_compacted").count();
+        let compacted_count = session
+            .notes
+            .iter()
+            .filter(|n| n.title == "_compacted")
+            .count();
         assert_eq!(compacted_count, 1);
         assert!(session.notes[0].content.contains("Compacted 16 notes"));
     }
@@ -1797,7 +1929,8 @@ mod tests {
                 format!("content {}", i),
                 format,
                 vec![],
-            ).unwrap();
+            )
+            .unwrap();
         }
         assert_eq!(session.notes.len(), 30);
 
@@ -1829,14 +1962,29 @@ mod tests {
 
         let mut session = make_session();
         NotesManager::save_structured_note(
-            &mut session, "s1".into(), "Summary 1".into(), NoteFormat::Summary, vec![],
-        ).unwrap();
+            &mut session,
+            "s1".into(),
+            "Summary 1".into(),
+            NoteFormat::Summary,
+            vec![],
+        )
+        .unwrap();
         NotesManager::save_structured_note(
-            &mut session, "a1".into(), "Action 1".into(), NoteFormat::ActionItems, vec!["urgent".into()],
-        ).unwrap();
+            &mut session,
+            "a1".into(),
+            "Action 1".into(),
+            NoteFormat::ActionItems,
+            vec!["urgent".into()],
+        )
+        .unwrap();
         NotesManager::save_structured_note(
-            &mut session, "d1".into(), "Decision 1".into(), NoteFormat::Decisions, vec![],
-        ).unwrap();
+            &mut session,
+            "d1".into(),
+            "Decision 1".into(),
+            NoteFormat::Decisions,
+            vec![],
+        )
+        .unwrap();
 
         NotesManager::persist_to_store(&store, &session).unwrap();
 
@@ -1869,7 +2017,11 @@ mod tests {
 
         // Instance 1 saves
         let store1 = NotesStore::new(tmp.path().to_path_buf()).unwrap();
-        let notes = vec![Note::new("persistent".into(), "survives restart".into(), vec!["tag".into()])];
+        let notes = vec![Note::new(
+            "persistent".into(),
+            "survives restart".into(),
+            vec!["tag".into()],
+        )];
         store1.save("session:test", &notes).unwrap();
         drop(store1);
 

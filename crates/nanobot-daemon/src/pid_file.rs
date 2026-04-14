@@ -6,8 +6,8 @@
 //! The `PidFile` struct holds the locked file handle. When dropped, the lock
 //! is released automatically. Call `clean()` to also unlink the file.
 
-use anyhow::{bail, Context, Result};
-use nix::fcntl::{flock, FlockArg};
+use anyhow::Context;
+use nix::fcntl::{Flock, FlockArg};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -25,7 +25,7 @@ pub struct PidFile {
     /// Path to the PID file on disk.
     path: String,
     /// The locked file handle. Kept open to hold the flock.
-    _file: File,
+    _lock: Flock<File>,
 }
 
 impl PidFile {
@@ -44,7 +44,7 @@ impl PidFile {
     /// - If the parent directory does not exist.
     /// - If another process holds the `flock` (double-start prevention).
     /// - If I/O operations fail.
-    pub fn create(path: &str) -> Result<Self> {
+    pub fn create(path: &str) -> anyhow::Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = Path::new(path).parent() {
             fs::create_dir_all(parent).context("create PID file parent directory")?;
@@ -58,21 +58,24 @@ impl PidFile {
             .open(path)
             .context("open PID file")?;
 
-        // Acquire exclusive, non-blocking lock
-        flock(&file, FlockArg::LockExclusiveNonblock).context(
-            "failed to lock PID file — another instance may be running",
-        )?;
+        // Acquire exclusive, non-blocking lock using the new Flock API
+        let lock =
+            Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_file, errno)| {
+                anyhow::anyhow!(
+                    "failed to lock PID file ({errno}) — another instance may be running"
+                )
+            })?;
 
         // Write current PID
         let pid = std::process::id();
-        write!(&file, "{pid}").context("write PID to file")?;
-        file.sync_all().context("sync PID file")?;
+        write!(&*lock, "{pid}").context("write PID to file")?;
+        lock.sync_all().context("sync PID file")?;
 
         tracing::info!("PID file created and locked: {path} (pid={pid})");
 
         Ok(Self {
             path: path.to_string(),
-            _file: file,
+            _lock: lock,
         })
     }
 
@@ -83,7 +86,7 @@ impl PidFile {
     /// # Arguments
     ///
     /// * `path` - Filesystem path for the PID file.
-    pub fn read_pid(path: &str) -> Result<Option<i32>> {
+    pub fn read_pid(path: &str) -> anyhow::Result<Option<i32>> {
         if !Path::new(path).exists() {
             return Ok(None);
         }
@@ -93,10 +96,7 @@ impl PidFile {
         file.read_to_string(&mut contents)
             .context("read PID file")?;
 
-        let pid: i32 = contents
-            .trim()
-            .parse()
-            .context("parse PID from file")?;
+        let pid: i32 = contents.trim().parse().context("parse PID from file")?;
 
         Ok(Some(pid))
     }
@@ -105,7 +105,7 @@ impl PidFile {
     ///
     /// Consumes `self`. This is the clean-shutdown path: unlink the file
     /// and drop the file handle (which releases the flock).
-    pub fn clean(self) -> Result<()> {
+    pub fn clean(self) -> anyhow::Result<()> {
         let path = self.path.clone();
         drop(self); // Release the flock first
 

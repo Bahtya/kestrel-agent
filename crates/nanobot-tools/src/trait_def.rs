@@ -194,9 +194,15 @@ mod tests {
             ) -> anyhow::Result<String> {
                 Ok(format!("{}:{}", name, prompt))
             }
-            async fn status(&self, _task_id: &str) -> Option<SpawnStatus> { None }
-            async fn cancel(&self, _task_id: &str) -> bool { false }
-            async fn list(&self) -> Vec<(String, String, SpawnStatus)> { vec![] }
+            async fn status(&self, _task_id: &str) -> Option<SpawnStatus> {
+                None
+            }
+            async fn cancel(&self, _task_id: &str) -> bool {
+                false
+            }
+            async fn list(&self) -> Vec<(String, String, SpawnStatus)> {
+                vec![]
+            }
         }
 
         let spawner = StubSpawner;

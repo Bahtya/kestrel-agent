@@ -153,11 +153,8 @@ impl WebSocketChannel {
 
         while running.load(Ordering::Relaxed) {
             // Accept with timeout so we can check the running flag.
-            let accept = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                listener.accept(),
-            )
-            .await;
+            let accept =
+                tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept()).await;
 
             let (stream, addr) = match accept {
                 Ok(Ok((s, a))) => (s, a),
@@ -817,8 +814,7 @@ mod tests {
         assert_eq!(channel.client_count(), 2);
 
         // Get both client IDs.
-        let client_ids: Vec<String> =
-            channel.clients.iter().map(|e| e.key().clone()).collect();
+        let client_ids: Vec<String> = channel.clients.iter().map(|e| e.key().clone()).collect();
         assert_eq!(client_ids.len(), 2);
 
         // Send to each client independently.

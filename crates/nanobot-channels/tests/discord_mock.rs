@@ -201,7 +201,8 @@ async fn test_discord_edit_message_not_found() {
 
 #[tokio::test]
 async fn test_discord_edit_message_forbidden() {
-    let mock_response = r#"{"message":"Cannot edit a message authored by another user.","code":50005}"#;
+    let mock_response =
+        r#"{"message":"Cannot edit a message authored by another user.","code":50005}"#;
     let (port, _handle) = start_mock_discord_server(mock_response, 403, MockMethod::Patch).await;
 
     let channel = DiscordChannel::with_token_and_url(
@@ -243,7 +244,10 @@ async fn test_discord_delete_message_not_found() {
         format!("http://127.0.0.1:{}/", port),
     );
 
-    let result = channel.delete_message("12345", "nonexistent").await.unwrap();
+    let result = channel
+        .delete_message("12345", "nonexistent")
+        .await
+        .unwrap();
     assert!(!result.success);
     assert!(result.error.is_some());
 }

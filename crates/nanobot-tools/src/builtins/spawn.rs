@@ -74,7 +74,10 @@ impl Tool for SpawnTool {
                 Err(e) => Err(ToolError::Execution(format!("Failed to spawn task: {}", e))),
             }
         } else {
-            Ok(format!("Spawned background task '{}' (no spawner wired): {}", name, task))
+            Ok(format!(
+                "Spawned background task '{}' (no spawner wired): {}",
+                name, task
+            ))
         }
     }
 }
@@ -215,9 +218,7 @@ mod tests {
         }
 
         let tool = SpawnTool::new().with_spawner(Arc::new(FailingSpawner));
-        let result = tool
-            .execute(serde_json::json!({ "task": "fail me" }))
-            .await;
+        let result = tool.execute(serde_json::json!({ "task": "fail me" })).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("no capacity"));
     }

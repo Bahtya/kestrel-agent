@@ -10,9 +10,7 @@ use nanobot_agent::AgentLoop;
 use nanobot_bus::events::{AgentEvent, InboundMessage};
 use nanobot_bus::MessageBus;
 use nanobot_config::Config;
-use nanobot_core::{
-    FunctionCall, MessageType, Platform, SessionSource, ToolCall, Usage,
-};
+use nanobot_core::{FunctionCall, MessageType, Platform, SessionSource, ToolCall, Usage};
 use nanobot_providers::base::{
     BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider, ToolCallDelta,
 };
@@ -46,12 +44,16 @@ impl LlmProvider for MockProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
-        let resp = self.responses.get(idx).cloned().unwrap_or(CompletionResponse {
-            content: Some("default mock response".to_string()),
-            tool_calls: None,
-            usage: None,
-            finish_reason: None,
-        });
+        let resp = self
+            .responses
+            .get(idx)
+            .cloned()
+            .unwrap_or(CompletionResponse {
+                content: Some("default mock response".to_string()),
+                tool_calls: None,
+                usage: None,
+                finish_reason: None,
+            });
         Ok(resp)
     }
 
@@ -156,13 +158,7 @@ async fn test_pipeline_simple_response() {
     }]);
     let tools = make_tools();
 
-    let agent_loop = AgentLoop::new(
-        config,
-        bus.clone(),
-        session_manager,
-        providers,
-        tools,
-    );
+    let agent_loop = AgentLoop::new(config, bus.clone(), session_manager, providers, tools);
 
     // Take the outbound receiver before starting
     let mut outbound_rx = bus.consume_outbound().await.unwrap();
@@ -233,13 +229,7 @@ async fn test_pipeline_with_tool_call() {
 
     let tools = make_tools();
 
-    let agent_loop = AgentLoop::new(
-        config,
-        bus.clone(),
-        session_manager,
-        providers,
-        tools,
-    );
+    let agent_loop = AgentLoop::new(config, bus.clone(), session_manager, providers, tools);
 
     let mut outbound_rx = bus.consume_outbound().await.unwrap();
 
@@ -256,7 +246,10 @@ async fn test_pipeline_with_tool_call() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(outbound.content, "Found several Rust files in the workspace.");
+    assert_eq!(
+        outbound.content,
+        "Found several Rust files in the workspace."
+    );
     assert_eq!(outbound.channel, Platform::Telegram);
 
     agent_handle.abort();
@@ -277,13 +270,7 @@ async fn test_pipeline_events_emitted() {
     }]);
     let tools = make_tools();
 
-    let agent_loop = AgentLoop::new(
-        config,
-        bus.clone(),
-        session_manager,
-        providers,
-        tools,
-    );
+    let agent_loop = AgentLoop::new(config, bus.clone(), session_manager, providers, tools);
 
     let mut events_rx = bus.subscribe_events();
     let mut outbound_rx = bus.consume_outbound().await.unwrap();
@@ -292,9 +279,7 @@ async fn test_pipeline_events_emitted() {
         agent_loop.run().await.unwrap();
     });
 
-    bus.publish_inbound(make_inbound("test"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound("test")).await.unwrap();
 
     // Wait for completion
     let _outbound = tokio::time::timeout(std::time::Duration::from_secs(5), outbound_rx.recv())
@@ -344,13 +329,7 @@ async fn test_pipeline_multiple_messages() {
     ]);
 
     let tools = make_tools();
-    let agent_loop = AgentLoop::new(
-        config,
-        bus.clone(),
-        session_manager,
-        providers,
-        tools,
-    );
+    let agent_loop = AgentLoop::new(config, bus.clone(), session_manager, providers, tools);
 
     let mut outbound_rx = bus.consume_outbound().await.unwrap();
 
@@ -359,9 +338,7 @@ async fn test_pipeline_multiple_messages() {
     });
 
     // First message
-    bus.publish_inbound(make_inbound("msg1"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound("msg1")).await.unwrap();
 
     let out1 = tokio::time::timeout(std::time::Duration::from_secs(5), outbound_rx.recv())
         .await
@@ -370,9 +347,7 @@ async fn test_pipeline_multiple_messages() {
     assert_eq!(out1.content, "First response");
 
     // Second message
-    bus.publish_inbound(make_inbound("msg2"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound("msg2")).await.unwrap();
 
     let out2 = tokio::time::timeout(std::time::Duration::from_secs(5), outbound_rx.recv())
         .await
@@ -389,14 +364,21 @@ async fn test_pipeline_provider_error_handled() {
     struct FailingProvider;
     #[async_trait]
     impl LlmProvider for FailingProvider {
-        fn name(&self) -> &str { "failing" }
-        async fn complete(&self, _request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> anyhow::Result<CompletionResponse> {
             anyhow::bail!("Provider unavailable")
         }
         async fn complete_stream(&self, _request: CompletionRequest) -> anyhow::Result<BoxStream> {
             anyhow::bail!("Provider unavailable")
         }
-        fn supports_model(&self, _model: &str) -> bool { true }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
     }
 
     let config = make_config();
@@ -409,13 +391,7 @@ async fn test_pipeline_provider_error_handled() {
     providers.set_default("failing");
 
     let tools = make_tools();
-    let agent_loop = AgentLoop::new(
-        config,
-        bus.clone(),
-        session_manager,
-        providers,
-        tools,
-    );
+    let agent_loop = AgentLoop::new(config, bus.clone(), session_manager, providers, tools);
 
     let mut events_rx = bus.subscribe_events();
 
@@ -423,9 +399,7 @@ async fn test_pipeline_provider_error_handled() {
         agent_loop.run().await.unwrap();
     });
 
-    bus.publish_inbound(make_inbound("test"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound("test")).await.unwrap();
 
     // Should get a Started event
     let started = tokio::time::timeout(std::time::Duration::from_secs(5), events_rx.recv())

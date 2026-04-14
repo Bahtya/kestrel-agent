@@ -22,7 +22,10 @@ pub fn list(_config: &Config) -> Result<()> {
     }
 
     println!("Cron Jobs ({}):\n", states.len());
-    println!("{:<38} {:<20} {:<10} {:<8} {:<20}", "ID", "Name", "State", "Runs", "Next Run");
+    println!(
+        "{:<38} {:<20} {:<10} {:<8} {:<20}",
+        "ID", "Name", "State", "Runs", "Next Run"
+    );
     println!("{}", "-".repeat(100));
 
     for (job, state) in &states {
@@ -65,9 +68,7 @@ pub fn status(_config: &Config, name: &str) -> Result<()> {
 
     // Find by name or ID prefix
     let found = states.iter().find(|(job, _)| {
-        job.name.as_deref() == Some(name)
-            || job.id == name
-            || job.id.starts_with(name)
+        job.name.as_deref() == Some(name) || job.id == name || job.id.starts_with(name)
     });
 
     match found {
@@ -89,7 +90,9 @@ pub fn status(_config: &Config, name: &str) -> Result<()> {
             println!("Schedule:");
             match job.schedule.kind {
                 nanobot_cron::ScheduleKind::At => {
-                    let ts = job.schedule.at_ms
+                    let ts = job
+                        .schedule
+                        .at_ms
                         .and_then(chrono::DateTime::from_timestamp_millis)
                         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
                         .unwrap_or_else(|| "invalid".to_string());
@@ -113,13 +116,15 @@ pub fn status(_config: &Config, name: &str) -> Result<()> {
             println!("  Run count:  {}", state.run_count);
             println!(
                 "  Last run:   {}",
-                state.last_run
+                state
+                    .last_run
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
                     .unwrap_or_else(|| "never".to_string())
             );
             println!(
                 "  Next run:   {}",
-                state.next_run
+                state
+                    .next_run
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
                     .unwrap_or_else(|| "n/a".to_string())
             );
@@ -150,7 +155,10 @@ pub fn status(_config: &Config, name: &str) -> Result<()> {
             if let Some(cid) = &job.payload.chat_id {
                 println!("  Chat ID: {}", cid);
             }
-            println!("  Deliver: {}", if job.payload.deliver { "yes" } else { "no" });
+            println!(
+                "  Deliver: {}",
+                if job.payload.deliver { "yes" } else { "no" }
+            );
         }
         None => {
             println!("Cron job '{}' not found.", name);

@@ -175,7 +175,10 @@ impl ContextBudget {
 
     /// Estimate total tokens for a slice of messages.
     pub fn estimate_messages_tokens(messages: &[SessionEntry]) -> usize {
-        messages.iter().map(|m| Self::estimate_tokens(&m.content)).sum()
+        messages
+            .iter()
+            .map(|m| Self::estimate_tokens(&m.content))
+            .sum()
     }
 
     /// Check whether the given messages fit within the history budget.
@@ -259,8 +262,7 @@ pub fn prune_messages(
 
     // Step 2: collect recent messages (always kept)
     let recent_start = total.saturating_sub(keep_recent).max(start_idx);
-    let recent_messages: Vec<SessionEntry> =
-        messages[recent_start..].to_vec();
+    let recent_messages: Vec<SessionEntry> = messages[recent_start..].to_vec();
 
     // Step 3: collect messages with tool_calls from the older range
     let mut tool_call_messages: Vec<SessionEntry> = Vec::new();
@@ -392,7 +394,11 @@ mod tests {
         }
     }
 
-    fn make_entry_with_tool_call(role: MessageRole, content: &str, tool_name: &str) -> SessionEntry {
+    fn make_entry_with_tool_call(
+        role: MessageRole,
+        content: &str,
+        tool_name: &str,
+    ) -> SessionEntry {
         SessionEntry {
             role,
             content: content.to_string(),
@@ -546,7 +552,7 @@ mod tests {
     #[test]
     fn test_estimate_messages_tokens() {
         let messages = vec![
-            make_entry(MessageRole::User, &"a".repeat(40)),  // 10 tokens
+            make_entry(MessageRole::User, &"a".repeat(40)), // 10 tokens
             make_entry(MessageRole::Assistant, &"b".repeat(80)), // 20 tokens
         ];
         assert_eq!(ContextBudget::estimate_messages_tokens(&messages), 30);
@@ -636,10 +642,10 @@ mod tests {
     fn test_prune_preserves_system_message() {
         let messages = vec![
             make_entry(MessageRole::System, "system prompt"),
-            make_entry(MessageRole::User, &"a".repeat(100)),   // 25 tokens
-            make_entry(MessageRole::User, &"b".repeat(100)),   // 25 tokens
-            make_entry(MessageRole::User, &"c".repeat(100)),   // 25 tokens
-            make_entry(MessageRole::User, &"d".repeat(100)),   // 25 tokens
+            make_entry(MessageRole::User, &"a".repeat(100)), // 25 tokens
+            make_entry(MessageRole::User, &"b".repeat(100)), // 25 tokens
+            make_entry(MessageRole::User, &"c".repeat(100)), // 25 tokens
+            make_entry(MessageRole::User, &"d".repeat(100)), // 25 tokens
         ];
         // Budget only fits system + 1 message
         let result = prune_messages(&messages, 30, 1);
@@ -652,7 +658,15 @@ mod tests {
     #[test]
     fn test_prune_keeps_recent_messages() {
         let messages: Vec<SessionEntry> = (0..10)
-            .map(|i| make_entry(MessageRole::User, &format!("message {} with enough text to add tokens abcdefghijklmnop", i)))
+            .map(|i| {
+                make_entry(
+                    MessageRole::User,
+                    &format!(
+                        "message {} with enough text to add tokens abcdefghijklmnop",
+                        i
+                    ),
+                )
+            })
             .collect();
 
         // Budget fits only 3 messages, keep_recent=2
@@ -671,11 +685,11 @@ mod tests {
     fn test_prune_preserves_tool_call_messages() {
         let messages = vec![
             make_entry(MessageRole::System, "system"),
-            make_entry(MessageRole::User, &"a".repeat(40)),          // 10 tokens
+            make_entry(MessageRole::User, &"a".repeat(40)), // 10 tokens
             make_entry_with_tool_call(MessageRole::Assistant, "calling tool", "search"), // ~3 tokens
-            make_entry(MessageRole::Tool, "tool result"),            // ~3 tokens
-            make_entry(MessageRole::User, &"e".repeat(40)),          // 10 tokens
-            make_entry(MessageRole::Assistant, "final response"),    // ~4 tokens
+            make_entry(MessageRole::Tool, "tool result"), // ~3 tokens
+            make_entry(MessageRole::User, &"e".repeat(40)), // 10 tokens
+            make_entry(MessageRole::Assistant, "final response"), // ~4 tokens
         ];
 
         // Budget: only ~20 tokens, keep_recent=2
@@ -683,7 +697,10 @@ mod tests {
         let result = prune_messages(&messages, 20, 2);
 
         let has_tool_call = result.kept.iter().any(|m| m.tool_calls.is_some());
-        assert!(has_tool_call, "Tool-call messages should be preserved during pruning");
+        assert!(
+            has_tool_call,
+            "Tool-call messages should be preserved during pruning"
+        );
     }
 
     #[test]
@@ -692,17 +709,20 @@ mod tests {
             make_entry(MessageRole::System, "system"),
             make_entry_with_tool_call(
                 MessageRole::Assistant,
-                &"x".repeat(200),  // 50 tokens — too large
+                &"x".repeat(200), // 50 tokens — too large
                 "big_tool",
             ),
-            make_entry(MessageRole::User, "recent"),  // ~2 tokens
+            make_entry(MessageRole::User, "recent"), // ~2 tokens
         ];
 
         // Budget too small for tool_call, keep_recent=1
         let result = prune_messages(&messages, 5, 1);
 
         let has_tool_call = result.kept.iter().any(|m| m.tool_calls.is_some());
-        assert!(!has_tool_call, "Tool-call should be dropped when budget is too small");
+        assert!(
+            !has_tool_call,
+            "Tool-call should be dropped when budget is too small"
+        );
     }
 
     // ─── prune_messages: result correctness ─────────────────────

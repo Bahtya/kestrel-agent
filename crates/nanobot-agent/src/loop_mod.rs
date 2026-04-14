@@ -182,7 +182,10 @@ impl AgentLoop {
                     }
                 }
                 Err(e) => {
-                    warn!("Context compaction failed for session {}: {}", session_key, e);
+                    warn!(
+                        "Context compaction failed for session {}: {}",
+                        session_key, e
+                    );
                 }
             }
         }
@@ -247,10 +250,8 @@ impl AgentLoop {
                 session.add_assistant_message(result.content.clone());
 
                 // Auto-extract structured notes from the response
-                let extracted = NotesManager::extract_notes_from_response(
-                    &mut session,
-                    &result.content,
-                );
+                let extracted =
+                    NotesManager::extract_notes_from_response(&mut session, &result.content);
                 if extracted > 0 {
                     info!(
                         "Auto-extracted {} notes from agent response in session {}",
@@ -386,8 +387,8 @@ impl AgentLoop {
     /// check loop. Returns a [`HeartbeatHandle`] that can be used to stop
     /// the service.
     async fn spawn_heartbeat(&self) -> Result<HeartbeatHandle> {
-        let data_dir = nanobot_config::paths::get_data_dir()
-            .unwrap_or_else(|_| std::env::temp_dir());
+        let data_dir =
+            nanobot_config::paths::get_data_dir().unwrap_or_else(|_| std::env::temp_dir());
 
         let config_clone = (*self.config).clone();
         let mut svc = HeartbeatService::with_data_dir(config_clone, data_dir);
@@ -404,9 +405,7 @@ impl AgentLoop {
             self.configured_channel_names(),
             self.connected_channels.clone(),
         )));
-        svc.register_check(Arc::new(BusHealthCheck::new(
-            (*self.bus).clone(),
-        )));
+        svc.register_check(Arc::new(BusHealthCheck::new((*self.bus).clone())));
         svc.register_check(Arc::new(ToolRegistryHealthCheck::new(
             (*self.tool_registry).clone(),
         )));
@@ -487,8 +486,7 @@ mod tests {
         let config = Config::default();
         let bus = MessageBus::new();
         let session_dir = tempfile::tempdir().unwrap();
-        let session_manager =
-            SessionManager::new(session_dir.path().to_path_buf()).unwrap();
+        let session_manager = SessionManager::new(session_dir.path().to_path_buf()).unwrap();
         let provider_registry = ProviderRegistry::new();
         let tool_registry = ToolRegistry::new();
         AgentLoop::new(
@@ -548,8 +546,7 @@ mod tests {
         });
         let bus = MessageBus::new();
         let session_dir = tempfile::tempdir().unwrap();
-        let session_manager =
-            SessionManager::new(session_dir.path().to_path_buf()).unwrap();
+        let session_manager = SessionManager::new(session_dir.path().to_path_buf()).unwrap();
         let al = AgentLoop::new(
             config,
             bus,
@@ -579,8 +576,7 @@ mod tests {
         });
         let bus = MessageBus::new();
         let session_dir = tempfile::tempdir().unwrap();
-        let session_manager =
-            SessionManager::new(session_dir.path().to_path_buf()).unwrap();
+        let session_manager = SessionManager::new(session_dir.path().to_path_buf()).unwrap();
         let al = AgentLoop::new(
             config,
             bus,
@@ -624,8 +620,7 @@ mod tests {
         let bus = MessageBus::new();
         let session_dir = tempfile::tempdir().unwrap();
         let data_dir = tempfile::tempdir().unwrap();
-        let session_manager =
-            SessionManager::new(session_dir.path().to_path_buf()).unwrap();
+        let session_manager = SessionManager::new(session_dir.path().to_path_buf()).unwrap();
         let provider_registry = ProviderRegistry::new();
         let tool_registry = ToolRegistry::new();
 
@@ -670,9 +665,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.heartbeat.interval_secs = 30;
-        let svc = Arc::new(
-            HeartbeatService::with_data_dir(config, dir.path().to_path_buf())
-        );
+        let svc = Arc::new(HeartbeatService::with_data_dir(
+            config,
+            dir.path().to_path_buf(),
+        ));
         let running = Arc::new(RwLock::new(true));
         let svc_clone = Arc::clone(&svc);
 

@@ -94,11 +94,11 @@ impl MigrationResult {
         let mut s = String::new();
 
         // Field mapping summary
+        s.push_str(&format!("Migration Summary\n{}\n", "-".repeat(40)));
         s.push_str(&format!(
-            "Migration Summary\n{}\n",
-            "-".repeat(40)
+            "  Mapped fields:   {}\n",
+            self.report.mapped.len()
         ));
-        s.push_str(&format!("  Mapped fields:   {}\n", self.report.mapped.len()));
         s.push_str(&format!(
             "  Unmapped fields: {}\n",
             self.report.unmapped.len()
@@ -109,10 +109,7 @@ impl MigrationResult {
         let errors = self.validation.errors().len();
         let warnings = self.validation.warnings().len();
         if errors > 0 || warnings > 0 {
-            s.push_str(&format!(
-                "\nValidation\n{}\n",
-                "-".repeat(40)
-            ));
+            s.push_str(&format!("\nValidation\n{}\n", "-".repeat(40)));
             s.push_str(&format!("  Errors:   {}\n", errors));
             s.push_str(&format!("  Warnings: {}\n", warnings));
         }
@@ -204,17 +201,8 @@ impl fmt::Display for MigrationReport {
 
 /// Known channel names for per-channel config discovery.
 const KNOWN_CHANNELS: &[&str] = &[
-    "telegram",
-    "discord",
-    "slack",
-    "matrix",
-    "whatsapp",
-    "email",
-    "dingtalk",
-    "feishu",
-    "wecom",
-    "weixin",
-    "qq",
+    "telegram", "discord", "slack", "matrix", "whatsapp", "email", "dingtalk", "feishu", "wecom",
+    "weixin", "qq",
 ];
 
 // ---------------------------------------------------------------------------
@@ -228,7 +216,10 @@ const KNOWN_CHANNELS: &[&str] = &[
 /// per-channel configs at sibling directories like `~/.nanobot-telegram/config.json`.
 ///
 /// Validates the result and optionally writes to disk (unless dry-run).
-pub fn migrate_from_python(python_home: &Path, options: &MigrationOptions) -> Result<MigrationResult> {
+pub fn migrate_from_python(
+    python_home: &Path,
+    options: &MigrationOptions,
+) -> Result<MigrationResult> {
     // 1. Read main config (JSON or YAML)
     let main_config = if let Some(ref input) = options.input_file {
         read_python_config(input)?
@@ -325,11 +316,9 @@ pub fn migrate_from_python(python_home: &Path, options: &MigrationOptions) -> Re
 /// Does not probe for per-channel configs or write to disk.
 pub fn migrate_from_str(content: &str) -> Result<MigrationResult> {
     let py: PythonConfig = if content.trim_start().starts_with('{') {
-        serde_json::from_str(content)
-            .with_context(|| "Failed to parse as JSON")?
+        serde_json::from_str(content).with_context(|| "Failed to parse as JSON")?
     } else {
-        serde_yaml::from_str(content)
-            .with_context(|| "Failed to parse as YAML")?
+        serde_yaml::from_str(content).with_context(|| "Failed to parse as YAML")?
     };
 
     let mut report = MigrationReport::default();
@@ -381,11 +370,13 @@ fn read_python_config(path: &Path) -> Result<PythonConfig> {
         _ => {
             // Auto-detect: try JSON first, then YAML
             if raw.trim_start().starts_with('{') {
-                serde_json::from_str(&raw)
-                    .with_context(|| format!("Failed to parse Python config JSON: {}", path.display()))
+                serde_json::from_str(&raw).with_context(|| {
+                    format!("Failed to parse Python config JSON: {}", path.display())
+                })
             } else {
-                serde_yaml::from_str(&raw)
-                    .with_context(|| format!("Failed to parse Python config YAML: {}", path.display()))
+                serde_yaml::from_str(&raw).with_context(|| {
+                    format!("Failed to parse Python config YAML: {}", path.display())
+                })
             }
         }
     }
@@ -481,7 +472,10 @@ fn convert_providers(py: &PythonProviders, config: &mut Config, report: &mut Mig
             });
             report.add_mapped("providers.custom → custom_providers[0] (apiBase → base_url)");
         } else {
-            report.add_note("providers.custom", "No apiBase set, skipping custom provider");
+            report.add_note(
+                "providers.custom",
+                "No apiBase set, skipping custom provider",
+            );
         }
     }
 }
@@ -498,7 +492,10 @@ fn convert_channels(
     let mut telegram_py = py.telegram.clone();
     for (name, ch_cfg) in per_channel {
         if name == "telegram" {
-            telegram_py = Some(merge_telegram(telegram_py.as_ref(), &ch_cfg.channels.telegram));
+            telegram_py = Some(merge_telegram(
+                telegram_py.as_ref(),
+                &ch_cfg.channels.telegram,
+            ));
         }
     }
     if let Some(ref tg) = telegram_py {
@@ -677,7 +674,7 @@ fn merge_discord(
 fn merge_slack(
     base: Option<&PythonSlackConfig>,
     override_cfg: &Option<PythonSlackConfig>,
-) ->PythonSlackConfig {
+) -> PythonSlackConfig {
     let base = base.cloned().unwrap_or_default();
     match override_cfg {
         Some(ov) => PythonSlackConfig {
@@ -891,7 +888,10 @@ mod tests {
     #[test]
     fn test_migration_options_with_output() {
         let opts = MigrationOptions::with_output("/tmp/test-config.yaml");
-        assert_eq!(opts.output_file.unwrap().to_str(), Some("/tmp/test-config.yaml"));
+        assert_eq!(
+            opts.output_file.unwrap().to_str(),
+            Some("/tmp/test-config.yaml")
+        );
     }
 
     // -------------------------------------------------------------------
@@ -973,7 +973,10 @@ mod tests {
         assert_eq!(dc.allowed_guilds, vec!["guild1"]);
         assert!(dc.streaming);
 
-        assert!(report.unmapped.iter().any(|u| u.contains("channels.discord.groupPolicy")));
+        assert!(report
+            .unmapped
+            .iter()
+            .any(|u| u.contains("channels.discord.groupPolicy")));
     }
 
     #[test]
@@ -987,7 +990,10 @@ mod tests {
         assert_eq!(sl.bot_token, Some("xoxb-123".to_string()));
         assert_eq!(sl.app_token, Some("xapp-456".to_string()));
 
-        assert!(report.unmapped.iter().any(|u| u.contains("channels.slack.allowFrom")));
+        assert!(report
+            .unmapped
+            .iter()
+            .any(|u| u.contains("channels.slack.allowFrom")));
     }
 
     #[test]
@@ -1054,7 +1060,10 @@ mod tests {
         assert!(!config.agent.streaming);
         assert_eq!(config.agent.tool_timeout, 60);
 
-        assert!(report.notes.iter().any(|n| n.contains("agents.defaults.provider")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("agents.defaults.provider")));
     }
 
     #[test]
@@ -1173,7 +1182,10 @@ mod tests {
         assert_eq!(parsed.agent.model, "anthropic/claude-opus-4-5");
         assert!(parsed.providers.openai.is_some());
         assert!(parsed.channels.telegram.is_some());
-        assert_eq!(parsed.channels.telegram.as_ref().unwrap().token, "123456:ABC-DEF");
+        assert_eq!(
+            parsed.channels.telegram.as_ref().unwrap().token,
+            "123456:ABC-DEF"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1273,7 +1285,11 @@ heartbeat:
         let result = migrate_from_str(make_full_python_json()).unwrap();
 
         // Full config should validate OK (has providers, channels, agent)
-        assert!(result.validation.is_valid(), "Validation errors: {:?}", result.validation.errors());
+        assert!(
+            result.validation.is_valid(),
+            "Validation errors: {:?}",
+            result.validation.errors()
+        );
     }
 
     #[test]
@@ -1390,7 +1406,10 @@ channels:
             Some("sk-yaml-file-test".to_string())
         );
         assert!(result.config.channels.telegram.is_some());
-        assert_eq!(result.config.channels.telegram.as_ref().unwrap().token, "111222:YAML-FILE");
+        assert_eq!(
+            result.config.channels.telegram.as_ref().unwrap().token,
+            "111222:YAML-FILE"
+        );
     }
 
     #[test]
@@ -1406,7 +1425,10 @@ channels:
 
         let result = migrate_from_python(&py_home, &opts);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No config.json or config.yaml"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No config.json or config.yaml"));
     }
 
     #[test]
@@ -1547,7 +1569,10 @@ channels:
 
         let result = migrate_from_python(&py_home, &opts).unwrap();
         assert!(result.config.channels.telegram.is_some());
-        assert_eq!(result.config.channels.telegram.as_ref().unwrap().token, "777888:PER-YAML");
+        assert_eq!(
+            result.config.channels.telegram.as_ref().unwrap().token,
+            "777888:PER-YAML"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1575,7 +1600,11 @@ channels:
     fn test_read_python_config_json_extension() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.json");
-        fs::write(&path, r#"{"providers": {"openai": {"apiKey": "sk-ext-test"}}}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"providers": {"openai": {"apiKey": "sk-ext-test"}}}"#,
+        )
+        .unwrap();
 
         let config = read_python_config(&path).unwrap();
         assert!(config.providers.openai.is_some());
@@ -1605,7 +1634,11 @@ channels:
     fn test_read_python_config_no_extension_auto_detect() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config");
-        fs::write(&path, r#"{"providers": {"openai": {"apiKey": "sk-noext"}}}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"providers": {"openai": {"apiKey": "sk-noext"}}}"#,
+        )
+        .unwrap();
 
         let config = read_python_config(&path).unwrap();
         assert!(config.providers.openai.is_some());

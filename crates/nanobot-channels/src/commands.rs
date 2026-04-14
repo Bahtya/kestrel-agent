@@ -104,7 +104,10 @@ fn handle_help() -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Available commands:\n");
     let _ = writeln!(out, "/help     - Show this help message");
-    let _ = writeln!(out, "/status   - Show bot status, channels, and config summary");
+    let _ = writeln!(
+        out,
+        "/status   - Show bot status, channels, and config summary"
+    );
     let _ = writeln!(out, "/validate - Validate config.yaml and show results");
     let _ = writeln!(out, "/settings - Toggle preferences (notifications, model)");
     let _ = writeln!(out, "/history  - Browse recent conversation history");
@@ -171,10 +174,7 @@ pub fn handle_menu_callback(action: &str) -> (String, Option<InlineKeyboardMarku
         ),
         "validate" => (handle_validate(), Some(menu_keyboard())),
         "cancel" => ("Menu closed.".to_string(), None),
-        _ => (
-            format!("Unknown action: {action}"),
-            Some(menu_keyboard()),
-        ),
+        _ => (format!("Unknown action: {action}"), Some(menu_keyboard())),
     }
 }
 
@@ -442,7 +442,6 @@ pub fn handle_history_page(page: usize) -> CommandResponse {
 
 /// Implementation that accepts an explicit data directory (for testability).
 fn handle_history_page_impl(page: usize, data_dir: &std::path::Path) -> CommandResponse {
-
     let mgr = match SessionManager::new(data_dir.to_path_buf()) {
         Ok(m) => m,
         Err(e) => return CommandResponse::text(format!("Session store error: {e}")),
@@ -1280,12 +1279,24 @@ heartbeat:
         assert_eq!(kb.inline_keyboard.len(), 2);
         // Row 1: Status, Help
         assert_eq!(kb.inline_keyboard[0].len(), 2);
-        assert_eq!(kb.inline_keyboard[0][0].callback_data, Some("menu:status".to_string()));
-        assert_eq!(kb.inline_keyboard[0][1].callback_data, Some("menu:help".to_string()));
+        assert_eq!(
+            kb.inline_keyboard[0][0].callback_data,
+            Some("menu:status".to_string())
+        );
+        assert_eq!(
+            kb.inline_keyboard[0][1].callback_data,
+            Some("menu:help".to_string())
+        );
         // Row 2: Validate Config, Cancel
         assert_eq!(kb.inline_keyboard[1].len(), 2);
-        assert_eq!(kb.inline_keyboard[1][0].callback_data, Some("menu:validate".to_string()));
-        assert_eq!(kb.inline_keyboard[1][1].callback_data, Some("menu:cancel".to_string()));
+        assert_eq!(
+            kb.inline_keyboard[1][0].callback_data,
+            Some("menu:validate".to_string())
+        );
+        assert_eq!(
+            kb.inline_keyboard[1][1].callback_data,
+            Some("menu:cancel".to_string())
+        );
     }
 
     #[test]
@@ -1510,10 +1521,7 @@ providers:
 
     #[test]
     fn test_handle_history_single_page() {
-        let keys: Vec<String> = vec![
-            "telegram:123".to_string(),
-            "discord:456".to_string(),
-        ];
+        let keys: Vec<String> = vec!["telegram:123".to_string(), "discord:456".to_string()];
         let resp = handle_history(&keys, 0);
         assert!(resp.text.contains("Sessions"));
         assert!(resp.text.contains("telegram:123"));
@@ -1523,9 +1531,7 @@ providers:
 
     #[test]
     fn test_handle_history_multi_page() {
-        let keys: Vec<String> = (0..12)
-            .map(|i| format!("session:{}", i))
-            .collect();
+        let keys: Vec<String> = (0..12).map(|i| format!("session:{}", i)).collect();
         let resp = handle_history(&keys, 0);
         assert!(resp.text.contains("page 1/"));
         assert!(resp.keyboard.is_some());
@@ -1537,9 +1543,7 @@ providers:
 
     #[test]
     fn test_handle_history_second_page() {
-        let keys: Vec<String> = (0..12)
-            .map(|i| format!("session:{}", i))
-            .collect();
+        let keys: Vec<String> = (0..12).map(|i| format!("session:{}", i)).collect();
         let resp = handle_history(&keys, 1);
         assert!(resp.text.contains("page 2/"));
         // Page 2 should show items 6-11 (0-indexed 5-11, but 1-indexed 6-12).
@@ -1565,11 +1569,7 @@ providers:
 
     #[test]
     fn test_handle_history_shows_index_numbers() {
-        let keys: Vec<String> = vec![
-            "alpha".to_string(),
-            "beta".to_string(),
-            "gamma".to_string(),
-        ];
+        let keys: Vec<String> = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
         let resp = handle_history(&keys, 0);
         assert!(resp.text.contains("1. alpha"));
         assert!(resp.text.contains("2. beta"));
@@ -1727,9 +1727,7 @@ agent:
 
     #[test]
     fn test_rebuild_callback_data_with_payload() {
-        use crate::platforms::telegram::{
-            rebuild_callback_data, CallbackAction, CallbackContext,
-        };
+        use crate::platforms::telegram::{rebuild_callback_data, CallbackAction, CallbackContext};
         let ctx = CallbackContext {
             chat_id: "123".to_string(),
             message_id: "456".to_string(),
@@ -1746,9 +1744,7 @@ agent:
 
     #[test]
     fn test_rebuild_callback_data_without_payload() {
-        use crate::platforms::telegram::{
-            rebuild_callback_data, CallbackAction, CallbackContext,
-        };
+        use crate::platforms::telegram::{rebuild_callback_data, CallbackAction, CallbackContext};
         let ctx = CallbackContext {
             chat_id: "123".to_string(),
             message_id: "456".to_string(),

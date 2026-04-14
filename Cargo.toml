@@ -13,6 +13,7 @@ members = [
     "crates/nanobot-heartbeat",
     "crates/nanobot-channels",
     "crates/nanobot-api",
+    "crates/nanobot-daemon",
 ]
 
 [workspace.package]
@@ -94,6 +95,7 @@ nanobot-cron = { path = "crates/nanobot-cron" }
 nanobot-heartbeat = { path = "crates/nanobot-heartbeat" }
 nanobot-channels = { path = "crates/nanobot-channels" }
 nanobot-api = { path = "crates/nanobot-api" }
+nanobot-daemon = { path = "crates/nanobot-daemon" }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

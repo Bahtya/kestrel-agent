@@ -16,6 +16,7 @@
 //! The server listens for SIGINT / SIGTERM and drains in-flight SSE streams
 //! via a `CancellationToken` before exiting.
 
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, State},
@@ -26,7 +27,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use futures::stream::Stream;
 use futures::StreamExt;
 use nanobot_agent::AgentRunner;
@@ -80,8 +80,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
     let origins = &config.api.allowed_origins;
 
     if origins.len() == 1 && origins[0] == "*" {
-        return CorsLayer::permissive()
-            .max_age(std::time::Duration::from_secs(3600));
+        return CorsLayer::permissive().max_age(std::time::Duration::from_secs(3600));
     }
 
     let parsed: Vec<HeaderValue> = origins
@@ -91,11 +90,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(parsed))
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::OPTIONS,
-        ])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([AUTHORIZATION, CONTENT_TYPE])
         .max_age(std::time::Duration::from_secs(3600))
 }
@@ -195,7 +190,10 @@ impl ApiServer {
     /// connections and the server drains existing requests.
     pub async fn run(&self) -> anyhow::Result<()> {
         let app = self.router();
-        let host: std::net::IpAddr = self.host.parse().unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+        let host: std::net::IpAddr = self
+            .host
+            .parse()
+            .unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
         let addr = std::net::SocketAddr::from((host, self.port));
         info!("API server listening on {}", addr);
 
@@ -328,10 +326,7 @@ struct ErrorDetail {
 /// If the client sends an `x-request-id` header it is preserved; otherwise a
 /// new UUID v4 is generated. The ID is set on the response header and injected
 /// into the current tracing span for structured log correlation.
-async fn request_id_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> impl IntoResponse {
+async fn request_id_middleware(req: Request<Body>, next: Next) -> impl IntoResponse {
     let request_id = req
         .headers()
         .get("x-request-id")
@@ -355,10 +350,7 @@ async fn request_id_middleware(
 /// Request logging middleware — logs method, path, status code, and latency.
 /// Also intercepts 413 Payload Too Large responses and returns an OpenAI-format
 /// JSON error body instead of Axum's default plain text.
-async fn request_log_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> impl IntoResponse {
+async fn request_log_middleware(req: Request<Body>, next: Next) -> impl IntoResponse {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let start = Instant::now();
@@ -441,18 +433,12 @@ fn validation_error(message: impl Into<String>, code: Option<String>) -> axum::r
 fn validate_request(req: &ChatCompletionRequest) -> Result<(), axum::response::Response> {
     // Model must be non-empty
     if req.model.trim().is_empty() {
-        return Err(validation_error(
-            "Model must be a non-empty string",
-            None,
-        ));
+        return Err(validation_error("Model must be a non-empty string", None));
     }
 
     // Messages must not be empty
     if req.messages.is_empty() {
-        return Err(validation_error(
-            "Messages must be a non-empty array",
-            None,
-        ));
+        return Err(validation_error("Messages must be a non-empty array", None));
     }
 
     // Validate each message has a recognized role and non-empty content
@@ -493,10 +479,7 @@ fn validate_request(req: &ChatCompletionRequest) -> Result<(), axum::response::R
     // Validate max_tokens
     if let Some(max_tokens) = req.max_tokens {
         if max_tokens == 0 {
-            return Err(validation_error(
-                "max_tokens must be greater than 0",
-                None,
-            ));
+            return Err(validation_error("max_tokens must be greater than 0", None));
         }
     }
 
@@ -509,7 +492,10 @@ async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
-    debug!("Chat completion request for model: {} (stream: {})", req.model, req.stream);
+    debug!(
+        "Chat completion request for model: {} (stream: {})",
+        req.model, req.stream
+    );
 
     // Validate request
     if let Err(resp) = validate_request(&req) {
@@ -520,7 +506,10 @@ async fn chat_completions(
     if state.provider_registry.get_provider(&req.model).is_none() {
         let error = ErrorResponse {
             error: ErrorDetail {
-                message: format!("Model '{}' not found. Check available models at GET /v1/models.", req.model),
+                message: format!(
+                    "Model '{}' not found. Check available models at GET /v1/models.",
+                    req.model
+                ),
                 r#type: "invalid_request_error".to_string(),
                 code: Some("model_not_found".to_string()),
             },
@@ -602,7 +591,10 @@ async fn non_stream_completion(
             warn!("Agent error: {}", e);
             let msg = e.to_string();
             let (status, code) = if msg.contains("429") {
-                (StatusCode::TOO_MANY_REQUESTS, Some("rate_limit_exceeded".to_string()))
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Some("rate_limit_exceeded".to_string()),
+                )
             } else {
                 (StatusCode::INTERNAL_SERVER_ERROR, None)
             };
@@ -646,18 +638,19 @@ async fn stream_completion(
     let stream_result = runner.run(system_prompt, messages).await;
     let cancel = state.cancel.clone();
 
-    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
-        match stream_result {
-            Ok(result) => {
-                let content = result.content;
-                let usage = result.usage;
-                let id = completion_id;
-                let mdl = model;
-                let cr = created;
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = match stream_result
+    {
+        Ok(result) => {
+            let content = result.content;
+            let usage = result.usage;
+            let id = completion_id;
+            let mdl = model;
+            let cr = created;
 
-                let events = futures::stream::iter(vec![
-                    // Chunk 1: role announcement
-                    Ok(Event::default().data(serde_json::json!({
+            let events = futures::stream::iter(vec![
+                // Chunk 1: role announcement
+                Ok(Event::default().data(
+                    serde_json::json!({
                         "id": id,
                         "object": "chat.completion.chunk",
                         "created": cr,
@@ -667,9 +660,12 @@ async fn stream_completion(
                             "delta": {"role": "assistant"},
                             "finish_reason": null
                         }]
-                    }).to_string())),
-                    // Chunk 2: content
-                    Ok(Event::default().data(serde_json::json!({
+                    })
+                    .to_string(),
+                )),
+                // Chunk 2: content
+                Ok(Event::default().data(
+                    serde_json::json!({
                         "id": id,
                         "object": "chat.completion.chunk",
                         "created": cr,
@@ -680,9 +676,12 @@ async fn stream_completion(
                             "finish_reason": null
                         }],
                         "usage": null
-                    }).to_string())),
-                    // Chunk 3: stop with usage
-                    Ok(Event::default().data(serde_json::json!({
+                    })
+                    .to_string(),
+                )),
+                // Chunk 3: stop with usage
+                Ok(Event::default().data(
+                    serde_json::json!({
                         "id": id,
                         "object": "chat.completion.chunk",
                         "created": cr,
@@ -697,34 +696,35 @@ async fn stream_completion(
                             "completion_tokens": usage.completion_tokens.unwrap_or(0),
                             "total_tokens": usage.total_tokens.unwrap_or(0)
                         }
-                    }).to_string())),
-                ]);
+                    })
+                    .to_string(),
+                )),
+            ]);
 
-                // On graceful shutdown, emit [DONE] then terminate.
-                // take_until truncates when the cancel token fires; chain appends
-                // the [DONE] sentinel so clients receive a clean end-of-stream signal.
-                let done_event = futures::stream::once(async move {
-                    Ok(Event::default().data("[DONE]"))
+            // On graceful shutdown, emit [DONE] then terminate.
+            // take_until truncates when the cancel token fires; chain appends
+            // the [DONE] sentinel so clients receive a clean end-of-stream signal.
+            let done_event =
+                futures::stream::once(async move { Ok(Event::default().data("[DONE]")) });
+            let stream = events
+                .take_until(cancel.cancelled_owned())
+                .chain(done_event);
+            Box::pin(stream)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            Box::pin(futures::stream::once(async move {
+                let error = serde_json::json!({
+                    "error": {
+                        "message": format!("Agent error: {}", msg),
+                        "type": "server_error",
+                        "code": null
+                    }
                 });
-                let stream = events
-                    .take_until(cancel.cancelled_owned())
-                    .chain(done_event);
-                Box::pin(stream)
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                Box::pin(futures::stream::once(async move {
-                    let error = serde_json::json!({
-                        "error": {
-                            "message": format!("Agent error: {}", msg),
-                            "type": "server_error",
-                            "code": null
-                        }
-                    });
-                    Ok(Event::default().data(error.to_string()))
-                }))
-            }
-        };
+                Ok(Event::default().data(error.to_string()))
+            }))
+        }
+    };
 
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
     sse.into_response()
@@ -843,7 +843,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     match snapshot.clone() {
         Some(snap) => {
             let status = if snap.healthy {
-                if snap.degraded { "degraded" } else { "healthy" }
+                if snap.degraded {
+                    "degraded"
+                } else {
+                    "healthy"
+                }
             } else {
                 "unhealthy"
             };
@@ -892,9 +896,7 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.health_snapshot.read();
 
     match snapshot.clone() {
-        Some(snap) if snap.healthy => {
-            (StatusCode::OK, Json(serde_json::json!({ "ready": true })))
-        }
+        Some(snap) if snap.healthy => (StatusCode::OK, Json(serde_json::json!({ "ready": true }))),
         Some(snap) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
@@ -921,7 +923,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use nanobot_core::Usage;
-    use nanobot_providers::base::{BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider};
+    use nanobot_providers::base::{
+        BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
+    };
     use tower::ServiceExt;
 
     /// Mock provider for testing.
@@ -929,7 +933,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for MockProvider {
-        fn name(&self) -> &str { "mock" }
+        fn name(&self) -> &str {
+            "mock"
+        }
         async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
             Ok(CompletionResponse {
                 content: Some("Mock response".to_string()),
@@ -952,7 +958,9 @@ mod tests {
             };
             Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
         }
-        fn supports_model(&self, _model: &str) -> bool { true }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
     }
 
     fn test_state() -> AppState {
@@ -1042,7 +1050,10 @@ mod tests {
     #[tokio::test]
     async fn test_health_endpoint_no_snapshot() {
         let app = test_router();
-        let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1067,7 +1078,10 @@ mod tests {
             .route("/health", get(health))
             .with_state(state);
 
-        let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1092,7 +1106,10 @@ mod tests {
             .route("/health", get(health))
             .with_state(state);
 
-        let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1116,7 +1133,10 @@ mod tests {
             .route("/health", get(health))
             .with_state(state);
 
-        let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1127,7 +1147,10 @@ mod tests {
     #[tokio::test]
     async fn test_ready_endpoint_no_snapshot() {
         let app = test_router();
-        let req = Request::builder().uri("/ready").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/ready")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1146,11 +1169,12 @@ mod tests {
         }]);
         *state.health_snapshot.write() = Some(snap);
 
-        let app = Router::new()
-            .route("/ready", get(ready))
-            .with_state(state);
+        let app = Router::new().route("/ready", get(ready)).with_state(state);
 
-        let req = Request::builder().uri("/ready").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/ready")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1169,11 +1193,12 @@ mod tests {
         }]);
         *state.health_snapshot.write() = Some(snap);
 
-        let app = Router::new()
-            .route("/ready", get(ready))
-            .with_state(state);
+        let app = Router::new().route("/ready", get(ready)).with_state(state);
 
-        let req = Request::builder().uri("/ready").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/ready")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1187,7 +1212,10 @@ mod tests {
     #[tokio::test]
     async fn test_models_endpoint_basic() {
         let app = test_router();
-        let req = Request::builder().uri("/v1/models").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1199,16 +1227,28 @@ mod tests {
     #[tokio::test]
     async fn test_models_lists_registered_providers() {
         let app = router_with_provider();
-        let req = Request::builder().uri("/v1/models").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let ids = v["data"].as_array().unwrap().iter()
+        let ids = v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
             .filter_map(|m| m["id"].as_str().map(String::from))
             .collect::<Vec<_>>();
-        assert!(ids.contains(&"mock".to_string()), "Should list 'mock' provider");
-        assert!(ids.contains(&"mock-model".to_string()), "Should list agent model");
+        assert!(
+            ids.contains(&"mock".to_string()),
+            "Should list 'mock' provider"
+        );
+        assert!(
+            ids.contains(&"mock-model".to_string()),
+            "Should list agent model"
+        );
     }
 
     // ─── Chat completions: validation ───────────────────
@@ -1230,7 +1270,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("No user message"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No user message"));
     }
 
     #[tokio::test]
@@ -1267,7 +1310,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("non-empty array"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("non-empty array"));
     }
 
     #[tokio::test]
@@ -1288,7 +1334,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("Temperature"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Temperature"));
     }
 
     #[tokio::test]
@@ -1327,7 +1376,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("max_tokens"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("max_tokens"));
     }
 
     #[tokio::test]
@@ -1347,7 +1399,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("invalid role"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid role"));
     }
 
     #[tokio::test]
@@ -1367,7 +1422,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("empty content"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("empty content"));
     }
 
     #[tokio::test]
@@ -1412,7 +1470,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found"));
         assert_eq!(v["error"]["code"].as_str(), Some("model_not_found"));
     }
 
@@ -1472,8 +1533,17 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         // SSE responses use 200 with text/event-stream
         assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
-        assert!(ct.contains("text/event-stream"), "Expected SSE content type, got: {}", ct);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/event-stream"),
+            "Expected SSE content type, got: {}",
+            ct
+        );
     }
 
     #[tokio::test]
@@ -1497,24 +1567,43 @@ mod tests {
 
         // Should contain 4 data events: role, content, stop, [DONE]
         let data_count = body_str.matches("data:").count();
-        assert_eq!(data_count, 4, "Expected 4 SSE data events, got {}: {}", data_count, body_str);
+        assert_eq!(
+            data_count, 4,
+            "Expected 4 SSE data events, got {}: {}",
+            data_count, body_str
+        );
 
         // First chunk should have role announcement
-        assert!(body_str.contains("\"role\":\"assistant\"") || body_str.contains("\"role\": \"assistant\""),
-            "First chunk should contain role announcement");
+        assert!(
+            body_str.contains("\"role\":\"assistant\"")
+                || body_str.contains("\"role\": \"assistant\""),
+            "First chunk should contain role announcement"
+        );
 
         // Should contain the mock response content
-        assert!(body_str.contains("Mock response"), "Should contain content in SSE body");
+        assert!(
+            body_str.contains("Mock response"),
+            "Should contain content in SSE body"
+        );
 
         // Should contain finish_reason stop
-        assert!(body_str.contains("\"finish_reason\":\"stop\"") || body_str.contains("\"finish_reason\": \"stop\""),
-            "Final chunk should contain finish_reason: stop");
+        assert!(
+            body_str.contains("\"finish_reason\":\"stop\"")
+                || body_str.contains("\"finish_reason\": \"stop\""),
+            "Final chunk should contain finish_reason: stop"
+        );
 
         // Should contain usage info
-        assert!(body_str.contains("\"prompt_tokens\""), "Final chunk should contain usage info");
+        assert!(
+            body_str.contains("\"prompt_tokens\""),
+            "Final chunk should contain usage info"
+        );
 
         // Should end with [DONE] sentinel
-        assert!(body_str.contains("data: [DONE]"), "SSE stream should end with [DONE] sentinel");
+        assert!(
+            body_str.contains("data: [DONE]"),
+            "SSE stream should end with [DONE] sentinel"
+        );
     }
 
     #[tokio::test]
@@ -1549,8 +1638,14 @@ mod tests {
         assert!(ids.len() >= 2, "Should have at least 2 chunks with IDs");
         // All IDs should be identical
         let first_id = &ids[0];
-        assert!(ids.iter().all(|id| id == first_id), "All SSE chunks should have the same ID");
-        assert!(first_id.starts_with("chatcmpl-"), "ID should start with chatcmpl-");
+        assert!(
+            ids.iter().all(|id| id == first_id),
+            "All SSE chunks should have the same ID"
+        );
+        assert!(
+            first_id.starts_with("chatcmpl-"),
+            "ID should start with chatcmpl-"
+        );
     }
 
     // ─── Auth: 401 tests ─────────────────────────────────
@@ -1615,7 +1710,10 @@ mod tests {
     async fn test_auth_health_needs_no_key() {
         // Health endpoint should work without auth even when api_key is set
         let app = router_with_auth();
-        let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -1624,7 +1722,10 @@ mod tests {
     async fn test_auth_models_needs_no_key() {
         // Models endpoint should work without auth (matches OpenAI behavior)
         let app = router_with_auth();
-        let req = Request::builder().uri("/v1/models").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -1649,7 +1750,8 @@ mod tests {
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
         let providers = ProviderRegistry::new();
         let tools = ToolRegistry::new();
-        let server = ApiServer::with_registries(config, bus, session_manager, providers, tools, Some(9090));
+        let server =
+            ApiServer::with_registries(config, bus, session_manager, providers, tools, Some(9090));
         let _router = server.router();
     }
 
@@ -1784,7 +1886,10 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         // No provider registered → model not found (404)
-        assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            resp.status() == StatusCode::NOT_FOUND
+                || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     // ─── CORS configuration tests ──────────────────────────
@@ -1881,7 +1986,10 @@ mod tests {
             .uri("/health")
             .header("origin", "https://trusted.example.com")
             .header("access-control-request-method", "POST")
-            .header("access-control-request-headers", "content-type,authorization")
+            .header(
+                "access-control-request-headers",
+                "content-type,authorization",
+            )
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -1977,10 +2085,16 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let rid = resp.headers().get("x-request-id").expect("response should have x-request-id");
+        let rid = resp
+            .headers()
+            .get("x-request-id")
+            .expect("response should have x-request-id");
         let rid_str = rid.to_str().unwrap();
         // Should be a valid UUID
-        assert!(uuid::Uuid::parse_str(rid_str).is_ok(), "Generated request ID should be a valid UUID");
+        assert!(
+            uuid::Uuid::parse_str(rid_str).is_ok(),
+            "Generated request ID should be a valid UUID"
+        );
     }
 
     #[tokio::test]
@@ -2018,7 +2132,10 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let rid = resp.headers().get("x-request-id").expect("response should have x-request-id");
+        let rid = resp
+            .headers()
+            .get("x-request-id")
+            .expect("response should have x-request-id");
         assert_eq!(rid.to_str().unwrap(), "my-custom-id-123");
     }
 
@@ -2165,13 +2282,7 @@ mod tests {
             tool_calls: None,
         }];
 
-        let resp = stream_completion(
-            state,
-            req,
-            "test".to_string(),
-            messages,
-        )
-        .await;
+        let resp = stream_completion(state, req, "test".to_string(), messages).await;
 
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp
@@ -2192,7 +2303,10 @@ mod tests {
             "Expected 1 SSE event ([DONE]) when cancel is pre-triggered, got {}: {}",
             data_count, body_str
         );
-        assert!(body_str.contains("[DONE]"), "Should contain [DONE] sentinel");
+        assert!(
+            body_str.contains("[DONE]"),
+            "Should contain [DONE] sentinel"
+        );
     }
 
     #[tokio::test]
@@ -2220,13 +2334,7 @@ mod tests {
             tool_calls: None,
         }];
 
-        let resp = stream_completion(
-            state,
-            req,
-            "test".to_string(),
-            messages,
-        )
-        .await;
+        let resp = stream_completion(state, req, "test".to_string(), messages).await;
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -2237,6 +2345,9 @@ mod tests {
             "Expected 4 SSE events (3 chunks + [DONE]) without cancellation, got {}: {}",
             data_count, body_str
         );
-        assert!(body_str.contains("[DONE]"), "Should contain [DONE] sentinel");
+        assert!(
+            body_str.contains("[DONE]"),
+            "Should contain [DONE] sentinel"
+        );
     }
 }

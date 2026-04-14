@@ -32,7 +32,8 @@ impl NoteStore {
 
     /// Get the file path for a session's notes.
     fn notes_path(&self, session_key: &str) -> PathBuf {
-        self.dir.join(format!("{}.notes.json", Self::safe_key(session_key)))
+        self.dir
+            .join(format!("{}.notes.json", Self::safe_key(session_key)))
     }
 
     /// Load all notes for a session.
@@ -61,16 +62,17 @@ impl NoteStore {
         if notes.is_empty() {
             // Remove the file if there are no notes
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("Failed to remove empty notes file: {}", path.display()))?;
+                std::fs::remove_file(&path).with_context(|| {
+                    format!("Failed to remove empty notes file: {}", path.display())
+                })?;
             }
             return Ok(());
         }
 
         debug!("Saving {} notes for session '{}'", notes.len(), session_key);
 
-        let json = serde_json::to_string_pretty(notes)
-            .with_context(|| "Failed to serialize notes")?;
+        let json =
+            serde_json::to_string_pretty(notes).with_context(|| "Failed to serialize notes")?;
 
         // Atomic write: write to temp file then rename
         let tmp_path = path.with_extension("notes.tmp");
@@ -152,9 +154,7 @@ impl NoteStore {
                     let name = filename.to_string_lossy();
                     if name.ends_with(".notes.json") {
                         // Strip ".notes.json" suffix and convert back from safe key
-                        let key = name
-                            .trim_end_matches(".notes.json")
-                            .to_string();
+                        let key = name.trim_end_matches(".notes.json").to_string();
                         keys.push(key);
                     }
                 }
@@ -307,7 +307,11 @@ mod tests {
             .save_notes(
                 "session:a",
                 &vec![
-                    Note::new("n1".to_string(), "a".to_string(), vec!["decision".to_string()]),
+                    Note::new(
+                        "n1".to_string(),
+                        "a".to_string(),
+                        vec!["decision".to_string()],
+                    ),
                     Note::new("n2".to_string(), "b".to_string(), vec!["todo".to_string()]),
                 ],
             )
@@ -338,7 +342,11 @@ mod tests {
         store
             .save_notes(
                 "session:x",
-                &vec![Note::new("n1".to_string(), "a".to_string(), vec!["Backend".to_string()])],
+                &vec![Note::new(
+                    "n1".to_string(),
+                    "a".to_string(),
+                    vec!["Backend".to_string()],
+                )],
             )
             .unwrap();
 
@@ -364,7 +372,10 @@ mod tests {
 
     #[test]
     fn test_safe_key_sanitization() {
-        assert_eq!(NoteStore::safe_key("telegram:chat/123"), "telegram_chat_123");
+        assert_eq!(
+            NoteStore::safe_key("telegram:chat/123"),
+            "telegram_chat_123"
+        );
         assert_eq!(NoteStore::safe_key("discord:guild\\x"), "discord_guild_x");
     }
 

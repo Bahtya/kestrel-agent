@@ -19,26 +19,21 @@ pub enum DaemonAction {
     Status,
 }
 
-/// Execute a daemon management action.
+/// Handle a daemon CLI subcommand.
 ///
-/// **Note**: `Start` performs daemonization and must run BEFORE the tokio
-/// runtime is initialized (fork kills threads). The caller is responsible
-/// for calling this before `#[tokio::main]` sets up the runtime.
-///
-/// The `Start` action does NOT actually launch the gateway — it only
-/// daemonizes. The caller should proceed to start the gateway after
-/// `run(DaemonAction::Start)` returns `Ok(())`.
+/// Maps from the string-based subcommand name to the typed [`DaemonAction`]
+/// and dispatches accordingly.
 ///
 /// # Arguments
 ///
 /// * `action` - Which daemon action to perform.
 /// * `config` - The loaded configuration (for PID file paths, etc.).
-pub fn run(action: &DaemonAction, config: &Config) -> Result<()> {
+pub fn handle_daemon_command(action: DaemonAction, config: Config) -> Result<()> {
     match action {
-        DaemonAction::Start => do_start(config),
-        DaemonAction::Stop => do_stop(config),
-        DaemonAction::Restart => do_restart(config),
-        DaemonAction::Status => do_status(config),
+        DaemonAction::Start => do_start(&config),
+        DaemonAction::Stop => do_stop(&config),
+        DaemonAction::Restart => do_restart(&config),
+        DaemonAction::Status => do_status(&config),
     }
 }
 
@@ -80,7 +75,12 @@ fn do_start(config: &Config) -> Result<()> {
 fn do_stop(config: &Config) -> Result<()> {
     let pid = match nanobot_daemon::pid_file::PidFile::read_pid(&config.daemon.pid_file)? {
         Some(pid) => pid,
-        None => bail!("No PID file found at {} — is the daemon running?", config.daemon.pid_file),
+        None => {
+            bail!(
+                "No PID file found at {} — is the daemon running?",
+                config.daemon.pid_file
+            )
+        }
     };
 
     if !nanobot_daemon::pid_file::is_process_running(pid) {

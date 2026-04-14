@@ -10,7 +10,9 @@ use nanobot_api::ApiServer;
 use nanobot_bus::MessageBus;
 use nanobot_config::Config;
 use nanobot_core::Usage;
-use nanobot_providers::base::{BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider};
+use nanobot_providers::base::{
+    BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
+};
 use nanobot_providers::ProviderRegistry;
 use nanobot_session::SessionManager;
 use nanobot_tools::ToolRegistry;
@@ -21,7 +23,9 @@ struct MockProvider;
 
 #[async_trait::async_trait]
 impl LlmProvider for MockProvider {
-    fn name(&self) -> &str { "mock" }
+    fn name(&self) -> &str {
+        "mock"
+    }
     async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
         Ok(CompletionResponse {
             content: Some("Mock integration response".to_string()),
@@ -44,7 +48,9 @@ impl LlmProvider for MockProvider {
         };
         Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
     }
-    fn supports_model(&self, _model: &str) -> bool { true }
+    fn supports_model(&self, _model: &str) -> bool {
+        true
+    }
 }
 
 fn make_app() -> axum::Router {
@@ -55,7 +61,8 @@ fn make_app() -> axum::Router {
     let providers = ProviderRegistry::new();
     let tools = ToolRegistry::new();
 
-    let server = ApiServer::with_registries(config, bus, session_manager, providers, tools, Some(8080));
+    let server =
+        ApiServer::with_registries(config, bus, session_manager, providers, tools, Some(8080));
     server.router()
 }
 
@@ -122,7 +129,10 @@ async fn test_list_models_with_provider() {
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let ids = v["data"].as_array().unwrap().iter()
+    let ids = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
         .filter_map(|m| m["id"].as_str().map(String::from))
         .collect::<Vec<_>>();
     assert!(ids.contains(&"mock".to_string()));
@@ -175,7 +185,10 @@ async fn test_chat_completions_empty_messages() {
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(v["error"]["message"].as_str().unwrap().contains("non-empty"));
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("non-empty"));
 }
 
 #[tokio::test]
@@ -196,7 +209,10 @@ async fn test_chat_completions_invalid_temperature() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(v["error"]["message"].as_str().unwrap().contains("Temperature"));
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Temperature"));
 }
 
 #[tokio::test]
@@ -217,7 +233,10 @@ async fn test_chat_completions_zero_max_tokens() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(v["error"]["message"].as_str().unwrap().contains("max_tokens"));
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("max_tokens"));
 }
 
 #[tokio::test]
@@ -289,7 +308,10 @@ async fn test_chat_completions_success() {
     assert_eq!(v["object"], "chat.completion");
     assert_eq!(v["model"], "mock-model");
     assert_eq!(v["choices"][0]["message"]["role"], "assistant");
-    assert_eq!(v["choices"][0]["message"]["content"], "Mock integration response");
+    assert_eq!(
+        v["choices"][0]["message"]["content"],
+        "Mock integration response"
+    );
     assert_eq!(v["choices"][0]["finish_reason"], "stop");
     assert_eq!(v["usage"]["prompt_tokens"], 10);
     assert_eq!(v["usage"]["completion_tokens"], 6);
@@ -315,7 +337,12 @@ async fn test_chat_completions_streaming() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/event-stream"));
 }
 
@@ -341,20 +368,32 @@ async fn test_chat_completions_streaming_three_chunks() {
 
     // Should have exactly 4 SSE data events: role, content, stop, [DONE]
     let data_count = body_str.matches("data:").count();
-    assert_eq!(data_count, 4, "Expected 4 SSE chunks, got {}: {}", data_count, body_str);
+    assert_eq!(
+        data_count, 4,
+        "Expected 4 SSE chunks, got {}: {}",
+        data_count, body_str
+    );
 
     // First chunk: role announcement
-    assert!(body_str.contains("\"role\":\"assistant\"") || body_str.contains("\"role\": \"assistant\""));
+    assert!(
+        body_str.contains("\"role\":\"assistant\"") || body_str.contains("\"role\": \"assistant\"")
+    );
 
     // Second chunk: content
     assert!(body_str.contains("Mock integration response"));
 
     // Third chunk: finish_reason + usage
-    assert!(body_str.contains("\"finish_reason\":\"stop\"") || body_str.contains("\"finish_reason\": \"stop\""));
+    assert!(
+        body_str.contains("\"finish_reason\":\"stop\"")
+            || body_str.contains("\"finish_reason\": \"stop\"")
+    );
     assert!(body_str.contains("\"prompt_tokens\""));
 
     // Fourth event: [DONE] sentinel
-    assert!(body_str.contains("data: [DONE]"), "SSE stream should end with [DONE]");
+    assert!(
+        body_str.contains("data: [DONE]"),
+        "SSE stream should end with [DONE]"
+    );
 }
 
 #[tokio::test]

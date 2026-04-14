@@ -22,7 +22,10 @@ use std::path::PathBuf;
 
 /// Migrate Python nanobot config to nanobot-rs YAML format.
 #[derive(Parser)]
-#[command(name = "migrate", about = "Migrate Python nanobot config to nanobot-rs format")]
+#[command(
+    name = "migrate",
+    about = "Migrate Python nanobot config to nanobot-rs format"
+)]
 struct Cli {
     /// Path to Python nanobot config directory (e.g. ~/.nanobot).
     #[arg(long)]
@@ -62,8 +65,8 @@ fn main() -> Result<()> {
     // Print migration report to stderr so stdout stays clean for --dry-run
     print_report(&result.report);
 
-    let yaml = serde_yaml::to_string(&result.config)
-        .context("Failed to serialize config to YAML")?;
+    let yaml =
+        serde_yaml::to_string(&result.config).context("Failed to serialize config to YAML")?;
 
     if cli.dry_run {
         println!("{}", yaml);

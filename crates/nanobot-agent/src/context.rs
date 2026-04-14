@@ -96,10 +96,10 @@ impl<'a> ContextBuilder<'a> {
 mod tests {
     use super::*;
     use nanobot_bus::events::InboundMessage;
+    use nanobot_config::Config;
     use nanobot_core::{MessageType, Platform};
     use nanobot_session::Session;
     use nanobot_tools::ToolRegistry;
-    use nanobot_config::Config;
 
     fn make_inbound() -> InboundMessage {
         InboundMessage {
@@ -167,8 +167,12 @@ mod tests {
         struct DummyTool;
         #[async_trait]
         impl Tool for DummyTool {
-            fn name(&self) -> &str { "dummy_tool" }
-            fn description(&self) -> &str { "A test tool" }
+            fn name(&self) -> &str {
+                "dummy_tool"
+            }
+            fn description(&self) -> &str {
+                "A test tool"
+            }
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
@@ -259,8 +263,12 @@ mod tests {
         struct AnotherTool;
         #[async_trait]
         impl Tool for AnotherTool {
-            fn name(&self) -> &str { "my_tool" }
-            fn description(&self) -> &str { "tool" }
+            fn name(&self) -> &str {
+                "my_tool"
+            }
+            fn description(&self) -> &str {
+                "tool"
+            }
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }

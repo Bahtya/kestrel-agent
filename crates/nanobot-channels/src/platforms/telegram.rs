@@ -13,9 +13,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Local;
+use parking_lot::Mutex as ParkMutex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
-use parking_lot::Mutex as ParkMutex;
 
 use nanobot_bus::events::InboundMessage;
 use nanobot_core::{MediaAttachment, MessageType, Platform, SessionSource};
@@ -428,8 +428,9 @@ pub enum CallbackResponse {
 }
 
 /// Type-erased async callback handler.
-type BoxedHandler =
-    Box<dyn Fn(CallbackContext) -> Pin<Box<dyn Future<Output = CallbackResponse> + Send>> + Send + Sync>;
+type BoxedHandler = Box<
+    dyn Fn(CallbackContext) -> Pin<Box<dyn Future<Output = CallbackResponse> + Send>> + Send + Sync,
+>;
 
 /// Router that dispatches Telegram callback queries to registered handlers
 /// based on prefix matching.
@@ -546,8 +547,7 @@ impl TelegramChannel {
         match &proxy_url {
             Some(url) => {
                 info!("Telegram HTTP client using proxy: {}", url);
-                let proxy = reqwest::Proxy::all(url)
-                    .expect("Failed to create proxy from env var");
+                let proxy = reqwest::Proxy::all(url).expect("Failed to create proxy from env var");
                 reqwest::Client::builder()
                     .proxy(proxy)
                     .build()
@@ -762,21 +762,10 @@ impl TelegramChannel {
                     if crate::commands::matches_command(text, "reset") {
                         let session_key = format!("telegram:{}", msg.chat.id);
                         let response = crate::commands::handle_reset(&session_key);
-                        Self::send_direct_reply(
-                            &client,
-                            &base_url,
-                            msg.chat.id,
-                            &response,
-                            None,
-                        )
-                        .await;
-                        Self::send_read_receipt(
-                            &client,
-                            &base_url,
-                            msg.chat.id,
-                            msg.message_id,
-                        )
-                        .await;
+                        Self::send_direct_reply(&client, &base_url, msg.chat.id, &response, None)
+                            .await;
+                        Self::send_read_receipt(&client, &base_url, msg.chat.id, msg.message_id)
+                            .await;
                     } else if let Some(response) = crate::commands::try_handle_command(text) {
                         // Built-in command matched — reply directly, skip bus.
                         Self::send_direct_reply(
@@ -787,13 +776,8 @@ impl TelegramChannel {
                             response.keyboard.as_ref(),
                         )
                         .await;
-                        Self::send_read_receipt(
-                            &client,
-                            &base_url,
-                            msg.chat.id,
-                            msg.message_id,
-                        )
-                        .await;
+                        Self::send_read_receipt(&client, &base_url, msg.chat.id, msg.message_id)
+                            .await;
                     } else {
                         match Self::dispatch_message(&handler, &msg).await {
                             Ok(true) => {
@@ -813,14 +797,9 @@ impl TelegramChannel {
                         }
                     }
                 } else if let Some(cq) = update.callback_query {
-                    if let Err(e) = Self::dispatch_callback_query(
-                        &client,
-                        &base_url,
-                        &handler,
-                        &cq,
-                        &router,
-                    )
-                    .await
+                    if let Err(e) =
+                        Self::dispatch_callback_query(&client, &base_url, &handler, &cq, &router)
+                            .await
                     {
                         error!("Failed to dispatch Telegram callback query: {e}");
                     }
@@ -993,15 +972,26 @@ impl TelegramChannel {
             if router_guard.has_handler(&ctx.action.prefix) {
                 // Show loading animation before running the handler.
                 Self::edit_message_text_static(
-                    client, base_url, &chat_id, &message_id, "⏳ Loading...", None,
+                    client,
+                    base_url,
+                    &chat_id,
+                    &message_id,
+                    "⏳ Loading...",
+                    None,
                 )
                 .await;
                 if let Some(response) = router_guard.dispatch(ctx).await {
                     drop(router_guard);
                     // Answer the callback query so the button stops loading.
                     Self::answer_callback_query_static(client, base_url, &cq.id, None, false).await;
-                    Self::execute_callback_response(client, base_url, &chat_id, &message_id, response)
-                        .await;
+                    Self::execute_callback_response(
+                        client,
+                        base_url,
+                        &chat_id,
+                        &message_id,
+                        response,
+                    )
+                    .await;
                     return Ok(());
                 }
             }
@@ -1054,10 +1044,7 @@ impl TelegramChannel {
             "tg_message_id".to_string(),
             serde_json::json!(msg.message_id),
         );
-        metadata.insert(
-            "tg_callback_query_id".to_string(),
-            serde_json::json!(cq.id),
-        );
+        metadata.insert("tg_callback_query_id".to_string(), serde_json::json!(cq.id));
         metadata.insert("tg_callback_data".to_string(), serde_json::json!(data));
 
         let inbound = InboundMessage {
@@ -1124,7 +1111,6 @@ impl TelegramChannel {
         }
     }
 
-
     /// Execute a [`CallbackResponse`] against the Telegram API.
     async fn execute_callback_response(
         client: &reqwest::Client,
@@ -1152,7 +1138,8 @@ impl TelegramChannel {
                 if let (Ok(chat_id_num), Ok(msg_id_num)) =
                     (chat_id.parse::<i64>(), message_id.parse::<i64>())
                 {
-                    let reply_markup = keyboard.map(|kb| serde_json::to_value(&kb).unwrap_or_default());
+                    let reply_markup =
+                        keyboard.map(|kb| serde_json::to_value(&kb).unwrap_or_default());
                     let body = EditMessageTextBody {
                         chat_id: chat_id_num,
                         message_id: msg_id_num,
@@ -1208,7 +1195,10 @@ impl TelegramChannel {
                 async move {
                     let (text, keyboard) = crate::commands::handle_menu_callback(&action);
                     match keyboard {
-                        Some(kb) => CallbackResponse::EditMessage { text, keyboard: Some(kb) },
+                        Some(kb) => CallbackResponse::EditMessage {
+                            text,
+                            keyboard: Some(kb),
+                        },
                         None => CallbackResponse::EditMessage {
                             text,
                             keyboard: Some(
@@ -1260,7 +1250,6 @@ impl TelegramChannel {
             });
         }
     }
-
 
     /// Get a reference-counted handle to the callback router.
     ///
@@ -1448,12 +1437,7 @@ impl BaseChannel for TelegramChannel {
         Ok(())
     }
 
-    async fn send_reaction(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-        emoji: &str,
-    ) -> Result<()> {
+    async fn send_reaction(&self, chat_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         debug!(
             "Sending reaction '{}' to message {} in chat {}",
             emoji, message_id, chat_id
@@ -1857,10 +1841,7 @@ impl TelegramChannel {
 #[allow(dead_code)]
 pub(crate) fn rebuild_callback_data(ctx: &CallbackContext) -> String {
     match &ctx.action.payload {
-        Some(p) => format!(
-            "{}:{}:{}",
-            ctx.action.prefix, ctx.action.action, p
-        ),
+        Some(p) => format!("{}:{}:{}", ctx.action.prefix, ctx.action.action, p),
         None => format!("{}:{}", ctx.action.prefix, ctx.action.action),
     }
 }
@@ -2628,7 +2609,10 @@ mod tests {
             .url_button("Open", "https://example.com")
             .new_row()
             .build();
-        assert_eq!(kb.inline_keyboard[0][0].url, Some("https://example.com".to_string()));
+        assert_eq!(
+            kb.inline_keyboard[0][0].url,
+            Some("https://example.com".to_string())
+        );
         assert_eq!(kb.inline_keyboard[0][0].callback_data, None);
     }
 
@@ -2804,7 +2788,9 @@ mod tests {
     async fn test_answer_callback_query_no_server() {
         let channel = TelegramChannel::new();
         // Will fail to connect but should not panic.
-        let result = channel.answer_callback_query("cb123", Some("Done!"), false).await;
+        let result = channel
+            .answer_callback_query("cb123", Some("Done!"), false)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -2850,9 +2836,7 @@ mod tests {
     #[tokio::test]
     async fn test_router_no_match_returns_none() {
         let mut router = CallbackRouter::new();
-        router.register("confirm", |_ctx| async {
-            CallbackResponse::Acknowledged
-        });
+        router.register("confirm", |_ctx| async { CallbackResponse::Acknowledged });
 
         let ctx = CallbackContext {
             chat_id: "123".into(),
@@ -3014,8 +2998,14 @@ mod tests {
             CallbackResponse::Reply("hi".into()),
             CallbackResponse::Reply("hi".into())
         );
-        assert_eq!(CallbackResponse::RemoveKeyboard, CallbackResponse::RemoveKeyboard);
-        assert_eq!(CallbackResponse::Acknowledged, CallbackResponse::Acknowledged);
+        assert_eq!(
+            CallbackResponse::RemoveKeyboard,
+            CallbackResponse::RemoveKeyboard
+        );
+        assert_eq!(
+            CallbackResponse::Acknowledged,
+            CallbackResponse::Acknowledged
+        );
         assert_eq!(
             CallbackResponse::Toast("ok".into()),
             CallbackResponse::Toast("ok".into())
@@ -3086,10 +3076,8 @@ mod tests {
 
         // Router matches → handler runs, returns Acknowledged.
         // No message sent to bus.
-        let result = TelegramChannel::dispatch_callback_query(
-            &client, base_url, &tx, &cq, &router,
-        )
-        .await;
+        let result =
+            TelegramChannel::dispatch_callback_query(&client, base_url, &tx, &cq, &router).await;
         // Should succeed (HTTP calls to localhost:0 fail but are only warned).
         assert!(result.is_ok() || result.is_err());
     }
@@ -3123,10 +3111,8 @@ mod tests {
             data: Some("unknown:something".to_string()),
         };
 
-        let result = TelegramChannel::dispatch_callback_query(
-            &client, base_url, &tx, &cq, &router,
-        )
-        .await;
+        let result =
+            TelegramChannel::dispatch_callback_query(&client, base_url, &tx, &cq, &router).await;
         if result.is_ok() {
             // Falls through to bus → InboundMessage produced.
             let inbound = rx.try_recv().unwrap();

@@ -71,10 +71,7 @@ impl HealthCheck for ProviderHealthCheck {
             HealthCheckResult {
                 component: "provider".to_string(),
                 status: CheckStatus::Unhealthy,
-                message: format!(
-                    "providers unavailable: {}",
-                    unhealthy.join(", ")
-                ),
+                message: format!("providers unavailable: {}", unhealthy.join(", ")),
                 timestamp: chrono::Local::now(),
             }
         }
@@ -156,9 +153,7 @@ impl ChannelHealthCheck {
     pub fn empty() -> Self {
         Self {
             channel_names: Vec::new(),
-            connected: Arc::new(parking_lot::RwLock::new(
-                std::collections::HashSet::new(),
-            )),
+            connected: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -423,8 +418,8 @@ impl ConfigStoreHealthCheck {
     pub fn from_default_paths() -> Self {
         let config_path = nanobot_config::paths::get_config_path()
             .unwrap_or_else(|_| std::path::PathBuf::from("/dev/null"));
-        let data_dir = nanobot_config::paths::get_data_dir()
-            .unwrap_or_else(|_| std::env::temp_dir());
+        let data_dir =
+            nanobot_config::paths::get_data_dir().unwrap_or_else(|_| std::env::temp_dir());
         Self::new(config_path, data_dir)
     }
 }
@@ -439,9 +434,7 @@ impl HealthCheck for ConfigStoreHealthCheck {
         let mut issues = Vec::new();
 
         // Check config file readability
-        if self.config_path.exists()
-            && std::fs::read_to_string(&self.config_path).is_err()
-        {
+        if self.config_path.exists() && std::fs::read_to_string(&self.config_path).is_err() {
             issues.push(format!(
                 "config file {} is not readable",
                 self.config_path.display()
@@ -470,7 +463,11 @@ impl HealthCheck for ConfigStoreHealthCheck {
                 status: CheckStatus::Healthy,
                 message: format!(
                     "config: {}, data_dir: {}",
-                    if self.config_path.exists() { "present" } else { "default" },
+                    if self.config_path.exists() {
+                        "present"
+                    } else {
+                        "default"
+                    },
                     self.data_dir.display()
                 ),
                 timestamp: chrono::Local::now(),
@@ -645,10 +642,7 @@ impl HealthCheck for ReadinessCheck {
             HealthCheckResult {
                 component: "readiness".to_string(),
                 status: CheckStatus::Unhealthy,
-                message: format!(
-                    "missing providers: {}",
-                    missing.join(", ")
-                ),
+                message: format!("missing providers: {}", missing.join(", ")),
                 timestamp: chrono::Local::now(),
             }
         }
@@ -698,16 +692,14 @@ impl HealthCheck for DeepConfigStoreHealthCheck {
                             if let Some(agent) = parsed.get("agent") {
                                 if agent.get("model").is_none() {
                                     // model is optional — warn but not error
-                                    issues.push("agent.model not set (will use default)".to_string());
+                                    issues
+                                        .push("agent.model not set (will use default)".to_string());
                                 }
                             }
                             // If no agent section at all, that's acceptable (defaults)
                         }
                         Err(e) => {
-                            issues.push(format!(
-                                "config YAML parse error: {}",
-                                e
-                            ));
+                            issues.push(format!("config YAML parse error: {}", e));
                         }
                     }
                 }
@@ -751,7 +743,11 @@ impl HealthCheck for DeepConfigStoreHealthCheck {
                 status: CheckStatus::Healthy,
                 message: format!(
                     "config: {}, data_dir: {}",
-                    if self.config_path.exists() { "present, valid" } else { "default" },
+                    if self.config_path.exists() {
+                        "present, valid"
+                    } else {
+                        "default"
+                    },
                     self.data_dir.display()
                 ),
                 timestamp: chrono::Local::now(),
@@ -760,8 +756,10 @@ impl HealthCheck for DeepConfigStoreHealthCheck {
             // Distinguish between fatal issues (parse errors, not writable)
             // and warnings (missing optional keys)
             let has_fatal = issues.iter().any(|i| {
-                i.contains("not readable") || i.contains("not writable")
-                    || i.contains("parse error") || i.contains("does not exist")
+                i.contains("not readable")
+                    || i.contains("not writable")
+                    || i.contains("parse error")
+                    || i.contains("does not exist")
             });
             HealthCheckResult {
                 component: "config_store".to_string(),
@@ -810,8 +808,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_store_healthy() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr =
-            nanobot_session::SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let mgr = nanobot_session::SessionManager::new(dir.path().to_path_buf()).unwrap();
         let check = SessionStoreHealthCheck::new(mgr);
         let result = check.report_health().await;
 
@@ -823,8 +820,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_store_with_sessions() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr =
-            nanobot_session::SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let mgr = nanobot_session::SessionManager::new(dir.path().to_path_buf()).unwrap();
         mgr.get_or_create("test:a", None);
         mgr.get_or_create("test:b", None);
 
@@ -838,8 +834,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_store_name() {
         let dir = tempfile::tempdir().unwrap();
-        let mgr =
-            nanobot_session::SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let mgr = nanobot_session::SessionManager::new(dir.path().to_path_buf()).unwrap();
         let check = SessionStoreHealthCheck::new(mgr);
         assert_eq!(check.component_name(), "session_store");
     }
@@ -857,12 +852,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_check_all_connected() {
-        let connected = Arc::new(parking_lot::RwLock::new(
-            std::collections::HashSet::from([
-                "telegram".to_string(),
-                "discord".to_string(),
-            ]),
-        ));
+        let connected = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::from([
+            "telegram".to_string(),
+            "discord".to_string(),
+        ])));
         let check = ChannelHealthCheck::new(
             vec!["telegram".to_string(), "discord".to_string()],
             connected,
@@ -875,9 +868,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_check_partial_disconnection() {
-        let connected = Arc::new(parking_lot::RwLock::new(
-            std::collections::HashSet::from(["telegram".to_string()]),
-        ));
+        let connected = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::from([
+            "telegram".to_string(),
+        ])));
         let check = ChannelHealthCheck::new(
             vec!["telegram".to_string(), "discord".to_string()],
             connected,
@@ -891,13 +884,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_check_all_disconnected() {
-        let connected = Arc::new(parking_lot::RwLock::new(
-            std::collections::HashSet::new(),
-        ));
-        let check = ChannelHealthCheck::new(
-            vec!["telegram".to_string()],
-            connected,
-        );
+        let connected = Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
+        let check = ChannelHealthCheck::new(vec!["telegram".to_string()], connected);
         let result = check.report_health().await;
 
         assert_eq!(result.status, CheckStatus::Unhealthy);
@@ -908,10 +896,7 @@ mod tests {
     async fn test_channel_check_dynamic_connection() {
         let connected: Arc<parking_lot::RwLock<std::collections::HashSet<String>>> =
             Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new()));
-        let check = ChannelHealthCheck::new(
-            vec!["ws".to_string()],
-            connected.clone(),
-        );
+        let check = ChannelHealthCheck::new(vec!["ws".to_string()], connected.clone());
 
         // Initially disconnected
         let result = check.report_health().await;
@@ -992,8 +977,12 @@ mod tests {
         struct DummyTool;
         #[async_trait]
         impl Tool for DummyTool {
-            fn name(&self) -> &str { "test_tool" }
-            fn description(&self) -> &str { "A test tool" }
+            fn name(&self) -> &str {
+                "test_tool"
+            }
+            fn description(&self) -> &str {
+                "A test tool"
+            }
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type": "object"})
             }
@@ -1119,17 +1108,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
         std::fs::write(&config_path, "test").unwrap();
-        std::fs::set_permissions(&config_path, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(
+            &config_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .unwrap();
 
         let check = ConfigStoreHealthCheck::new(config_path.clone(), dir.path().to_path_buf());
         let result = check.report_health().await;
 
         // On some systems running as root, the permission restriction doesn't apply
         // so we accept either Unhealthy or Healthy
-        assert!(matches!(result.status, CheckStatus::Unhealthy | CheckStatus::Healthy));
+        assert!(matches!(
+            result.status,
+            CheckStatus::Unhealthy | CheckStatus::Healthy
+        ));
 
         // Restore permissions for cleanup
-        std::fs::set_permissions(&config_path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).ok();
+        std::fs::set_permissions(
+            &config_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .ok();
     }
 
     #[tokio::test]
@@ -1137,28 +1137,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().join("readonly");
         std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(
+            &data_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o444),
+        )
+        .unwrap();
 
-        let check = ConfigStoreHealthCheck::new(
-            dir.path().join("config.yaml"),
-            data_dir.clone(),
-        );
+        let check = ConfigStoreHealthCheck::new(dir.path().join("config.yaml"), data_dir.clone());
         let result = check.report_health().await;
 
         // On some systems running as root, the permission restriction doesn't apply
-        assert!(matches!(result.status, CheckStatus::Unhealthy | CheckStatus::Healthy));
+        assert!(matches!(
+            result.status,
+            CheckStatus::Unhealthy | CheckStatus::Healthy
+        ));
 
         // Restore permissions for cleanup
-        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).ok();
+        std::fs::set_permissions(
+            &data_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .ok();
     }
 
     #[tokio::test]
     async fn test_config_store_name() {
         let dir = tempfile::tempdir().unwrap();
-        let check = ConfigStoreHealthCheck::new(
-            dir.path().join("config.yaml"),
-            dir.path().to_path_buf(),
-        );
+        let check =
+            ConfigStoreHealthCheck::new(dir.path().join("config.yaml"), dir.path().to_path_buf());
         assert_eq!(check.component_name(), "config_store");
     }
 
@@ -1273,7 +1279,9 @@ mod tests {
 
     #[async_trait]
     impl nanobot_providers::base::LlmProvider for MockProviderForReadiness {
-        fn name(&self) -> &str { "mock" }
+        fn name(&self) -> &str {
+            "mock"
+        }
         async fn complete(
             &self,
             _req: nanobot_providers::base::CompletionRequest,
@@ -1298,7 +1306,9 @@ mod tests {
             };
             Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
         }
-        fn supports_model(&self, _model: &str) -> bool { true }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
     }
 
     // === DeepConfigStoreHealthCheck ===
@@ -1360,18 +1370,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().join("readonly");
         std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o444))
-            .unwrap();
+        std::fs::set_permissions(
+            &data_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o444),
+        )
+        .unwrap();
 
-        let check = DeepConfigStoreHealthCheck::new(
-            dir.path().join("config.yaml"),
-            data_dir.clone(),
-        );
+        let check =
+            DeepConfigStoreHealthCheck::new(dir.path().join("config.yaml"), data_dir.clone());
         let result = check.report_health().await;
 
-        assert!(matches!(result.status, CheckStatus::Unhealthy | CheckStatus::Healthy));
+        assert!(matches!(
+            result.status,
+            CheckStatus::Unhealthy | CheckStatus::Healthy
+        ));
 
-        std::fs::set_permissions(&data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o755)).ok();
+        std::fs::set_permissions(
+            &data_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .ok();
     }
 
     #[tokio::test]
@@ -1379,10 +1397,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing_dir = dir.path().join("does_not_exist");
 
-        let check = DeepConfigStoreHealthCheck::new(
-            dir.path().join("config.yaml"),
-            missing_dir,
-        );
+        let check = DeepConfigStoreHealthCheck::new(dir.path().join("config.yaml"), missing_dir);
         let result = check.report_health().await;
 
         assert_eq!(result.status, CheckStatus::Unhealthy);
@@ -1414,14 +1429,9 @@ mod tests {
         let channel_check = ChannelHealthCheck::empty();
         let bus_check = BusHealthCheck::new(bus);
         let tool_check = ToolRegistryHealthCheck::new(nanobot_tools::ToolRegistry::new());
-        let agent_check = AgentLoopHealthCheck::new(
-            Arc::new(parking_lot::RwLock::new(None)),
-            60,
-        );
-        let config_check = ConfigStoreHealthCheck::new(
-            dir.path().join("config.yaml"),
-            dir.path().to_path_buf(),
-        );
+        let agent_check = AgentLoopHealthCheck::new(Arc::new(parking_lot::RwLock::new(None)), 60);
+        let config_check =
+            ConfigStoreHealthCheck::new(dir.path().join("config.yaml"), dir.path().to_path_buf());
 
         let checks: Vec<&dyn HealthCheck> = vec![
             &provider_check,
@@ -1487,8 +1497,9 @@ mod tests {
     async fn test_mixed_checks_with_heartbeat_service() {
         let dir = tempfile::tempdir().unwrap();
         let config = nanobot_config::Config::default();
-        let svc = nanobot_heartbeat::HeartbeatService::with_data_dir(config, dir.path().to_path_buf())
-            .with_failures_before_restart(3);
+        let svc =
+            nanobot_heartbeat::HeartbeatService::with_data_dir(config, dir.path().to_path_buf())
+                .with_failures_before_restart(3);
 
         // Register a healthy check
         svc.register_check(std::sync::Arc::new(SessionStoreHealthCheck::new(

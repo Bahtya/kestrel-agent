@@ -71,7 +71,9 @@ impl LlmProvider for MockProvider {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
-        let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let count = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // First call: tool call (if configured)
         if count == 0 {
@@ -296,8 +298,7 @@ async fn test_full_message_pipeline() {
     let bus = MessageBus::new();
 
     // Session manager
-    let session_manager =
-        SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
+    let session_manager = SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
 
     // Provider registry with mock
     let mut provider_registry = nanobot_providers::ProviderRegistry::new();
@@ -351,24 +352,34 @@ async fn test_full_message_pipeline() {
     bus.publish_inbound(inbound).await.unwrap();
 
     // Collect events until Completed
-    let all_events = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::Completed { .. })
-    }, 3000).await;
+    let all_events = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::Completed { .. }),
+        3000,
+    )
+    .await;
 
-    let has_completed = all_events.iter().any(|e| matches!(e, AgentEvent::Completed { .. }));
+    let has_completed = all_events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Completed { .. }));
     assert!(has_completed, "Expected a Completed event");
 
     // Verify the outbound message reached the mock channel
     let recorded = sent.lock().unwrap().clone();
-    assert_eq!(recorded.len(), 1, "Expected 1 outbound message, got {:?}", recorded);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "Expected 1 outbound message, got {:?}",
+        recorded
+    );
     assert_eq!(recorded[0].0, "chat_42");
     assert_eq!(recorded[0].1, "The answer is 42.");
     assert_eq!(recorded[0].2, Some("msg_1".to_string())); // reply_to
 
     // Verify events: Started → Completed
-    let has_started = all_events.iter().any(|e| {
-        matches!(e, AgentEvent::Started { session_key } if session_key.contains("chat_42"))
-    });
+    let has_started = all_events.iter().any(
+        |e| matches!(e, AgentEvent::Started { session_key } if session_key.contains("chat_42")),
+    );
     assert!(has_started, "Expected a Started event for chat_42");
 
     // Cleanup
@@ -388,8 +399,7 @@ async fn test_multi_turn_conversation() {
     let config = make_test_config();
     let bus = MessageBus::new();
 
-    let session_manager =
-        SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
+    let session_manager = SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
 
     let mut provider_registry = nanobot_providers::ProviderRegistry::new();
     provider_registry.register("mock", MockProvider::new("Response."));
@@ -434,18 +444,34 @@ async fn test_multi_turn_conversation() {
     // Turn 1
     let msg1 = make_inbound("Hello", "chat_multi");
     bus.publish_inbound(msg1).await.unwrap();
-    let events1 = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::Completed { .. })
-    }, 3000).await;
-    assert!(events1.iter().any(|e| matches!(e, AgentEvent::Completed { .. })), "Turn 1 should complete");
+    let events1 = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::Completed { .. }),
+        3000,
+    )
+    .await;
+    assert!(
+        events1
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Completed { .. })),
+        "Turn 1 should complete"
+    );
 
     // Turn 2
     let msg2 = make_inbound("Follow up", "chat_multi");
     bus.publish_inbound(msg2).await.unwrap();
-    let events2 = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::Completed { .. })
-    }, 3000).await;
-    assert!(events2.iter().any(|e| matches!(e, AgentEvent::Completed { .. })), "Turn 2 should complete");
+    let events2 = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::Completed { .. }),
+        3000,
+    )
+    .await;
+    assert!(
+        events2
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Completed { .. })),
+        "Turn 2 should complete"
+    );
 
     // Both replies should be recorded
     let recorded = sent.lock().unwrap().clone();
@@ -456,7 +482,10 @@ async fn test_multi_turn_conversation() {
     // Session should exist and have entries
     let keys = session_manager.active_session_keys();
     assert_eq!(keys.len(), 1, "Should have exactly 1 session");
-    assert!(keys[0].contains("chat_multi"), "Session key should contain chat_multi");
+    assert!(
+        keys[0].contains("chat_multi"),
+        "Session key should contain chat_multi"
+    );
 
     outbound_handle.abort();
     agent_handle.abort();
@@ -476,8 +505,7 @@ async fn test_tool_call_flow() {
     let config = make_test_config();
     let bus = MessageBus::new();
 
-    let session_manager =
-        SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
+    let session_manager = SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
 
     // Mock provider: first call returns tool_call, second returns text
     let mut provider_registry = nanobot_providers::ProviderRegistry::new();
@@ -533,23 +561,35 @@ async fn test_tool_call_flow() {
     bus.publish_inbound(msg).await.unwrap();
 
     // Wait for completion, collecting all events
-    let all_events = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::Completed { .. })
-    }, 5000).await;
-    assert!(all_events.iter().any(|e| matches!(e, AgentEvent::Completed { .. })),
-        "Expected completion after tool call flow");
+    let all_events = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::Completed { .. }),
+        5000,
+    )
+    .await;
+    assert!(
+        all_events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Completed { .. })),
+        "Expected completion after tool call flow"
+    );
 
     // Verify final outbound message
     let recorded = sent.lock().unwrap().clone();
-    assert_eq!(recorded.len(), 1, "Expected 1 final outbound, got {:?}", recorded);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "Expected 1 final outbound, got {:?}",
+        recorded
+    );
     assert_eq!(recorded[0].0, "chat_tool");
     // The mock provider returns "Tool executed successfully." on the 2nd call
     assert_eq!(recorded[0].1, "Tool executed successfully.");
 
     // Verify we got a ToolCall event
-    let has_tool_call = all_events.iter().any(|e| {
-        matches!(e, AgentEvent::ToolCall { tool_name, .. } if tool_name == "shell")
-    });
+    let has_tool_call = all_events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolCall { tool_name, .. } if tool_name == "shell"));
     assert!(has_tool_call, "Expected a ToolCall event for 'shell'");
 
     outbound_handle.abort();
@@ -567,11 +607,8 @@ async fn test_cron_fires_event() {
     let bus = MessageBus::new();
     let mut event_rx = bus.subscribe_events();
 
-    let cron_service = nanobot_cron::CronService::with_bus(
-        tmp_dir.path().to_path_buf(),
-        bus,
-    )
-    .unwrap();
+    let cron_service =
+        nanobot_cron::CronService::with_bus(tmp_dir.path().to_path_buf(), bus).unwrap();
 
     // Add a one-shot "at" job that fires immediately (past timestamp)
     let schedule = nanobot_cron::CronSchedule {
@@ -587,7 +624,9 @@ async fn test_cron_fires_event() {
         chat_id: None,
         deliver: false,
     };
-    let job = cron_service.add_job(schedule, payload, Some("backup_job".to_string())).unwrap();
+    let job = cron_service
+        .add_job(schedule, payload, Some("backup_job".to_string()))
+        .unwrap();
 
     // Tick to fire the job
     let fired = cron_service.tick();
@@ -595,14 +634,23 @@ async fn test_cron_fires_event() {
     assert_eq!(fired[0].id, job.id);
 
     // Verify event on bus
-    let events = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::CronFired { .. })
-    }, 1000).await;
+    let events = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::CronFired { .. }),
+        1000,
+    )
+    .await;
 
-    let cron_event = events.iter().find(|e| matches!(e, AgentEvent::CronFired { .. }));
+    let cron_event = events
+        .iter()
+        .find(|e| matches!(e, AgentEvent::CronFired { .. }));
     assert!(cron_event.is_some(), "Expected CronFired event on bus");
     match cron_event.unwrap() {
-        AgentEvent::CronFired { job_id, job_name, message } => {
+        AgentEvent::CronFired {
+            job_id,
+            job_name,
+            message,
+        } => {
             assert_eq!(*job_id, job.id);
             assert_eq!(job_name.as_deref(), Some("backup_job"));
             assert_eq!(message, "Run daily backup");
@@ -650,14 +698,23 @@ async fn test_heartbeat_health_check() {
     assert!(matches!(snapshot.checks[0].status, CheckStatus::Unhealthy));
 
     // Verify event emitted
-    let events = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::HeartbeatCheck { .. })
-    }, 1000).await;
+    let events = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::HeartbeatCheck { .. }),
+        1000,
+    )
+    .await;
 
-    let hb_event = events.iter().find(|e| matches!(e, AgentEvent::HeartbeatCheck { .. }));
+    let hb_event = events
+        .iter()
+        .find(|e| matches!(e, AgentEvent::HeartbeatCheck { .. }));
     assert!(hb_event.is_some(), "Expected HeartbeatCheck event");
     match hb_event.unwrap() {
-        AgentEvent::HeartbeatCheck { healthy, checks_total, checks_failed } => {
+        AgentEvent::HeartbeatCheck {
+            healthy,
+            checks_total,
+            checks_failed,
+        } => {
             assert!(!healthy);
             assert_eq!(*checks_total, 1);
             assert_eq!(*checks_failed, 1);
@@ -679,7 +736,9 @@ async fn test_heartbeat_mixed_checks() {
     struct HealthyCheck;
     #[async_trait]
     impl HealthCheck for HealthyCheck {
-        fn component_name(&self) -> &str { "healthy_svc" }
+        fn component_name(&self) -> &str {
+            "healthy_svc"
+        }
         async fn report_health(&self) -> HealthCheckResult {
             HealthCheckResult {
                 component: "healthy_svc".to_string(),
@@ -693,7 +752,9 @@ async fn test_heartbeat_mixed_checks() {
     struct UnhealthyCheck;
     #[async_trait]
     impl HealthCheck for UnhealthyCheck {
-        fn component_name(&self) -> &str { "broken_svc" }
+        fn component_name(&self) -> &str {
+            "broken_svc"
+        }
         async fn report_health(&self) -> HealthCheckResult {
             HealthCheckResult {
                 component: "broken_svc".to_string(),
@@ -712,13 +773,23 @@ async fn test_heartbeat_mixed_checks() {
     assert!(!snapshot.healthy, "One unhealthy → overall unhealthy");
     assert_eq!(snapshot.checks.len(), 2);
 
-    let events = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::HeartbeatCheck { .. })
-    }, 1000).await;
+    let events = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::HeartbeatCheck { .. }),
+        1000,
+    )
+    .await;
 
-    let hb_event = events.iter().find(|e| matches!(e, AgentEvent::HeartbeatCheck { .. }));
+    let hb_event = events
+        .iter()
+        .find(|e| matches!(e, AgentEvent::HeartbeatCheck { .. }));
     assert!(hb_event.is_some());
-    if let AgentEvent::HeartbeatCheck { checks_total, checks_failed, .. } = hb_event.unwrap() {
+    if let AgentEvent::HeartbeatCheck {
+        checks_total,
+        checks_failed,
+        ..
+    } = hb_event.unwrap()
+    {
         assert_eq!(*checks_total, 2);
         assert_eq!(*checks_failed, 1);
     }
@@ -731,8 +802,7 @@ async fn test_event_ordering_started_before_completed() {
     let config = make_test_config();
     let bus = MessageBus::new();
 
-    let session_manager =
-        SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
+    let session_manager = SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
 
     let mut provider_registry = nanobot_providers::ProviderRegistry::new();
     provider_registry.register("mock", MockProvider::new("Hi."));
@@ -778,13 +848,20 @@ async fn test_event_ordering_started_before_completed() {
     bus.publish_inbound(msg).await.unwrap();
 
     // Collect events until Completed
-    let events = collect_events_until(&mut event_rx, |e| {
-        matches!(e, AgentEvent::Completed { .. })
-    }, 3000).await;
+    let events = collect_events_until(
+        &mut event_rx,
+        |e| matches!(e, AgentEvent::Completed { .. }),
+        3000,
+    )
+    .await;
 
     // Find positions
-    let started_pos = events.iter().position(|e| matches!(e, AgentEvent::Started { .. }));
-    let completed_pos = events.iter().position(|e| matches!(e, AgentEvent::Completed { .. }));
+    let started_pos = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Started { .. }));
+    let completed_pos = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Completed { .. }));
 
     assert!(started_pos.is_some(), "Should have a Started event");
     assert!(completed_pos.is_some(), "Should have a Completed event");
@@ -805,8 +882,7 @@ async fn test_multi_platform_routing() {
     let config = make_test_config();
     let bus = MessageBus::new();
 
-    let session_manager =
-        SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
+    let session_manager = SessionManager::new(tmp_dir.path().to_path_buf()).unwrap();
 
     let mut provider_registry = nanobot_providers::ProviderRegistry::new();
     provider_registry.register("mock", MockProvider::new("Multi-platform reply."));
@@ -879,25 +955,35 @@ async fn test_multi_platform_routing() {
     bus.publish_inbound(dc_msg).await.unwrap();
 
     // Wait for both completions — collect until we see 2 Completed events
-    let all_events = collect_events_until(&mut event_rx, |e| {
-        // Stop after seeing the second Completed event — use a counter workaround
-        matches!(e, AgentEvent::Completed { .. })
-    }, 5000).await;
-    let completed: Vec<_> = all_events.iter()
+    let all_events = collect_events_until(
+        &mut event_rx,
+        |e| {
+            // Stop after seeing the second Completed event — use a counter workaround
+            matches!(e, AgentEvent::Completed { .. })
+        },
+        5000,
+    )
+    .await;
+    let completed: Vec<_> = all_events
+        .iter()
         .filter(|e| matches!(e, AgentEvent::Completed { .. }))
         .collect();
     // If we only got one, wait for the second
     let final_events = if completed.len() < 2 {
-        let more = collect_events_until(&mut event_rx, |e| {
-            matches!(e, AgentEvent::Completed { .. })
-        }, 5000).await;
+        let more = collect_events_until(
+            &mut event_rx,
+            |e| matches!(e, AgentEvent::Completed { .. }),
+            5000,
+        )
+        .await;
         let mut combined = all_events;
         combined.extend(more);
         combined
     } else {
         all_events
     };
-    let completed_count = final_events.iter()
+    let completed_count = final_events
+        .iter()
         .filter(|e| matches!(e, AgentEvent::Completed { .. }))
         .count();
     assert_eq!(completed_count, 2, "Expected 2 Completed events");

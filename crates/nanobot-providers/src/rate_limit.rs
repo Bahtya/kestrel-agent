@@ -129,7 +129,12 @@ impl TokenBucket {
         loop {
             let current = self.tokens.load(Ordering::Acquire);
             let new_tokens = (current + tokens_to_add).min(self.capacity);
-            match self.tokens.compare_exchange(current, new_tokens, Ordering::AcqRel, Ordering::Acquire) {
+            match self.tokens.compare_exchange(
+                current,
+                new_tokens,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return new_tokens,
                 Err(_) => continue, // Another thread refilled, retry
             }
@@ -143,7 +148,12 @@ impl TokenBucket {
             if current == 0 {
                 return false;
             }
-            match self.tokens.compare_exchange(current, current - 1, Ordering::AcqRel, Ordering::Acquire) {
+            match self.tokens.compare_exchange(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return true,
                 Err(_) => continue,
             }
@@ -157,7 +167,10 @@ impl RateLimiter for TokenBucket {
         loop {
             self.refill();
             if self.consume_one() {
-                trace!(available = self.tokens.load(Ordering::Relaxed), "Rate limit token acquired");
+                trace!(
+                    available = self.tokens.load(Ordering::Relaxed),
+                    "Rate limit token acquired"
+                );
                 return;
             }
             // Wait for a fraction of the refill interval before retrying

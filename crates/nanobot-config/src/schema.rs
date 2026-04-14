@@ -995,7 +995,10 @@ cron:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(config.cron.enabled);
-        assert_eq!(config.cron.state_file, Some("/tmp/cron_state.json".to_string()));
+        assert_eq!(
+            config.cron.state_file,
+            Some("/tmp/cron_state.json".to_string())
+        );
         assert_eq!(config.cron.tick_secs, 30);
     }
 

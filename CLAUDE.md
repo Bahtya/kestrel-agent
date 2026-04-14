@@ -12,7 +12,7 @@ Rust multi-platform AI agent framework. Binary: `nanobot-rs`. Config: `~/.nanobo
 
 ## Architecture
 
-12 crates + binary. Read individual crate source for details.
+15 crates + binary. Read individual crate source for details.
 
 ```
 nanobot-core      → Types, errors, constants
@@ -22,14 +22,19 @@ nanobot-session   → SQLite conversation store
 nanobot-security  → SSRF protection, URL validation
 nanobot-providers → LLM providers (OpenAI-compat, Anthropic) with retry
 nanobot-tools     → Tool registry + builtins (shell, web, fs, cron, search, spawn, message, skills)
-nanobot-agent     → Agent loop, context, memory, compaction, sub-agents
+nanobot-agent     → Agent loop, context, compaction, sub-agents
 nanobot-cron      → Tick-based scheduler with JSON state
 nanobot-heartbeat → Health checks, auto-restart, exponential backoff
 nanobot-channels  → Telegram (polling) + Discord (WebSocket) via ChannelManager
 nanobot-api       → OpenAI-compatible HTTP API (Axum, SSE streaming)
+nanobot-daemon    → Unix daemon (double-fork, PID file, signal handling)
+nanobot-memory    → MemoryStore trait, HotStore (L1), WarmStore/LanceDB (L2)
+nanobot-skill     → Skill trait, TOML manifests, SkillRegistry, SkillCompiler
+nanobot-learning  → LearningEvent bus, event processors, prompt assembly
 ```
 
 Message flow: `InboundMessage → Bus → AgentLoop → (Provider + Tools) → OutboundMessage → Bus → Channel`
+Evolution flow: `LearningEvent → EventBus → Processors → (SkillCreate / MemoryUpdate / PromptAdjust)`
 
 ## Commands
 
@@ -37,40 +42,54 @@ Message flow: `InboundMessage → Bus → AgentLoop → (Provider + Tools) → O
 
 CLI subcommands: `agent`, `gateway`, `serve`, `heartbeat`, `health`, `setup`, `status`, `config validate`, `config migrate`
 
-## Design Principles (pointers, not duplication)
+## Design Principles
 
-- **Thin harness, fat skills**: See Garry Tan's article. Harness = 4 things only (loop, files, context, safety). Complexity goes in skill files.
-- **Latent vs Deterministic**: Judgment/synthesis → model (latent). Parsing/validation/counting → code (deterministic). Never mix them up.
-- **Context engineering**: JIT loading, compaction, structured notes outside context window. See Anthropic's blog.
+- **Thin harness, fat skills**: Harness = loop, files, context, safety only. Complexity in skill files.
+- **Latent vs Deterministic**: Judgment → model. Parsing/validation → code. Never mix.
+- **Context engineering**: JIT loading, compaction, structured notes outside context window.
 - **Fewer, better tools**: Consolidate operations. Token-efficient returns. Poka-yoke.
+- **LanceDB over SQLite FTS5**: Semantic vector search replaces keyword full-text search for memory/sessions.
+- **TOML over YAML**: Rust-native parsing for skill manifests and config.
 
-## Current Sprint: Sprint 2 — Native Daemon
+## Sprint 3: Self-Evolution MVP
 
-**Goal**: Add native Unix daemon mode, inspired by Cloudflare Pingora's Server/Service architecture.
+**Goal**: Implement Hermes Agent's self-evolution features in Rust — memory, skills, learning events.
 
-**Reference**: Pingora source at /tmp/pingora/ (if cloned). Key files:
-- `pingora-core/src/server/mod.rs` — Server lifecycle (new → bootstrap → run_forever)
-- `pingora-core/src/server/daemon.rs` — daemonize with `daemonize` crate
-- `pingora-core/src/services/mod.rs` — Service trait, shutdown propagation
-- `pingora-core/src/services/background.rs` — BackgroundService trait
+**3 parallel agents → 3 new crates:**
 
-**What to build**: New `crates/nanobot-daemon/` crate with: daemonize (double-fork), PID file (flock), signal handling (SIGTERM/SIGINT/SIGHUP via tokio::signal::unix), file logging (tracing-appender). Integrate into main.rs as `daemon` subcommand (start/stop/restart/status) and into gateway.rs signal handling.
+| Agent | Branch | New Crate | Scope | Issue |
+|-------|--------|-----------|-------|-------|
+| cc-evolve-memory | feat/evolve-memory | nanobot-memory | MemoryStore, HotStore, WarmStore(LanceDB) | #6 |
+| cc-evolve-skill | feat/evolve-skill | nanobot-skill | Skill trait, TOML manifest, SkillRegistry | #7 |
+| cc-evolve-learn | feat/evolve-learn | nanobot-learning | LearningEvent, EventBus, prompt assembly | #8 |
 
-**Design constraints**:
-- Pingora pattern: daemonize runs BEFORE tokio runtime starts (fork kills threads)
-- PID file: use flock(LOCK_EX|LOCK_NB) for atomic lock, not just file existence check
-- Signals: async via tokio::signal::unix::signal(), NOT libc signal()
-- Graceful shutdown: configurable grace_period (default 30s), then force exit
-- Config schema: add `daemon:` section (enabled, pid_file, log_dir, working_directory)
+**Key decisions** (from Six Hats analysis):
+- Memory is the foundation (ROI ★★★★★) → build first
+- Skills are the flywheel (auto-patch = exponential improvement)
+- LanceDB replaces Hermes's SQLite FTS5 for semantic memory search
+- Learning events enable the feedback loop (tool success/failure → skill refinement)
 
-**Full spec**: See SPRINT.md in project root.
+## Research References (Six Hats Analysis)
+
+Six Hat analysis documents at `/tmp/hats/` contain deep Hermes source analysis + nanobot-rust migration specs. Key sections:
+
+| Hat | File | Key Sections |
+|-----|------|-------------|
+| 🔵 Blue | `01-blue-hat-architecture.md` | §2 Self-evolution loop, §3 KEPA engine, §5 Memory system |
+| ⚪ White | `02-white-hat-specification.md` | §1 Memory data model, §2 Skill data model, §3 Self-review, §6 Tool system |
+| 🔴 Red | `03-red-hat-critique.md` | §1 Design smells, §4 Migration difficulty ranking |
+| ⚫ Black | `04-black-hat-risks.md` | §5 Python→Rust pitfalls, §6 Migration safeguards |
+| 🟡 Yellow | `05-yellow-hat-value.md` | §2 MVP definition, §7 Implementation order, §6 2-week plan |
+| 🟢 Green | `06-green-hat-design.md` | §1 Skill architecture, §2 Event-driven learning, §3 Memory layers, §8 3-phase plan |
+
+**Phase plan** (Green Hat §8): Phase 1 MVP (2-3wk) → Phase 2 Core (4-6wk) → Phase 3 Advanced (6-8wk)
 
 ## Pitfalls
 
 - Bus uses tokio broadcast — receivers must handle lag or drop messages.
-- Session store uses SQLite — concurrent access needs care.
 - Provider 429 handling: exponential backoff, not immediate retry.
 - Tests touching filesystem: use tempdir pattern.
-- daemonize MUST run before tokio runtime — fork kills all threads in parent
-- PID file locking: use flock, not "check if file exists" — race condition
-- Signal handlers: tokio::signal::unix requires Unix platform — cfg(target_family = "unix") guard
+- daemonize MUST run before tokio runtime — fork kills all threads.
+- LanceDB: async API, needs runtime spawn for background index maintenance.
+- New crates must be added to workspace Cargo.toml `[workspace] members`.
+- nanobot-learning depends on types from nanobot-memory and nanobot-skill — use re-exports or shared types from nanobot-core.

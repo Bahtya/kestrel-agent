@@ -29,7 +29,7 @@ OpenAI-compatible clients to any LLM provider through a unified agent loop.
 - **Skill files** — markdown-based skill definitions with hot-reload
 - **Provider resilience** — automatic retry with exponential backoff on 429s
 - **SSRF protection** — network allowlist/denylist and URL validation
-- **Native daemon mode** — start/stop/restart/status with PID file, signal handling, file logging
+- **Native daemon mode** — double-fork daemonization, PID file with flock, signal handling (SIGTERM/SIGINT/SIGHUP), graceful shutdown with log flushing, log rotation (daily)
 
 ## Architecture
 
@@ -125,16 +125,16 @@ nanobot-rs heartbeat
 # Show system status
 nanobot-rs status
 
-# Start as daemon (background, PID file)
+# Start as daemon (background, double-fork, PID file + flock)
 nanobot-rs daemon start
 
-# Check status
+# Check status (auto-cleans stale PID files from crashed instances)
 nanobot-rs daemon status
 
-# Stop gracefully (SIGTERM)
+# Stop gracefully (SIGTERM, configurable grace period)
 nanobot-rs daemon stop
 
-# Restart (stop + start)
+# Restart (stop + re-exec)
 nanobot-rs daemon restart
 ```
 
@@ -177,9 +177,9 @@ security:
       - "192.168.0.0/16"
 
 daemon:
-  enabled: false          # auto-daemonize on gateway/serve start
   pid_file: ~/.nanobot-rs/nanobot-rs.pid
   log_dir: ~/.nanobot-rs/logs
+  working_directory: /
   grace_period_secs: 30
 ```
 
@@ -198,7 +198,7 @@ daemon:
 | `config migrate` | Migrate Python nanobot config to nanobot-rs format |
 | `setup` | Interactive configuration wizard |
 | `status` | Show current configuration and system status |
-| `daemon start/stop/restart/status` | Native daemon management with PID file and signal handling |
+| `daemon start/stop/restart/status` | Native Unix daemon: double-fork, PID file (flock), SIGTERM/SIGINT/SIGHUP, log rotation |
 
 ## Crates
 

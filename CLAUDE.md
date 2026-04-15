@@ -82,7 +82,7 @@ Merged to main. 3 new crates: nanobot-memory (50 tests), nanobot-skill (68 tests
 
 ## Research References (Six Hats Analysis)
 
-Six Hat analysis documents at `/tmp/hats/` contain deep Hermes source analysis + nanobot-rust migration specs. Key sections:
+Six Hat analysis documents at `docs/` contain deep Hermes source analysis + nanobot-rust migration specs. Key sections:
 
 | Hat | File | Key Sections |
 |-----|------|-------------|

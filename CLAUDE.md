@@ -9,6 +9,13 @@ Rust multi-platform AI agent framework. Binary: `nanobot-rs`. Config: `~/.nanobo
 - **Every feature needs tests** before commit. Tests are deterministic — no LLM output in assertions.
 - **Commit + push** after each complete feature. Don't accumulate uncommitted changes.
 - **Doc comments** on all `pub` functions (`///` style).
+- **GitHub Issue lifecycle (MANDATORY)**:
+  1. At task start: `gh issue comment #N --body "Starting work on this issue. Branch: <branch>"`
+  2. After each significant milestone: `gh issue comment #N --body "<what was done>"` (e.g. "Added X field to Y struct, tests pass")
+  3. After commit+push: `gh issue comment #N --body "Commit <hash>: <summary>. All tests pass."`
+  4. When done: `gh issue close #N --comment "Merged to <branch>. <final summary>"`
+  - **Repo flag**: always use `--repo Bahtya/nanobot-rust` with gh commands.
+  - **Why**: Issues are the shared coordination layer. Other agents and the supervisor read them to track progress. If you skip this, nobody knows what you've done.
 
 ## Architecture
 

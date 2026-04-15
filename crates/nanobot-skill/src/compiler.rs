@@ -34,10 +34,22 @@ impl SkillCompiler {
     }
 
     /// Compile a TOML manifest file from disk.
+    ///
+    /// If a companion `<name>.md` file exists next to the TOML manifest, its content
+    /// is loaded as the skill's detailed instructions.
     pub fn compile_file(&self, path: &Path) -> SkillResult<CompiledSkill> {
         let content = std::fs::read_to_string(path)?;
         let name = path.display().to_string();
-        self.compile_str(&name, &content)
+        let mut skill = self.compile_str(&name, &content)?;
+
+        // Check for companion instructions file
+        let md_path = path.with_extension("md");
+        if md_path.exists() {
+            let instructions = std::fs::read_to_string(&md_path)?;
+            skill.set_instructions(instructions);
+        }
+
+        Ok(skill)
     }
 
     /// Validate a parsed manifest, returning an error on failure.

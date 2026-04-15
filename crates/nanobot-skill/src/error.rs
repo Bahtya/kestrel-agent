@@ -56,6 +56,14 @@ pub enum SkillError {
     /// The skill directory does not exist.
     #[error("Skills directory not found: {0}")]
     DirectoryNotFound(String),
+
+    /// The skills directory has not been configured on the registry.
+    #[error("Skills directory not configured on registry")]
+    SkillsDirNotSet,
+
+    /// Failed to serialize a skill manifest to TOML.
+    #[error("Failed to serialize manifest: {0}")]
+    SerializeFailed(#[from] toml::ser::Error),
 }
 
 /// Convenience alias for results using [`SkillError`].
@@ -135,5 +143,20 @@ mod tests {
 
         let err: SkillResult<String> = Err(SkillError::NotFound("x".to_string()));
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_skills_dir_not_set_display() {
+        let err = SkillError::SkillsDirNotSet;
+        assert!(format!("{err}").contains("not configured"));
+    }
+
+    #[test]
+    fn test_serialize_failed_display() {
+        // Create a type that fails to serialize to TOML
+        let err = toml::to_string(&std::f64::NAN).unwrap_err();
+        let skill_err: SkillError = err.into();
+        assert!(matches!(skill_err, SkillError::SerializeFailed(_)));
+        assert!(format!("{skill_err}").contains("serialize"));
     }
 }

@@ -388,6 +388,8 @@ mod tests {
             steps: vec![],
             pitfalls: vec![],
             category: "test".to_string(),
+            deprecated: None,
+            deprecation_reason: None,
         };
         let path = dir.join(format!("{name}.toml"));
         std::fs::write(&path, toml::to_string(&manifest).unwrap()).unwrap();
@@ -480,6 +482,8 @@ mod tests {
             steps: vec!["Apply manifests".to_string(), "Verify rollout".to_string()],
             pitfalls: vec!["Do not deploy on Fridays".to_string()],
             category: "devops".to_string(),
+            deprecated: None,
+            deprecation_reason: None,
         };
         let path = skills_dir.join("deploy-k8s.toml");
         std::fs::write(&path, toml::to_string(&manifest).unwrap()).unwrap();

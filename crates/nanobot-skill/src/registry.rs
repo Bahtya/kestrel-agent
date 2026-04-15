@@ -1,15 +1,18 @@
-//! Skill registry — register, query, and match skills by keyword.
+//! Skill registry — register, query, match, and persist skills.
 //!
 //! The registry holds compiled skills in an `Arc<RwLock<HashMap>>` and provides
-//! keyword-based matching against user input.
+//! keyword-based matching against user input. When configured with a skills directory,
+//! it can also create, update, and deprecate skills on disk.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 use tokio::sync::RwLock as AsyncRwLock;
 
 use crate::error::{SkillError, SkillResult};
+use crate::manifest::SkillManifestBuilder;
 use crate::skill::{CompiledSkill, Skill};
 
 /// A scored skill match returned by [`SkillRegistry::match_skills`].
@@ -24,10 +27,13 @@ pub struct SkillMatch {
 /// Central registry for loaded skills.
 ///
 /// Thread-safe via `Arc<AsyncRwLock>`. Skills are stored by name and can be
-/// queried by keyword matching against trigger lists.
+/// queried by keyword matching against trigger lists. When a `skills_dir` is
+/// configured, the registry can also create, update, and deprecate skills on disk.
 #[derive(Debug, Clone)]
 pub struct SkillRegistry {
     skills: Arc<AsyncRwLock<HashMap<String, Arc<RwLock<CompiledSkill>>>>>,
+    /// Optional directory where skill TOML manifests and Markdown instructions are stored.
+    skills_dir: Option<PathBuf>,
 }
 
 impl SkillRegistry {
@@ -35,7 +41,23 @@ impl SkillRegistry {
     pub fn new() -> Self {
         Self {
             skills: Arc::new(AsyncRwLock::new(HashMap::new())),
+            skills_dir: None,
         }
+    }
+
+    /// Configure the skills directory for write operations.
+    ///
+    /// Must be set before calling [`create_skill`](Self::create_skill),
+    /// [`update_skill_instructions`](Self::update_skill_instructions), or
+    /// [`deprecate_skill`](Self::deprecate_skill).
+    pub fn with_skills_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.skills_dir = Some(dir.into());
+        self
+    }
+
+    /// Return the configured skills directory, if any.
+    pub fn skills_dir(&self) -> Option<&Path> {
+        self.skills_dir.as_deref()
     }
 
     /// Register a compiled skill.
@@ -80,13 +102,18 @@ impl SkillRegistry {
 
     /// Match skills against a query string, sorted by descending score.
     ///
-    /// Returns skills with a score > 0.0, sorted from best to worst match.
+    /// Returns non-deprecated skills with a score > 0.0, sorted from best to worst match.
+    /// Deprecated skills are excluded from results.
     pub async fn match_skills(&self, query: &str) -> Vec<SkillMatch> {
         let skills = self.skills.read().await;
         let mut matches: Vec<SkillMatch> = Vec::new();
 
         for (name, skill) in skills.iter() {
-            let score = skill.read().matches(query);
+            let guard = skill.read();
+            if guard.is_deprecated() {
+                continue;
+            }
+            let score = guard.matches(query);
             if score > 0.0 {
                 matches.push(SkillMatch {
                     name: name.clone(),
@@ -116,6 +143,190 @@ impl SkillRegistry {
         skill.write().update_confidence(event);
         Ok(())
     }
+
+    /// Create a new skill with a TOML manifest and Markdown instructions file.
+    ///
+    /// Writes a `<name>.toml` manifest and a `<name>.md` instructions file to the
+    /// configured skills directory using atomic writes (temp file + rename). The new
+    /// skill is automatically registered in the registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillError::SkillsDirNotSet`] if no skills directory is configured,
+    /// [`SkillError::AlreadyExists`] if a skill with the same name already exists,
+    /// or an I/O error if writing fails.
+    pub async fn create_skill(
+        &self,
+        name: &str,
+        description: &str,
+        instructions: &str,
+    ) -> SkillResult<()> {
+        let dir = self
+            .skills_dir
+            .as_deref()
+            .ok_or(SkillError::SkillsDirNotSet)?;
+
+        // Ensure the directory exists
+        std::fs::create_dir_all(dir)?;
+
+        // Check for duplicate
+        {
+            let skills = self.skills.read().await;
+            if skills.contains_key(name) {
+                return Err(SkillError::AlreadyExists(name.to_string()));
+            }
+        }
+
+        // Derive triggers from name parts (split on hyphens and whitespace)
+        let triggers: Vec<String> = name
+            .split(['-', '_'])
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .chain(std::iter::once(name.to_string()))
+            .collect();
+
+        let manifest = SkillManifestBuilder::new(name, "1.0.0", description)
+            .triggers(triggers)
+            .build();
+
+        // Validate before writing
+        manifest.validate().map_err(|errors| SkillError::ValidationFailed {
+            name: name.to_string(),
+            reason: errors.join("; "),
+        })?;
+
+        // Write TOML manifest atomically
+        let toml_path = dir.join(format!("{name}.toml"));
+        atomic_write(&toml_path, &toml::to_string(&manifest)?)?;
+
+        // Write Markdown instructions atomically (only if non-empty)
+        if !instructions.is_empty() {
+            let md_path = dir.join(format!("{name}.md"));
+            atomic_write(&md_path, instructions)?;
+        }
+
+        // Build and register the compiled skill
+        let mut skill = CompiledSkill::new(manifest);
+        if !instructions.is_empty() {
+            skill.set_instructions(instructions.to_string());
+        }
+        self.register(skill).await?;
+
+        Ok(())
+    }
+
+    /// Update the instructions content for an existing skill.
+    ///
+    /// Replaces the content of the companion `<name>.md` file and updates the
+    /// in-memory [`CompiledSkill`]. Uses atomic write (temp file + rename).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillError::SkillsDirNotSet`] if no skills directory is configured,
+    /// or [`SkillError::NotFound`] if no skill with the given name exists.
+    pub async fn update_skill_instructions(
+        &self,
+        name: &str,
+        new_instructions: &str,
+    ) -> SkillResult<()> {
+        let dir = self
+            .skills_dir
+            .as_deref()
+            .ok_or(SkillError::SkillsDirNotSet)?;
+
+        // Update in-memory skill
+        {
+            let skills = self.skills.read().await;
+            let skill = skills
+                .get(name)
+                .ok_or_else(|| SkillError::NotFound(name.to_string()))?;
+            skill.write().set_instructions(new_instructions.to_string());
+        }
+
+        // Write updated instructions to disk atomically
+        let md_path = dir.join(format!("{name}.md"));
+        atomic_write(&md_path, new_instructions)?;
+
+        Ok(())
+    }
+
+    /// Mark a skill as deprecated.
+    ///
+    /// Sets the `deprecated` flag and reason in both the on-disk TOML manifest
+    /// and the in-memory [`CompiledSkill`]. Deprecated skills are excluded from
+    /// [`match_skills`](Self::match_skills) results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillError::SkillsDirNotSet`] if no skills directory is configured,
+    /// or [`SkillError::NotFound`] if no skill with the given name exists.
+    pub async fn deprecate_skill(&self, name: &str, reason: &str) -> SkillResult<()> {
+        let dir = self
+            .skills_dir
+            .as_deref()
+            .ok_or(SkillError::SkillsDirNotSet)?;
+
+        // Update the manifest in the compiled skill
+        let updated_manifest = {
+            let skills = self.skills.read().await;
+            let skill = skills
+                .get(name)
+                .ok_or_else(|| SkillError::NotFound(name.to_string()))?;
+            let mut manifest = skill.read().manifest().clone();
+            manifest.deprecated = Some(true);
+            manifest.deprecation_reason = Some(reason.to_string());
+            manifest
+        };
+
+        // Write updated manifest to disk atomically
+        let toml_path = dir.join(format!("{name}.toml"));
+        atomic_write(&toml_path, &toml::to_string(&updated_manifest)?)?;
+
+        // Update in-memory skill
+        {
+            let skills = self.skills.read().await;
+            if let Some(skill) = skills.get(name) {
+                let mut guard = skill.write();
+                // Replace the manifest by creating a new CompiledSkill with updated manifest
+                // but preserving confidence, usage_count, and instructions
+                let confidence = guard.confidence();
+                let usage_count = guard.usage_count();
+                let instructions = guard.instructions().to_string();
+                let mut new_skill = CompiledSkill::new(updated_manifest);
+                new_skill.set_instructions(instructions);
+                new_skill.confidence = confidence;
+                new_skill.usage_count = usage_count;
+
+                // Replace the inner skill
+                *guard = new_skill;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Write data to a file atomically using temp file + rename.
+///
+/// Creates a temporary file in the same directory, writes the content, then
+/// renames to the target path. On Unix, rename is atomic when source and
+/// destination are on the same filesystem.
+fn atomic_write(path: &Path, content: &str) -> SkillResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent dir"))?;
+    let temp_name = format!(
+        ".{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+    );
+    let temp_path = parent.join(temp_name);
+
+    std::fs::write(&temp_path, content)?;
+    std::fs::rename(&temp_path, path)?;
+
+    Ok(())
 }
 
 impl Default for SkillRegistry {
@@ -283,5 +494,282 @@ mod tests {
             .update_confidence("ghost", crate::skill::ConfidenceEvent::UsedSuccessfully)
             .await;
         assert!(matches!(result.unwrap_err(), SkillError::NotFound(_)));
+    }
+
+    // --- Write method tests ---
+
+    fn make_registry_with_dir() -> (SkillRegistry, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = SkillRegistry::new().with_skills_dir(dir.path());
+        (registry, dir)
+    }
+
+    #[tokio::test]
+    async fn test_create_skill_writes_files_and_registers() {
+        let (registry, dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("my-skill", "Does cool things", "Step 1: Do this\nStep 2: Do that")
+            .await
+            .unwrap();
+
+        // Verify TOML file exists and is valid
+        let toml_path = dir.path().join("my-skill.toml");
+        assert!(toml_path.exists(), "TOML manifest should exist");
+        let content = std::fs::read_to_string(&toml_path).unwrap();
+        let manifest: crate::SkillManifest = toml::from_str(&content).unwrap();
+        assert_eq!(manifest.name, "my-skill");
+        assert_eq!(manifest.description, "Does cool things");
+
+        // Verify MD file exists
+        let md_path = dir.path().join("my-skill.md");
+        assert!(md_path.exists(), "Instructions MD file should exist");
+        let instructions = std::fs::read_to_string(&md_path).unwrap();
+        assert!(instructions.contains("Step 1: Do this"));
+
+        // Verify get() returns the skill
+        let skill = registry.get("my-skill").await;
+        assert!(skill.is_some());
+        assert_eq!(skill.unwrap().read().name(), "my-skill");
+
+        // Verify match_skills finds it
+        let matches = registry.match_skills("my-skill").await;
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "my-skill");
+    }
+
+    #[tokio::test]
+    async fn test_create_skill_outputs_compile_with_instructions() {
+        let (registry, dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("compile-check", "Verifies compile path", "Detailed instructions")
+            .await
+            .unwrap();
+
+        let compiler = crate::compiler::SkillCompiler::new();
+        let compiled = compiler
+            .compile_file(&dir.path().join("compile-check.toml"))
+            .unwrap();
+
+        assert_eq!(compiled.name(), "compile-check");
+        assert_eq!(compiled.description(), "Verifies compile path");
+        assert_eq!(compiled.instructions(), "Detailed instructions");
+    }
+
+    #[tokio::test]
+    async fn test_create_skill_duplicate_returns_error() {
+        let (registry, _dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("dup", "First", "Instructions")
+            .await
+            .unwrap();
+        let result = registry.create_skill("dup", "Second", "Other").await;
+        assert!(matches!(result.unwrap_err(), SkillError::AlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn test_create_skill_no_dir_returns_error() {
+        let registry = SkillRegistry::new();
+        let result = registry.create_skill("x", "y", "z").await;
+        assert!(matches!(result.unwrap_err(), SkillError::SkillsDirNotSet));
+    }
+
+    #[tokio::test]
+    async fn test_create_skill_empty_instructions_no_md_file() {
+        let (registry, dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("no-md", "No instructions", "")
+            .await
+            .unwrap();
+
+        let md_path = dir.path().join("no-md.md");
+        assert!(!md_path.exists(), "No MD file should be created for empty instructions");
+
+        // But TOML should still exist
+        assert!(dir.path().join("no-md.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn test_update_skill_instructions_modifies_file_and_memory() {
+        let (registry, dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("updatable", "A skill", "Original instructions")
+            .await
+            .unwrap();
+
+        // Update instructions
+        registry
+            .update_skill_instructions("updatable", "Updated instructions here")
+            .await
+            .unwrap();
+
+        // Verify file content updated
+        let md_path = dir.path().join("updatable.md");
+        let content = std::fs::read_to_string(&md_path).unwrap();
+        assert_eq!(content, "Updated instructions here");
+
+        // Verify in-memory updated
+        let skill = registry.get("updatable").await.unwrap();
+        assert_eq!(skill.read().instructions(), "Updated instructions here");
+    }
+
+    #[tokio::test]
+    async fn test_update_skill_instructions_not_found() {
+        let (registry, _dir) = make_registry_with_dir();
+
+        let result = registry
+            .update_skill_instructions("ghost", "new content")
+            .await;
+        assert!(matches!(result.unwrap_err(), SkillError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_skill_instructions_no_dir() {
+        let registry = SkillRegistry::new();
+        registry.register(make_skill("x", &["x"])).await.unwrap();
+        let result = registry.update_skill_instructions("x", "y").await;
+        assert!(matches!(result.unwrap_err(), SkillError::SkillsDirNotSet));
+    }
+
+    #[tokio::test]
+    async fn test_deprecate_skill_filters_from_matching() {
+        let (registry, _dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("old-skill", "An old skill", "Old instructions")
+            .await
+            .unwrap();
+
+        // Verify it matches before deprecation
+        let matches = registry.match_skills("old-skill").await;
+        assert_eq!(matches.len(), 1);
+
+        // Deprecate
+        registry
+            .deprecate_skill("old-skill", "Replaced by new-skill")
+            .await
+            .unwrap();
+
+        // Verify match_skills no longer returns it
+        let matches = registry.match_skills("old-skill").await;
+        assert!(matches.is_empty(), "Deprecated skill should not match");
+
+        // Verify still accessible via get()
+        let skill = registry.get("old-skill").await;
+        assert!(skill.is_some(), "Deprecated skill should still be retrievable");
+        assert!(skill.unwrap().read().is_deprecated());
+    }
+
+    #[tokio::test]
+    async fn test_deprecate_skill_updates_manifest_on_disk() {
+        let (registry, dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("dep-test", "To deprecate", "Instructions")
+            .await
+            .unwrap();
+
+        registry
+            .deprecate_skill("dep-test", "Obsolete")
+            .await
+            .unwrap();
+
+        // Verify TOML manifest on disk has deprecated flag
+        let toml_path = dir.path().join("dep-test.toml");
+        let content = std::fs::read_to_string(&toml_path).unwrap();
+        let manifest: crate::SkillManifest = toml::from_str(&content).unwrap();
+        assert_eq!(manifest.deprecated, Some(true));
+        assert_eq!(manifest.deprecation_reason.as_deref(), Some("Obsolete"));
+    }
+
+    #[tokio::test]
+    async fn test_deprecate_skill_preserves_confidence_and_usage() {
+        let (registry, _dir) = make_registry_with_dir();
+
+        registry
+            .create_skill("preserve", "Test", "Instructions")
+            .await
+            .unwrap();
+
+        // Boost confidence
+        registry
+            .update_confidence("preserve", crate::skill::ConfidenceEvent::UserConfirmed)
+            .await
+            .unwrap();
+        let pre_confidence = registry.get("preserve").await.unwrap().read().confidence();
+
+        registry
+            .deprecate_skill("preserve", "Old")
+            .await
+            .unwrap();
+
+        let skill = registry.get("preserve").await.unwrap();
+        assert_eq!(skill.read().confidence(), pre_confidence);
+    }
+
+    #[tokio::test]
+    async fn test_deprecate_skill_not_found() {
+        let (registry, _dir) = make_registry_with_dir();
+        let result = registry.deprecate_skill("ghost", "reason").await;
+        assert!(matches!(result.unwrap_err(), SkillError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_deprecate_skill_no_dir() {
+        let registry = SkillRegistry::new();
+        registry.register(make_skill("x", &["x"])).await.unwrap();
+        let result = registry.deprecate_skill("x", "old").await;
+        assert!(matches!(result.unwrap_err(), SkillError::SkillsDirNotSet));
+    }
+
+    #[test]
+    fn test_atomic_write_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        atomic_write(&path, "hello world").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+        // No temp file left behind
+        assert!(!dir.path().join(".test.toml.tmp").exists());
+    }
+
+    #[test]
+    fn test_atomic_write_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overwrite.toml");
+        atomic_write(&path, "first").unwrap();
+        atomic_write(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[tokio::test]
+    async fn test_match_skills_filters_deprecated_skill() {
+        let registry = SkillRegistry::new();
+        let mut skill = make_skill("active", &["search"]);
+        skill.update_confidence(crate::skill::ConfidenceEvent::UsedSuccessfully);
+        let manifest = SkillManifestBuilder::new("deprecated-skill", "1.0.0", "Old skill")
+            .triggers(["search"])
+            .deprecated("No longer used")
+            .build();
+        let deprecated = CompiledSkill::new(manifest);
+
+        registry.register(skill).await.unwrap();
+        registry.register(deprecated).await.unwrap();
+
+        let matches = registry.match_skills("search").await;
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "active");
+    }
+
+    #[test]
+    fn test_skills_dir_accessor() {
+        let registry = SkillRegistry::new();
+        assert!(registry.skills_dir().is_none());
+
+        let registry = SkillRegistry::new().with_skills_dir("/tmp/skills");
+        assert_eq!(registry.skills_dir(), Some(Path::new("/tmp/skills")));
     }
 }

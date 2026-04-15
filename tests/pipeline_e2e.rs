@@ -501,11 +501,7 @@ async fn test_pipeline_multi_turn_context_persistence() {
     let session = reloaded_mgr.get_or_create("telegram:chat_100", None);
 
     // Should have at least 6 messages: user1, assistant1, user2, assistant2, user3, assistant3
-    assert!(
-        session.messages.len() >= 6,
-        "Expected >= 6 session entries, got {}",
-        session.messages.len()
-    );
+    assert!(session.messages.len() >= 6);
 
     // Verify message ordering and roles
     let roles: Vec<String> = session
@@ -1211,4 +1207,25 @@ async fn test_pipeline_cron_to_agent_full_flow() {
 
     agent_handle.abort();
     let _ = agent_handle.await;
+}
+async fn wait_for_session_entries(
+    session_dir: std::path::PathBuf,
+    session_key: &str,
+    min_entries: usize,
+) {
+    let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
+    loop {
+        let mgr = SessionManager::new(session_dir.clone()).unwrap();
+        let session = mgr.get_or_create(session_key, None);
+        if session.messages.len() >= min_entries {
+            return;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Expected >= {min_entries} session entries, got {}",
+            session.messages.len()
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
 }

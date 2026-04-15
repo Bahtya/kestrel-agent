@@ -17,6 +17,7 @@ use nanobot_channels::{ChannelManager, ChannelRegistry};
 use nanobot_config::Config;
 use nanobot_heartbeat::HeartbeatService;
 use nanobot_learning::config::LearningConfig;
+use nanobot_learning::consumer::LearningConsumer;
 use nanobot_learning::event::LearningEventBus;
 use nanobot_learning::processor::BasicEventProcessor;
 use nanobot_learning::prompt::PromptAssembler;
@@ -108,6 +109,26 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
     // ── Agent loop ────────────────────────────────────────────
     let learning_bus = LearningEventBus::new();
 
+    // Initialize memory store early so it can be shared with the learning consumer.
+    let memory_config = MemoryConfig {
+        hot_store_path: home.join("memory").join("hot.jsonl"),
+        ..MemoryConfig::default()
+    };
+    let memory_store: Option<Arc<dyn nanobot_memory::MemoryStore>> =
+        match HotStore::new(&memory_config).await {
+            Ok(hot_store) => {
+                info!("Memory store initialized (HotStore L1)");
+                Some(Arc::new(hot_store))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize memory store, continuing without memory: {}",
+                    e
+                );
+                None
+            }
+        };
+
     let agent_loop = {
         let mut al = AgentLoop::new(
             config.clone(),
@@ -118,25 +139,12 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
         );
 
         // Wire memory store (HotStore L1)
-        let memory_config = MemoryConfig {
-            hot_store_path: home.join("memory").join("hot.jsonl"),
-            ..MemoryConfig::default()
-        };
-        match HotStore::new(&memory_config).await {
-            Ok(hot_store) => {
-                info!("Memory store initialized (HotStore L1)");
-                al = al.with_memory_store(Arc::new(hot_store));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to initialize memory store, continuing without memory: {}",
-                    e
-                );
-            }
+        if let Some(ref ms) = memory_store {
+            al = al.with_memory_store(ms.clone());
         }
 
         // Wire skill registry
-        al = al.with_skill_registry(skill_registry);
+        al = al.with_skill_registry(skill_registry.clone());
 
         // Wire learning event bus
         al = al.with_learning_bus(learning_bus.clone());
@@ -260,6 +268,7 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
         let mut learning_rx = learning_bus.subscribe();
         let processor = BasicEventProcessor::new();
         let store = event_store.clone();
+        let consumer = LearningConsumer::new(memory_store, Some(skill_registry));
         tokio::spawn(async move {
             loop {
                 match learning_rx.recv().await {
@@ -268,11 +277,9 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
                         if let Err(e) = store.append(&event).await {
                             tracing::warn!("Failed to persist learning event: {}", e);
                         }
-                        // Process through the basic processor
+                        // Process through the basic processor, then dispatch actions
                         let actions = processor.handle(&event).await;
-                        for action in actions {
-                            tracing::debug!("Learning action: {:?}", action);
-                        }
+                        consumer.dispatch_actions(actions).await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("Learning event consumer lagged by {n} messages");

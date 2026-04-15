@@ -485,11 +485,7 @@ async fn test_e2e_session_persistence() {
 
     let mgr2 = SessionManager::new(session_dir).unwrap();
     let session = mgr2.get_or_create("telegram:chat_100", None);
-    assert!(
-        session.messages.len() >= 4,
-        "Expected >= 4 session entries, got {}",
-        session.messages.len()
-    );
+    assert!(session.messages.len() >= 4);
 
     agent_handle.abort();
 }

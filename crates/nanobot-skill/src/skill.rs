@@ -76,8 +76,12 @@ pub trait Skill: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct CompiledSkill {
     manifest: crate::SkillManifest,
-    confidence: f64,
-    usage_count: u64,
+    /// Detailed instructions loaded from the companion `.md` file (if any).
+    instructions: String,
+    /// Current confidence score (0.0 – 1.0). Accessible within the crate for registry updates.
+    pub(crate) confidence: f64,
+    /// How many times this skill has been used. Accessible within the crate for registry updates.
+    pub(crate) usage_count: u64,
 }
 
 impl CompiledSkill {
@@ -85,9 +89,20 @@ impl CompiledSkill {
     pub fn new(manifest: crate::SkillManifest) -> Self {
         Self {
             manifest,
+            instructions: String::new(),
             confidence: 0.5,
             usage_count: 0,
         }
+    }
+
+    /// Set the detailed instructions content.
+    pub fn set_instructions(&mut self, instructions: String) {
+        self.instructions = instructions;
+    }
+
+    /// Get the detailed instructions content.
+    pub fn instructions(&self) -> &str {
+        &self.instructions
     }
 
     /// Reference to the underlying manifest.
@@ -100,9 +115,19 @@ impl CompiledSkill {
         self.usage_count
     }
 
-    /// Build the prompt segment from manifest steps and pitfalls.
+    /// Whether this skill has been deprecated.
+    pub fn is_deprecated(&self) -> bool {
+        self.manifest.deprecated == Some(true)
+    }
+
+    /// Build the prompt segment from manifest steps, pitfalls, and instructions.
     fn build_prompt(&self) -> String {
         let mut parts = Vec::new();
+
+        if !self.instructions.is_empty() {
+            parts.push(format!("## Instructions for {}", self.manifest.name));
+            parts.push(self.instructions.clone());
+        }
 
         if !self.manifest.steps.is_empty() {
             parts.push(format!("## Steps for {}", self.manifest.name));

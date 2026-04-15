@@ -36,6 +36,12 @@ pub struct SkillManifest {
     /// Skill category for grouping (e.g. "devops", "security", "testing").
     #[serde(default = "default_category")]
     pub category: String,
+    /// Whether this skill has been deprecated and should be excluded from matching.
+    #[serde(default)]
+    pub deprecated: Option<bool>,
+    /// Reason for deprecation, if any.
+    #[serde(default)]
+    pub deprecation_reason: Option<String>,
 }
 
 fn default_category() -> String {
@@ -101,6 +107,8 @@ pub struct SkillManifestBuilder {
     steps: Vec<String>,
     pitfalls: Vec<String>,
     category: String,
+    deprecated: Option<bool>,
+    deprecation_reason: Option<String>,
 }
 
 impl SkillManifestBuilder {
@@ -118,6 +126,8 @@ impl SkillManifestBuilder {
             steps: Vec::new(),
             pitfalls: Vec::new(),
             category: "uncategorized".to_string(),
+            deprecated: None,
+            deprecation_reason: None,
         }
     }
 
@@ -145,6 +155,13 @@ impl SkillManifestBuilder {
         self
     }
 
+    /// Mark the skill as deprecated with an optional reason.
+    pub fn deprecated(mut self, reason: impl Into<String>) -> Self {
+        self.deprecated = Some(true);
+        self.deprecation_reason = Some(reason.into());
+        self
+    }
+
     /// Build the manifest. Panics if required triggers are missing.
     pub fn build(self) -> SkillManifest {
         SkillManifest {
@@ -155,6 +172,8 @@ impl SkillManifestBuilder {
             steps: self.steps,
             pitfalls: self.pitfalls,
             category: self.category,
+            deprecated: self.deprecated,
+            deprecation_reason: self.deprecation_reason,
         }
     }
 }
@@ -248,6 +267,8 @@ mod tests {
             steps: Vec::new(),
             pitfalls: Vec::new(),
             category: "uncategorized".to_string(),
+            deprecated: None,
+            deprecation_reason: None,
         };
         let errors = m.validate().unwrap_err();
         assert!(errors.len() >= 4);
@@ -279,5 +300,47 @@ triggers = ["hi", "hello"]
     #[test]
     fn test_default_category() {
         assert_eq!(default_category(), "uncategorized");
+    }
+
+    #[test]
+    fn test_deprecated_fields_default_none() {
+        let m = valid_manifest();
+        assert_eq!(m.deprecated, None);
+        assert_eq!(m.deprecation_reason, None);
+    }
+
+    #[test]
+    fn test_deprecated_builder() {
+        let m = SkillManifestBuilder::new("old-skill", "1.0.0", "An old skill")
+            .triggers(["old"])
+            .deprecated("Replaced by new-skill")
+            .build();
+        assert_eq!(m.deprecated, Some(true));
+        assert_eq!(m.deprecation_reason.as_deref(), Some("Replaced by new-skill"));
+    }
+
+    #[test]
+    fn test_deprecated_toml_roundtrip() {
+        let m = SkillManifestBuilder::new("dep-skill", "1.0.0", "Deprecated skill")
+            .triggers(["dep"])
+            .deprecated("No longer needed")
+            .build();
+        let toml_str = toml::to_string(&m).unwrap();
+        let parsed: SkillManifest = toml::from_str(&toml_str).unwrap();
+        assert_eq!(m, parsed);
+        assert_eq!(parsed.deprecated, Some(true));
+    }
+
+    #[test]
+    fn test_toml_parse_deprecated_defaults() {
+        let toml_str = r#"
+name = "hello"
+version = "0.1.0"
+description = "Says hello"
+triggers = ["hi"]
+"#;
+        let m: SkillManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(m.deprecated, None);
+        assert_eq!(m.deprecation_reason, None);
     }
 }

@@ -32,7 +32,7 @@ impl Default for EventLogHeader {
 }
 
 /// Append-only store that writes learning events as JSON lines.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EventStore {
     path: PathBuf,
     max_events: usize,
@@ -210,6 +210,7 @@ impl EventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::processor::LearningEventHandler;
     use tempfile::TempDir;
 
     fn make_event(tool: &str, ts: DateTime<Utc>) -> LearningEvent {
@@ -326,5 +327,133 @@ mod tests {
         let store = EventStore::new("/nonexistent/path/events.jsonl", 100);
         let events = store.read_all().await.expect("should not error");
         assert!(events.is_empty());
+    }
+
+    /// Integration: publish to LearningEventBus, persist via EventStore, read back.
+    #[tokio::test]
+    async fn bus_to_store_persistence() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("bus_events.jsonl");
+        let store = EventStore::new(&path, 1000);
+        let bus = crate::event::LearningEventBus::new();
+
+        // Subscribe and forward to store (simulates gateway wiring)
+        let mut rx = bus.subscribe();
+        let store_clone = store.clone();
+        let forward_handle = tokio::spawn(async move {
+            // Drain 3 events then stop
+            for _ in 0..3 {
+                match rx.recv().await {
+                    Ok(event) => {
+                        store_clone.append(&event).await.expect("append");
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Publish 3 events
+        bus.publish(make_event("shell", Utc::now()));
+        bus.publish(make_event("web", Utc::now()));
+        bus.publish(make_event("search", Utc::now()));
+
+        forward_handle.await.expect("join");
+
+        let events = store.read_all().await.expect("read");
+        assert_eq!(events.len(), 3);
+    }
+
+    /// Integration: full pipeline — bus → store + processor → verify both paths.
+    #[tokio::test]
+    async fn store_and_process_integration() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("pipeline.jsonl");
+        let store = EventStore::new(&path, 1000);
+        let bus = crate::event::LearningEventBus::new();
+        let processor = crate::processor::BasicEventProcessor::new();
+
+        let mut rx = bus.subscribe();
+
+        // Publish 5 events
+        let events_to_publish: Vec<LearningEvent> = (0..5)
+            .map(|i| make_event(&format!("tool-{i}"), Utc::now()))
+            .collect();
+
+        for event in &events_to_publish {
+            bus.publish(event.clone());
+        }
+
+        // Drain and process (simulating the gateway subscriber)
+        for _ in 0..5 {
+            let event = rx.recv().await.expect("recv");
+            store.append(&event).await.expect("append");
+            let _actions = processor.handle(&event).await;
+        }
+
+        // Verify persistence
+        let stored = store.read_all().await.expect("read");
+        assert_eq!(stored.len(), 5);
+
+        // Verify processor tracked stats
+        let stats = processor.stats();
+        assert_eq!(stats.events_processed, 5);
+        assert_eq!(stats.tools.len(), 5);
+    }
+
+    /// Integration: append many events, prune, verify bounded size.
+    #[tokio::test]
+    async fn prune_after_many_appends() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("bounded.jsonl");
+        let max_events = 10;
+        let store = EventStore::new(&path, max_events);
+
+        // Append 50 events
+        for i in 0..50 {
+            store
+                .append(&make_event(&format!("t-{i}"), Utc::now()))
+                .await
+                .expect("append");
+        }
+
+        assert_eq!(store.count().await.expect("count before prune"), 50);
+
+        // Prune should keep only the last 10
+        store.prune().await.expect("prune");
+
+        let remaining = store.read_all().await.expect("read");
+        assert_eq!(remaining.len(), max_events);
+
+        // Verify they are the most recent (t-40 through t-49)
+        if let LearningEvent::ToolSucceeded { tool, .. } = &remaining[0] {
+            assert_eq!(tool, "t-40");
+        }
+        if let LearningEvent::ToolSucceeded { tool, .. } = &remaining[9] {
+            assert_eq!(tool, "t-49");
+        }
+    }
+
+    /// Verify cloned stores share the same path (same underlying file).
+    #[tokio::test]
+    async fn event_store_clone_shares_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("clone_test.jsonl");
+        let store = EventStore::new(&path, 1000);
+        let cloned = store.clone();
+
+        assert_eq!(store.path(), cloned.path());
+
+        // Write via original, read via clone
+        store
+            .append(&make_event("original", Utc::now()))
+            .await
+            .expect("append via original");
+        cloned
+            .append(&make_event("clone", Utc::now()))
+            .await
+            .expect("append via clone");
+
+        let events = cloned.read_all().await.expect("read");
+        assert_eq!(events.len(), 2);
     }
 }

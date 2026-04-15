@@ -16,8 +16,10 @@ use nanobot_bus::MessageBus;
 use nanobot_channels::{ChannelManager, ChannelRegistry};
 use nanobot_config::Config;
 use nanobot_heartbeat::HeartbeatService;
+use nanobot_learning::config::LearningConfig;
 use nanobot_learning::event::LearningEventBus;
 use nanobot_learning::processor::BasicEventProcessor;
+use nanobot_learning::store::EventStore;
 use nanobot_learning::LearningEventHandler;
 use nanobot_memory::{HotStore, MemoryConfig};
 use nanobot_providers::ProviderRegistry;
@@ -241,14 +243,28 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
         }
     });
 
-    // ── Learning event processor subscriber ───────────────────
+    // ── Learning event processor + persistent store ──────────
+    let learning_config = LearningConfig::default();
+    let event_store = EventStore::new(learning_config.event_log_file(), learning_config.max_events);
+    info!(
+        "EventStore initialized at {} (max_events={})",
+        event_store.path().display(),
+        learning_config.max_events
+    );
+
     let _learning_handle = {
         let mut learning_rx = learning_bus.subscribe();
         let processor = BasicEventProcessor::new();
+        let store = event_store.clone();
         tokio::spawn(async move {
             loop {
                 match learning_rx.recv().await {
                     Ok(event) => {
+                        // Persist to event store
+                        if let Err(e) = store.append(&event).await {
+                            tracing::warn!("Failed to persist learning event: {}", e);
+                        }
+                        // Process through the basic processor
                         let actions = processor.handle(&event).await;
                         for action in actions {
                             tracing::debug!("Learning action: {:?}", action);
@@ -258,6 +274,20 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
                         tracing::warn!("Learning event consumer lagged by {n} messages");
                     }
                     Err(_) => break,
+                }
+            }
+        })
+    };
+
+    // ── Periodic event log prune task ─────────────────────────
+    let _prune_handle = {
+        let store = event_store.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                if let Err(e) = store.prune().await {
+                    tracing::warn!("Event log prune failed: {}", e);
                 }
             }
         })

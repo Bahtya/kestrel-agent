@@ -16,6 +16,9 @@ use nanobot_bus::MessageBus;
 use nanobot_channels::{ChannelManager, ChannelRegistry};
 use nanobot_config::Config;
 use nanobot_heartbeat::HeartbeatService;
+use nanobot_learning::event::LearningEventBus;
+use nanobot_learning::processor::BasicEventProcessor;
+use nanobot_learning::LearningEventHandler;
 use nanobot_memory::{HotStore, MemoryConfig};
 use nanobot_providers::ProviderRegistry;
 use nanobot_session::SessionManager;
@@ -104,6 +107,8 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
     let skill_registry = init_skill_registry(&home).await;
 
     // ── Agent loop ────────────────────────────────────────────
+    let learning_bus = LearningEventBus::new();
+
     let agent_loop = {
         let mut al = AgentLoop::new(
             config.clone(),
@@ -130,6 +135,9 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
 
         // Wire skill registry
         al = al.with_skill_registry(skill_registry);
+
+        // Wire learning event bus
+        al = al.with_learning_bus(learning_bus.clone());
 
         al
     };
@@ -232,6 +240,28 @@ pub async fn run(config: Config, channels: Vec<String>) -> Result<()> {
             tracing::error!("API server error: {}", e);
         }
     });
+
+    // ── Learning event processor subscriber ───────────────────
+    let _learning_handle = {
+        let mut learning_rx = learning_bus.subscribe();
+        let processor = BasicEventProcessor::new();
+        tokio::spawn(async move {
+            loop {
+                match learning_rx.recv().await {
+                    Ok(event) => {
+                        let actions = processor.handle(&event).await;
+                        for action in actions {
+                            tracing::debug!("Learning action: {:?}", action);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Learning event consumer lagged by {n} messages");
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    };
 
     info!("Gateway is running (API on port {})", config.api.port);
     info!("Press Ctrl+C to stop");

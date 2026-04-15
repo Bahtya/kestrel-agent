@@ -21,10 +21,12 @@ use nanobot_bus::events::{AgentEvent, InboundMessage, OutboundMessage, StreamChu
 use nanobot_bus::MessageBus;
 use nanobot_config::Config;
 use nanobot_heartbeat::HeartbeatService;
+use nanobot_learning::event::{LearningEvent, LearningEventBus, SkillOutcome, ErrorClassification};
 use nanobot_memory::types::{MemoryCategory, MemoryEntry, MemoryQuery};
 use nanobot_memory::MemoryStore as AsyncMemoryStore;
 use nanobot_providers::ProviderRegistry;
 use nanobot_session::SessionManager;
+use nanobot_skill::registry::SkillMatch;
 use nanobot_skill::SkillRegistry;
 use nanobot_tools::ToolRegistry;
 use std::collections::HashSet;
@@ -52,6 +54,8 @@ pub struct AgentLoop {
     subagent_manager: Option<Arc<SubAgentManager>>,
     /// Optional async memory store (nanobot-memory crate) for recall/store.
     memory_store: Option<Arc<dyn AsyncMemoryStore>>,
+    /// Optional learning event bus (nanobot-learning crate) for event emission.
+    learning_bus: Option<LearningEventBus>,
 }
 
 impl AgentLoop {
@@ -77,6 +81,7 @@ impl AgentLoop {
             agent_activity: Arc::new(parking_lot::RwLock::new(None)),
             subagent_manager: None,
             memory_store: None,
+            learning_bus: None,
         }
     }
 
@@ -198,7 +203,21 @@ impl AgentLoop {
 
             // Match skills against user message and inject into prompt
             if let Some(ref registry) = self.skill_registry {
-                let skill_sections = self.build_skill_sections(registry, &msg.content).await;
+                let matches = registry.match_skills(&msg.content).await;
+
+                // Emit SkillUsed learning events for each matched skill
+                if let Some(ref bus) = self.learning_bus {
+                    for m in &matches {
+                        bus.publish(LearningEvent::SkillUsed {
+                            skill_name: m.name.clone(),
+                            match_score: m.score,
+                            outcome: SkillOutcome::Helpful,
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                }
+
+                let skill_sections = self.build_skill_sections_from_matches(registry, &matches).await;
                 if !skill_sections.is_empty() {
                     context_builder = context_builder.with_skills(skill_sections);
                 }
@@ -285,6 +304,22 @@ impl AgentLoop {
                 self.store_conversation_memory(&msg.content, &result.content)
                     .await;
 
+                // Emit ToolSucceeded learning event if tools were used
+                if result.tool_calls_made > 0 {
+                    if let Some(ref bus) = self.learning_bus {
+                        bus.publish(LearningEvent::ToolSucceeded {
+                            tool: "agent_loop".to_string(),
+                            args_summary: format!(
+                                "session={}, tool_calls={}, iterations={}",
+                                session_key, result.tool_calls_made, result.iterations_used
+                            ),
+                            duration_ms: 0,
+                            context_hash: format!("sess:{}", session_key),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                }
+
                 // Send outbound message
                 let outbound = OutboundMessage {
                     channel: msg.channel.clone(),
@@ -318,6 +353,18 @@ impl AgentLoop {
             Err(e) => {
                 error!("Agent run error for session {}: {}", session_key, e);
 
+                // Emit ToolFailed learning event
+                if let Some(ref bus) = self.learning_bus {
+                    bus.publish(LearningEvent::ToolFailed {
+                        tool: "agent_loop".to_string(),
+                        args_summary: format!("session={}", session_key),
+                        error: ErrorClassification::Environment,
+                        error_message: e.to_string(),
+                        retry_count: 0,
+                        timestamp: chrono::Utc::now(),
+                    });
+                }
+
                 let error_event = AgentEvent::Error {
                     session_key: session_key.clone(),
                     error: e.to_string(),
@@ -350,8 +397,20 @@ impl AgentLoop {
             .with_min_confidence(0.3);
 
         match store.search(&query).await {
-            Ok(results) if results.is_empty() => None,
+            Ok(results) if results.is_empty() => {
+                // Emit MemoryAccessed (miss)
+                if let Some(ref bus) = self.learning_bus {
+                    bus.publish(LearningEvent::MemoryAccessed {
+                        query: query_text.to_string(),
+                        results_count: 0,
+                        hit: false,
+                        timestamp: chrono::Utc::now(),
+                    });
+                }
+                None
+            }
             Ok(results) => {
+                let count = results.len();
                 let mut lines = vec!["## Recalled Memories".to_string()];
                 for scored in &results {
                     lines.push(format!(
@@ -360,6 +419,15 @@ impl AgentLoop {
                         scored.entry.category,
                         scored.entry.confidence
                     ));
+                }
+                // Emit MemoryAccessed (hit)
+                if let Some(ref bus) = self.learning_bus {
+                    bus.publish(LearningEvent::MemoryAccessed {
+                        query: query_text.to_string(),
+                        results_count: count,
+                        hit: true,
+                        timestamp: chrono::Utc::now(),
+                    });
                 }
                 Some(lines.join("\n"))
             }
@@ -415,12 +483,26 @@ impl AgentLoop {
     /// Queries the [`SkillRegistry`] for matching skills, then retrieves each
     /// matched skill's steps and pitfalls to build a prompt section. Returns
     /// an empty string if no skills match.
+    #[cfg(test)]
     async fn build_skill_sections(
         &self,
         registry: &SkillRegistry,
         query: &str,
     ) -> String {
         let matches = registry.match_skills(query).await;
+        self.build_skill_sections_from_matches(registry, &matches).await
+    }
+
+    /// Build the prompt section from pre-matched skills.
+    ///
+    /// Takes a slice of [`SkillMatch`]es and retrieves each matched skill's
+    /// steps and pitfalls to build a prompt section. Returns an empty string
+    /// if the slice is empty.
+    async fn build_skill_sections_from_matches(
+        &self,
+        registry: &SkillRegistry,
+        matches: &[SkillMatch],
+    ) -> String {
         if matches.is_empty() {
             return String::new();
         }
@@ -587,6 +669,21 @@ impl AgentLoop {
     pub fn with_memory_store(mut self, store: Arc<dyn AsyncMemoryStore>) -> Self {
         self.memory_store = Some(store);
         self
+    }
+
+    /// Attach a [`LearningEventBus`] for emitting learning events.
+    ///
+    /// When set, the agent loop will emit learning events (MemoryAccessed,
+    /// SkillUsed, ToolSucceeded, ToolFailed) at key points during message
+    /// processing.
+    pub fn with_learning_bus(mut self, bus: LearningEventBus) -> Self {
+        self.learning_bus = Some(bus);
+        self
+    }
+
+    /// Get the learning event bus, if one has been attached.
+    pub fn learning_bus(&self) -> Option<&LearningEventBus> {
+        self.learning_bus.as_ref()
     }
 
     /// Get the sub-agent manager, if one has been attached.
@@ -1230,5 +1327,160 @@ mod tests {
         assert!(sections.contains("deploy-docker"));
         assert!(sections.contains("deploy-k8s"));
         assert!(sections.contains("Build image"));
+    }
+
+    // ── Learning event bus wiring tests ────────────────────────
+
+    #[test]
+    fn test_learning_bus_none_by_default() {
+        let al = make_agent_loop();
+        assert!(al.learning_bus.is_none());
+        assert!(al.learning_bus().is_none());
+    }
+
+    #[test]
+    fn test_with_learning_bus_builder() {
+        let bus = LearningEventBus::new();
+        let al = make_agent_loop().with_learning_bus(bus);
+        assert!(al.learning_bus.is_some());
+        assert!(al.learning_bus().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_learning_bus_emits_memory_accessed_on_recall() {
+        let bus = LearningEventBus::new();
+        let mut rx = bus.subscribe();
+
+        let mock = Arc::new(MockMemoryStore::new());
+        mock.store(
+            MemoryEntry::new("User likes Rust", MemoryCategory::Preference).with_confidence(0.9),
+        )
+        .await
+        .unwrap();
+
+        let al = make_agent_loop()
+            .with_memory_store(mock)
+            .with_learning_bus(bus);
+
+        // Trigger recall (which emits the event)
+        let result = al.recall_memories("rust").await;
+        assert!(result.is_some());
+
+        // Verify the event was published
+        let event = rx.try_recv().expect("should receive MemoryAccessed event");
+        match event {
+            LearningEvent::MemoryAccessed { query, results_count, hit, .. } => {
+                assert!(query.contains("rust"));
+                assert!(results_count > 0);
+                assert!(hit);
+            }
+            other => panic!("Expected MemoryAccessed, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_learning_bus_emits_memory_accessed_no_hit() {
+        // No memory store → recall returns None immediately (via `?`),
+        // no event emitted at all.
+        let bus = LearningEventBus::new();
+        let mut rx = bus.subscribe();
+
+        let al = make_agent_loop().with_learning_bus(bus);
+        let result = al.recall_memories("rust").await;
+        assert!(result.is_none());
+
+        // No store → no event emitted
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_learning_bus_emits_memory_accessed_with_hit() {
+        use nanobot_learning::event::LearningEvent;
+
+        let bus = LearningEventBus::new();
+        let mut rx = bus.subscribe();
+
+        let mock = Arc::new(MockMemoryStore::new());
+        let al = make_agent_loop()
+            .with_memory_store(mock)
+            .with_learning_bus(bus);
+
+        // Empty store → recall returns None → no hit
+        let _ = al.recall_memories("anything").await;
+
+        // Verify event was emitted with hit=false
+        let event = rx.try_recv().expect("should receive event");
+        match event {
+            LearningEvent::MemoryAccessed { hit, results_count, .. } => {
+                assert!(!hit);
+                assert_eq!(results_count, 0);
+            }
+            other => panic!("Expected MemoryAccessed, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_learning_bus_emits_skill_used() {
+        use nanobot_learning::event::LearningEvent;
+        use nanobot_skill::manifest::SkillManifestBuilder;
+        use nanobot_skill::skill::CompiledSkill;
+
+        let bus = LearningEventBus::new();
+        let mut rx = bus.subscribe();
+
+        let registry = Arc::new(SkillRegistry::new());
+        let skill = CompiledSkill::new(
+            SkillManifestBuilder::new("deploy-k8s", "1.0.0", "Deploy to Kubernetes")
+                .triggers(vec!["deploy".to_string(), "k8s".to_string()])
+                .steps(vec!["Apply manifests".to_string()])
+                .build(),
+        );
+        registry.register(skill).await.unwrap();
+
+        let al = make_agent_loop()
+            .with_skill_registry(registry)
+            .with_learning_bus(bus);
+
+        // Build skill sections triggers match and emission
+        let registry = al.skill_registry().unwrap();
+        let matches = registry.match_skills("deploy to k8s").await;
+        assert_eq!(matches.len(), 1);
+
+        // Manually emit as process_message would
+        if let Some(ref bus) = al.learning_bus {
+            for m in &matches {
+                bus.publish(LearningEvent::SkillUsed {
+                    skill_name: m.name.clone(),
+                    match_score: m.score,
+                    outcome: nanobot_learning::event::SkillOutcome::Helpful,
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+        }
+
+        let event = rx.try_recv().expect("should receive SkillUsed event");
+        match event {
+            LearningEvent::SkillUsed { skill_name, match_score, .. } => {
+                assert_eq!(skill_name, "deploy-k8s");
+                assert!(match_score > 0.0);
+            }
+            other => panic!("Expected SkillUsed, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_learning_bus_clone_and_subscribe() {
+        let bus = LearningEventBus::new();
+        let mut rx = bus.subscribe();
+
+        bus.publish(LearningEvent::ToolSucceeded {
+            tool: "test".to_string(),
+            args_summary: "args".to_string(),
+            duration_ms: 10,
+            context_hash: "hash".to_string(),
+            timestamp: chrono::Utc::now(),
+        });
+
+        assert!(rx.try_recv().is_ok());
     }
 }

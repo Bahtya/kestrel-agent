@@ -14,6 +14,7 @@ nanobot-memory = { path = "../nanobot-memory" }
 nanobot-cron = { path = "../nanobot-cron" }
 nanobot-heartbeat = { path = "../nanobot-heartbeat" }
 nanobot-skill = { path = "../nanobot-skill" }
+nanobot-learning = { path = "../nanobot-learning" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

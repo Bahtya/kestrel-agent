@@ -102,6 +102,7 @@ nanobot-api = { path = "crates/nanobot-api" }
 nanobot-daemon = { path = "crates/nanobot-daemon" }
 nanobot-memory = { path = "crates/nanobot-memory" }
 nanobot-skill = { path = "crates/nanobot-skill" }
+nanobot-learning = { path = "crates/nanobot-learning" }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

@@ -17,6 +17,46 @@ pub enum PromptSection {
     System { content: String },
     /// Custom section with a label.
     Custom { label: String, content: String },
+    /// Tool usage guidance — when to use which tool, with descriptions and parameters.
+    ToolGuidance { content: String },
+    /// Memory fence — structured recall triggers that hint the agent when to recall
+    /// memories by category (e.g. "when discussing deployment, recall environment facts").
+    MemoryFence { content: String },
+    /// Skill index — list of available skills with descriptions, categories, and triggers.
+    SkillIndex { content: String },
+}
+
+/// A tool metadata entry used to build tool guidance context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInfo {
+    /// Tool name (e.g. "exec", "read_file").
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON Schema for the tool's parameters (serialized as a string).
+    pub parameters_schema: String,
+}
+
+/// A memory fence entry defining a category-based recall trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryFenceEntry {
+    /// Memory category to trigger recall for (e.g. "environment", "user_profile").
+    pub category: String,
+    /// Hint text describing when to recall this category.
+    pub hint: String,
+}
+
+/// A skill index entry describing an available skill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillIndexEntry {
+    /// Skill name (kebab-case).
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Skill category (e.g. "devops", "security").
+    pub category: String,
+    /// Keyword triggers for the skill.
+    pub triggers: Vec<String>,
 }
 
 impl PromptSection {
@@ -27,6 +67,9 @@ impl PromptSection {
             Self::Skills { content } => content,
             Self::System { content } => content,
             Self::Custom { content, .. } => content,
+            Self::ToolGuidance { content } => content,
+            Self::MemoryFence { content } => content,
+            Self::SkillIndex { content } => content,
         }
     }
 
@@ -37,6 +80,9 @@ impl PromptSection {
             Self::Skills { .. } => "Skills",
             Self::System { .. } => "System",
             Self::Custom { label, .. } => label,
+            Self::ToolGuidance { .. } => "Tool Guidance",
+            Self::MemoryFence { .. } => "Memory Fence",
+            Self::SkillIndex { .. } => "Skill Index",
         }
     }
 }
@@ -82,6 +128,74 @@ impl PromptAssembler {
 impl Default for PromptAssembler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl PromptAssembler {
+    /// Build tool guidance content from tool metadata entries.
+    ///
+    /// Produces a formatted string listing each tool with its name, description,
+    /// and parameter schema, to help the LLM decide when and how to use each tool.
+    pub fn build_tool_guidance(tools: &[ToolInfo]) -> String {
+        if tools.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        parts.push("Available tools and when to use them:\n".to_string());
+
+        for tool in tools {
+            parts.push(format!("### {}\n{}", tool.name, tool.description));
+            if !tool.parameters_schema.is_empty() {
+                parts.push(format!("Parameters: {}", tool.parameters_schema));
+            }
+            parts.push(String::new());
+        }
+
+        parts.join("\n")
+    }
+
+    /// Build memory fence content from category-based recall triggers.
+    ///
+    /// Produces structured hints that guide the agent on when to recall specific
+    /// memory categories. For example: "When discussing project setup, recall
+    /// environment facts."
+    pub fn build_memory_fence(fences: &[MemoryFenceEntry]) -> String {
+        if fences.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        parts.push("Memory recall triggers — consider recalling relevant memories when:\n".to_string());
+
+        for fence in fences {
+            parts.push(format!("- **{}**: {}", fence.category, fence.hint));
+        }
+
+        parts.join("\n")
+    }
+
+    /// Build skill index content from skill metadata entries.
+    ///
+    /// Produces a formatted list of all available skills with their descriptions,
+    /// categories, and trigger keywords, so the agent knows what skills it can invoke.
+    pub fn build_skill_index(skills: &[SkillIndexEntry]) -> String {
+        if skills.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        parts.push("Available skills:\n".to_string());
+
+        for skill in skills {
+            let triggers = skill.triggers.join(", ");
+            parts.push(format!(
+                "- **{}** [{}]: {} (triggers: {})",
+                skill.name, skill.category, skill.description, triggers
+            ));
+        }
+
+        parts.join("\n")
     }
 }
 
@@ -183,5 +297,269 @@ mod tests {
         let json = serde_json::to_string(&section).expect("serialize");
         let decoded: PromptSection = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(section, decoded);
+    }
+
+    // ── New section variant tests ──────────────────────────────────
+
+    #[test]
+    fn tool_guidance_header() {
+        let section = PromptSection::ToolGuidance {
+            content: "use exec for shell".into(),
+        };
+        assert_eq!(section.header(), "Tool Guidance");
+        assert_eq!(section.content(), "use exec for shell");
+    }
+
+    #[test]
+    fn memory_fence_header() {
+        let section = PromptSection::MemoryFence {
+            content: "recall env facts".into(),
+        };
+        assert_eq!(section.header(), "Memory Fence");
+        assert_eq!(section.content(), "recall env facts");
+    }
+
+    #[test]
+    fn skill_index_header() {
+        let section = PromptSection::SkillIndex {
+            content: "deploy-k8s skill".into(),
+        };
+        assert_eq!(section.header(), "Skill Index");
+        assert_eq!(section.content(), "deploy-k8s skill");
+    }
+
+    #[test]
+    fn tool_guidance_serde_roundtrip() {
+        let section = PromptSection::ToolGuidance {
+            content: "guidance".into(),
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let back: PromptSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(section, back);
+    }
+
+    #[test]
+    fn memory_fence_serde_roundtrip() {
+        let section = PromptSection::MemoryFence {
+            content: "fence".into(),
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let back: PromptSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(section, back);
+    }
+
+    #[test]
+    fn skill_index_serde_roundtrip() {
+        let section = PromptSection::SkillIndex {
+            content: "index".into(),
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let back: PromptSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(section, back);
+    }
+
+    #[test]
+    fn assemble_with_tool_guidance() {
+        let assembler = PromptAssembler::new();
+        let sections = vec![
+            PromptSection::System {
+                content: "system".into(),
+            },
+            PromptSection::ToolGuidance {
+                content: "Use exec for commands.".into(),
+            },
+        ];
+        let result = assembler.assemble(&sections);
+        assert!(result.contains("## System"));
+        assert!(result.contains("## Tool Guidance"));
+        assert!(result.contains("Use exec for commands."));
+    }
+
+    #[test]
+    fn assemble_with_memory_fence() {
+        let assembler = PromptAssembler::new();
+        let sections = vec![
+            PromptSection::System {
+                content: "system".into(),
+            },
+            PromptSection::MemoryFence {
+                content: "recall preferences".into(),
+            },
+        ];
+        let result = assembler.assemble(&sections);
+        assert!(result.contains("## Memory Fence"));
+        assert!(result.contains("recall preferences"));
+    }
+
+    #[test]
+    fn assemble_with_skill_index() {
+        let assembler = PromptAssembler::new();
+        let sections = vec![
+            PromptSection::System {
+                content: "system".into(),
+            },
+            PromptSection::SkillIndex {
+                content: "deploy-k8s".into(),
+            },
+        ];
+        let result = assembler.assemble(&sections);
+        assert!(result.contains("## Skill Index"));
+        assert!(result.contains("deploy-k8s"));
+    }
+
+    #[test]
+    fn assemble_skips_empty_new_variants() {
+        let assembler = PromptAssembler::new();
+        let sections = vec![
+            PromptSection::System {
+                content: "base".into(),
+            },
+            PromptSection::ToolGuidance {
+                content: String::new(),
+            },
+            PromptSection::MemoryFence {
+                content: String::new(),
+            },
+            PromptSection::SkillIndex {
+                content: String::new(),
+            },
+        ];
+        let result = assembler.assemble(&sections);
+        assert!(result.contains("## System"));
+        assert!(!result.contains("## Tool Guidance"));
+        assert!(!result.contains("## Memory Fence"));
+        assert!(!result.contains("## Skill Index"));
+    }
+
+    // ── Builder method tests ───────────────────────────────────────
+
+    #[test]
+    fn build_tool_guidance_basic() {
+        let tools = vec![
+            ToolInfo {
+                name: "exec".into(),
+                description: "Execute shell commands".into(),
+                parameters_schema: r#"{"type":"object","properties":{"command":{"type":"string"}}}"#.into(),
+            },
+            ToolInfo {
+                name: "read_file".into(),
+                description: "Read file contents".into(),
+                parameters_schema: String::new(),
+            },
+        ];
+        let result = PromptAssembler::build_tool_guidance(&tools);
+        assert!(result.contains("### exec"));
+        assert!(result.contains("Execute shell commands"));
+        assert!(result.contains("Parameters:"));
+        assert!(result.contains("### read_file"));
+        assert!(result.contains("Read file contents"));
+    }
+
+    #[test]
+    fn build_tool_guidance_empty() {
+        let result = PromptAssembler::build_tool_guidance(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_tool_guidance_without_schema() {
+        let tools = vec![ToolInfo {
+            name: "exec".into(),
+            description: "Run a command".into(),
+            parameters_schema: String::new(),
+        }];
+        let result = PromptAssembler::build_tool_guidance(&tools);
+        assert!(result.contains("### exec"));
+        assert!(result.contains("Run a command"));
+        // No parameters schema → no "Parameters:" line
+        assert!(!result.contains("Parameters:"));
+    }
+
+    #[test]
+    fn build_memory_fence_basic() {
+        let fences = vec![
+            MemoryFenceEntry {
+                category: "environment".into(),
+                hint: "When discussing project setup or tools".into(),
+            },
+            MemoryFenceEntry {
+                category: "user_profile".into(),
+                hint: "When personalizing responses".into(),
+            },
+        ];
+        let result = PromptAssembler::build_memory_fence(&fences);
+        assert!(result.contains("Memory recall triggers"));
+        assert!(result.contains("**environment**: When discussing project setup or tools"));
+        assert!(result.contains("**user_profile**: When personalizing responses"));
+    }
+
+    #[test]
+    fn build_memory_fence_empty() {
+        let result = PromptAssembler::build_memory_fence(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_skill_index_basic() {
+        let skills = vec![
+            SkillIndexEntry {
+                name: "deploy-k8s".into(),
+                description: "Deploy to Kubernetes".into(),
+                category: "devops".into(),
+                triggers: vec!["deploy".into(), "k8s".into()],
+            },
+            SkillIndexEntry {
+                name: "run-tests".into(),
+                description: "Run test suite".into(),
+                category: "testing".into(),
+                triggers: vec!["test".into()],
+            },
+        ];
+        let result = PromptAssembler::build_skill_index(&skills);
+        assert!(result.contains("Available skills"));
+        assert!(result.contains("**deploy-k8s** [devops]: Deploy to Kubernetes (triggers: deploy, k8s)"));
+        assert!(result.contains("**run-tests** [testing]: Run test suite (triggers: test)"));
+    }
+
+    #[test]
+    fn build_skill_index_empty() {
+        let result = PromptAssembler::build_skill_index(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn tool_info_serde_roundtrip() {
+        let info = ToolInfo {
+            name: "exec".into(),
+            description: "Execute commands".into(),
+            parameters_schema: "{}".into(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ToolInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, back);
+    }
+
+    #[test]
+    fn memory_fence_entry_serde_roundtrip() {
+        let entry = MemoryFenceEntry {
+            category: "fact".into(),
+            hint: "Recall when asked about facts".into(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: MemoryFenceEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn skill_index_entry_serde_roundtrip() {
+        let entry = SkillIndexEntry {
+            name: "test-skill".into(),
+            description: "A test".into(),
+            category: "testing".into(),
+            triggers: vec!["test".into(), "unit".into()],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: SkillIndexEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
     }
 }

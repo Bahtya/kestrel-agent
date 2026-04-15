@@ -8,7 +8,7 @@ use crate::notes::NotesManager;
 use anyhow::Result;
 use nanobot_bus::events::InboundMessage;
 use nanobot_config::Config;
-use nanobot_learning::prompt::{PromptAssembler, PromptSection};
+use nanobot_learning::prompt::{PromptAssembler, PromptSection, ToolInfo};
 use nanobot_session::Session;
 use nanobot_tools::ToolRegistry;
 
@@ -17,6 +17,8 @@ pub struct ContextBuilder<'a> {
     config: &'a Config,
     /// Optional skill prompt sections to inject (matched externally).
     skill_sections: Option<String>,
+    /// Optional skill index entries for listing available skills.
+    skill_index_entries: Option<Vec<nanobot_learning::prompt::SkillIndexEntry>>,
     /// Assembler for combining prompt sections. Uses default when not set.
     prompt_assembler: Option<PromptAssembler>,
 }
@@ -27,6 +29,7 @@ impl<'a> ContextBuilder<'a> {
         Self {
             config,
             skill_sections: None,
+            skill_index_entries: None,
             prompt_assembler: None,
         }
     }
@@ -34,6 +37,19 @@ impl<'a> ContextBuilder<'a> {
     /// Attach matched skill prompt sections for injection into the system prompt.
     pub fn with_skills(mut self, sections: String) -> Self {
         self.skill_sections = Some(sections);
+        self
+    }
+
+    /// Attach skill index entries for listing available skills with metadata.
+    ///
+    /// Each entry provides the skill name, description, category, and triggers,
+    /// allowing the agent to know what skills are available even when they are
+    /// not directly matched to the current message.
+    pub fn with_skill_index(
+        mut self,
+        entries: Vec<nanobot_learning::prompt::SkillIndexEntry>,
+    ) -> Self {
+        self.skill_index_entries = Some(entries);
         self
     }
 
@@ -107,16 +123,43 @@ impl<'a> ContextBuilder<'a> {
             }
         }
 
-        // Tools section
-        let tools = tool_registry.tool_names();
-        if !tools.is_empty() {
-            sections.push(PromptSection::Custom {
-                label: "Available Tools".to_string(),
-                content: format!(
-                    "You have access to the following tools: {}",
-                    tools.join(", ")
-                ),
+        // Tools section — enriched tool guidance with descriptions and parameters
+        let tool_defs = tool_registry.get_definitions();
+        if !tool_defs.is_empty() {
+            let tool_infos: Vec<ToolInfo> = tool_defs
+                .iter()
+                .map(|def| {
+                    let schema_str = def
+                        .parameters
+                        .as_ref()
+                        .map(|p| serde_json::to_string(p).unwrap_or_default())
+                        .unwrap_or_default();
+                    ToolInfo {
+                        name: def.name.clone(),
+                        description: def.description.clone().unwrap_or_default(),
+                        parameters_schema: schema_str,
+                    }
+                })
+                .collect();
+            let guidance = PromptAssembler::build_tool_guidance(&tool_infos);
+            sections.push(PromptSection::ToolGuidance { content: guidance });
+        }
+
+        // Memory fence — structured recall triggers based on known categories
+        let memory_fence_content =
+            PromptAssembler::build_memory_fence(&Self::default_memory_fences());
+        if !memory_fence_content.is_empty() {
+            sections.push(PromptSection::MemoryFence {
+                content: memory_fence_content,
             });
+        }
+
+        // Skill index — list of all available skills with metadata
+        if let Some(ref entries) = self.skill_index_entries {
+            if !entries.is_empty() {
+                let index = PromptAssembler::build_skill_index(entries);
+                sections.push(PromptSection::SkillIndex { content: index });
+            }
         }
 
         // Custom instructions
@@ -158,6 +201,36 @@ impl<'a> ContextBuilder<'a> {
     fn build_memory_hint_content(&self) -> String {
         "This is a continuing conversation. Use the message history to maintain context."
             .to_string()
+    }
+
+    /// Return the default memory fence entries for structured recall triggers.
+    ///
+    /// These fences guide the agent on when to consider recalling specific
+    /// categories of memories from the store.
+    fn default_memory_fences() -> Vec<nanobot_learning::prompt::MemoryFenceEntry> {
+        vec![
+            nanobot_learning::prompt::MemoryFenceEntry {
+                category: "user_profile".to_string(),
+                hint: "When personalizing responses or addressing the user".to_string(),
+            },
+            nanobot_learning::prompt::MemoryFenceEntry {
+                category: "environment".to_string(),
+                hint: "When discussing project setup, tools, or infrastructure".to_string(),
+            },
+            nanobot_learning::prompt::MemoryFenceEntry {
+                category: "preference".to_string(),
+                hint: "When choosing between approaches or making style decisions".to_string(),
+            },
+            nanobot_learning::prompt::MemoryFenceEntry {
+                category: "error_lesson".to_string(),
+                hint: "When encountering errors or debugging issues".to_string(),
+            },
+            nanobot_learning::prompt::MemoryFenceEntry {
+                category: "project_convention".to_string(),
+                hint: "When writing code, configuring tools, or making architecture decisions"
+                    .to_string(),
+            },
+        ]
     }
 }
 
@@ -203,10 +276,12 @@ mod tests {
         // Should contain runtime section with platform
         assert!(prompt.contains("telegram"));
         assert!(prompt.contains("chat1"));
-        // Empty session → no memory section
-        assert!(!prompt.contains("## Memory"));
-        // No tools → no tools section
-        assert!(!prompt.contains("## Available Tools"));
+        // Empty session → no memory section (but Memory Fence is present)
+        assert!(!prompt.contains("## Memory\n"));
+        // No tools → no tool guidance section
+        assert!(!prompt.contains("## Tool Guidance"));
+        // Memory fence is always present (from default fences)
+        assert!(prompt.contains("## Memory Fence"));
     }
 
     #[test]
@@ -258,8 +333,9 @@ mod tests {
         let prompt = builder
             .build_system_prompt(&msg, &session, &tools, None)
             .unwrap();
-        assert!(prompt.contains("## Available Tools"));
-        assert!(prompt.contains("dummy_tool"));
+        assert!(prompt.contains("## Tool Guidance"));
+        assert!(prompt.contains("### dummy_tool"));
+        assert!(prompt.contains("A test tool"));
     }
 
     #[test]
@@ -362,8 +438,9 @@ mod tests {
         assert!(prompt.contains("TestBot"));
         assert!(prompt.contains("## Runtime"));
         assert!(prompt.contains("## Memory"));
-        assert!(prompt.contains("## Available Tools"));
-        assert!(prompt.contains("my_tool"));
+        assert!(prompt.contains("## Tool Guidance"));
+        assert!(prompt.contains("### my_tool"));
+        assert!(prompt.contains("## Memory Fence"));
         assert!(prompt.contains("## Additional Instructions"));
     }
 
@@ -444,8 +521,8 @@ mod tests {
         let prompt = builder
             .build_system_prompt(&msg, &session, &tools, Some(""))
             .unwrap();
-        // Empty recalled memory should not add a section
-        assert!(!prompt.contains("## Memory"));
+        // Empty recalled memory should not add a Memory section (but Memory Fence is present)
+        assert!(!prompt.contains("## Memory\n"));
     }
 
     // ── PromptAssembler integration tests ─────────────────────────
@@ -520,5 +597,251 @@ mod tests {
         // Default assembler uses double newline separator
         assert!(prompt.contains("\n\n"));
         assert!(prompt.contains("## System"));
+    }
+
+    // ── Enriched context section tests ──────────────────────────────
+
+    #[test]
+    fn test_tool_guidance_with_description_and_params() {
+        let config = Config::default();
+        let builder = ContextBuilder::new(&config);
+        let msg = make_inbound();
+        let session = Session::new("test:key".to_string());
+        let tools = ToolRegistry::new();
+
+        use async_trait::async_trait;
+        use nanobot_tools::Tool;
+        use nanobot_tools::ToolError;
+
+        struct RichTool;
+        #[async_trait]
+        impl Tool for RichTool {
+            fn name(&self) -> &str {
+                "search"
+            }
+            fn description(&self) -> &str {
+                "Search the codebase for patterns"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Regex pattern" },
+                        "path": { "type": "string", "description": "Directory to search" }
+                    },
+                    "required": ["pattern"]
+                })
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
+                Ok("ok".to_string())
+            }
+        }
+        tools.register(RichTool);
+
+        let prompt = builder
+            .build_system_prompt(&msg, &session, &tools, None)
+            .unwrap();
+        assert!(prompt.contains("## Tool Guidance"));
+        assert!(prompt.contains("### search"));
+        assert!(prompt.contains("Search the codebase for patterns"));
+        assert!(prompt.contains("Parameters:"));
+    }
+
+    #[test]
+    fn test_memory_fence_includes_categories() {
+        let config = Config::default();
+        let builder = ContextBuilder::new(&config);
+        let msg = make_inbound();
+        let session = Session::new("test:key".to_string());
+        let tools = ToolRegistry::new();
+
+        let prompt = builder
+            .build_system_prompt(&msg, &session, &tools, None)
+            .unwrap();
+        assert!(prompt.contains("## Memory Fence"));
+        assert!(prompt.contains("**user_profile**:"));
+        assert!(prompt.contains("**environment**:"));
+        assert!(prompt.contains("**preference**:"));
+        assert!(prompt.contains("**error_lesson**:"));
+        assert!(prompt.contains("**project_convention**:"));
+    }
+
+    #[test]
+    fn test_skill_index_with_entries() {
+        let config = Config::default();
+        let entries = vec![
+            nanobot_learning::prompt::SkillIndexEntry {
+                name: "deploy-k8s".to_string(),
+                description: "Deploy to Kubernetes".to_string(),
+                category: "devops".to_string(),
+                triggers: vec!["deploy".to_string(), "k8s".to_string()],
+            },
+            nanobot_learning::prompt::SkillIndexEntry {
+                name: "run-tests".to_string(),
+                description: "Run the test suite".to_string(),
+                category: "testing".to_string(),
+                triggers: vec!["test".to_string()],
+            },
+        ];
+        let builder = ContextBuilder::new(&config).with_skill_index(entries);
+        let msg = make_inbound();
+        let session = Session::new("test:key".to_string());
+        let tools = ToolRegistry::new();
+
+        let prompt = builder
+            .build_system_prompt(&msg, &session, &tools, None)
+            .unwrap();
+        assert!(prompt.contains("## Skill Index"));
+        assert!(prompt.contains("**deploy-k8s** [devops]: Deploy to Kubernetes"));
+        assert!(prompt.contains("**run-tests** [testing]: Run the test suite"));
+    }
+
+    #[test]
+    fn test_skill_index_empty_not_shown() {
+        let config = Config::default();
+        let builder =
+            ContextBuilder::new(&config).with_skill_index(vec![]);
+        let msg = make_inbound();
+        let session = Session::new("test:key".to_string());
+        let tools = ToolRegistry::new();
+
+        let prompt = builder
+            .build_system_prompt(&msg, &session, &tools, None)
+            .unwrap();
+        assert!(!prompt.contains("## Skill Index"));
+    }
+
+    #[test]
+    fn test_skill_index_not_set_not_shown() {
+        let config = Config::default();
+        let builder = ContextBuilder::new(&config);
+        let msg = make_inbound();
+        let session = Session::new("test:key".to_string());
+        let tools = ToolRegistry::new();
+
+        let prompt = builder
+            .build_system_prompt(&msg, &session, &tools, None)
+            .unwrap();
+        assert!(!prompt.contains("## Skill Index"));
+    }
+
+    #[test]
+    fn test_enriched_context_section_order() {
+        let mut config = Config::default();
+        config.custom_instructions = Some("Be helpful.".to_string());
+
+        use async_trait::async_trait;
+        use nanobot_tools::Tool;
+        use nanobot_tools::ToolError;
+
+        struct OrderTool;
+        #[async_trait]
+        impl Tool for OrderTool {
+            fn name(&self) -> &str {
+                "order_tool"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
+                Ok("ok".to_string())
+            }
+        }
+
+        let entries = vec![nanobot_learning::prompt::SkillIndexEntry {
+            name: "test-skill".to_string(),
+            description: "A test".to_string(),
+            category: "testing".to_string(),
+            triggers: vec!["test".to_string()],
+        }];
+
+        let tools = ToolRegistry::new();
+        tools.register(OrderTool);
+
+        let builder = ContextBuilder::new(&config).with_skill_index(entries);
+        let msg = make_inbound();
+        let mut session = Session::new("test:key".to_string());
+        session.add_user_message("history".to_string());
+
+        let prompt = builder
+            .build_system_prompt(&msg, &session, &tools, None)
+            .unwrap();
+
+        // Verify section ordering: System → Runtime → Memory → Notes → Skills → Tool Guidance → Memory Fence → Skill Index → Additional Instructions
+        let system_pos = prompt.find("## System").unwrap();
+        let runtime_pos = prompt.find("## Runtime").unwrap();
+        let memory_pos = prompt.find("## Memory").unwrap();
+        let tool_guidance_pos = prompt.find("## Tool Guidance").unwrap();
+        let fence_pos = prompt.find("## Memory Fence").unwrap();
+        let skill_index_pos = prompt.find("## Skill Index").unwrap();
+        let instructions_pos = prompt.find("## Additional Instructions").unwrap();
+
+        assert!(system_pos < runtime_pos);
+        assert!(runtime_pos < memory_pos);
+        assert!(memory_pos < tool_guidance_pos);
+        assert!(tool_guidance_pos < fence_pos);
+        assert!(fence_pos < skill_index_pos);
+        assert!(skill_index_pos < instructions_pos);
+    }
+
+    #[test]
+    fn test_tool_guidance_multiple_tools() {
+        let config = Config::default();
+        let builder = ContextBuilder::new(&config);
+        let msg = make_inbound();
+        let session = Session::new("test:key".to_string());
+        let tools = ToolRegistry::new();
+
+        use async_trait::async_trait;
+        use nanobot_tools::Tool;
+        use nanobot_tools::ToolError;
+
+        struct ToolA;
+        #[async_trait]
+        impl Tool for ToolA {
+            fn name(&self) -> &str {
+                "tool_a"
+            }
+            fn description(&self) -> &str {
+                "First tool"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
+                Ok("a".to_string())
+            }
+        }
+
+        struct ToolB;
+        #[async_trait]
+        impl Tool for ToolB {
+            fn name(&self) -> &str {
+                "tool_b"
+            }
+            fn description(&self) -> &str {
+                "Second tool"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<String, ToolError> {
+                Ok("b".to_string())
+            }
+        }
+
+        tools.register(ToolA);
+        tools.register(ToolB);
+
+        let prompt = builder
+            .build_system_prompt(&msg, &session, &tools, None)
+            .unwrap();
+        assert!(prompt.contains("### tool_a"));
+        assert!(prompt.contains("First tool"));
+        assert!(prompt.contains("### tool_b"));
+        assert!(prompt.contains("Second tool"));
     }
 }

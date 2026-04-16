@@ -482,7 +482,7 @@ pub fn backoff_with_jitter(base: Duration, attempt: u32, max_delay: Duration) ->
     if jitter_max == 0 {
         return raw;
     }
-    let jitter = (jitter_frac % jitter_max) as u64;
+    let jitter = jitter_frac % jitter_max;
     let total = (raw.as_millis() as u64 + jitter).min(max_delay.as_millis() as u64);
     Duration::from_millis(total)
 }

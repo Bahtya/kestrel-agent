@@ -126,7 +126,9 @@ impl GatewayLearningProcessor for BasicEventProcessor {
     }
 
     async fn save_stats(&self) -> Result<()> {
-        BasicEventProcessor::save_stats(self).await.map_err(Into::into)
+        BasicEventProcessor::save_stats(self)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -157,8 +159,7 @@ async fn execute_learning_action(
             .with_context(|| format!("failed to deprecate skill '{skill}'")),
         LearningAction::RecordInsight { insight, category } => {
             if category == "prompt_adjustment" {
-                prompt_adjustment_tx
-                    .send_replace(Some(insight.clone()));
+                prompt_adjustment_tx.send_replace(Some(insight.clone()));
                 return Ok(());
             }
 
@@ -612,8 +613,8 @@ mod tests {
     use nanobot_skill::manifest::SkillManifestBuilder;
     use nanobot_skill::skill::CompiledSkill;
     use nanobot_skill::Skill;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use tempfile::tempdir;
 
     #[derive(Default)]
@@ -638,9 +639,17 @@ mod tests {
     #[async_trait]
     impl MemoryStore for MockMemoryStore {
         async fn store(&self, entry: MemoryEntry) -> nanobot_memory::error::Result<()> {
-            if self.fail_count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                if count > 0 { Some(count - 1) } else { None }
-            }).is_ok() {
+            if self
+                .fail_count
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    if count > 0 {
+                        Some(count - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
                 return Err(nanobot_memory::MemoryError::Io(std::io::Error::other(
                     "mock store failure",
                 )));

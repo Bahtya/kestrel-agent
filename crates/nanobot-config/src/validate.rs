@@ -19,7 +19,7 @@
 use crate::schema::{
     AgentDefaults, ApiConfig, ChannelsConfig, Config, CronConfig, CustomProviderConfig,
     DiscordConfig, DreamConfig, HeartbeatConfig, McpServerConfig, ProvidersConfig, SecurityConfig,
-    TelegramConfig,
+    TelegramConfig, WebSocketConfig,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -716,6 +716,14 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         );
     }
 
+    // WebSocket
+    if let Some(ref ws) = channels.websocket {
+        if ws.enabled {
+            has_enabled_channel = true;
+            validate_websocket(ws, report);
+        }
+    }
+
     if !has_enabled_channel {
         report.warning(
             "channels",
@@ -748,6 +756,69 @@ fn validate_discord(dc: &DiscordConfig, report: &mut ValidationReport) {
         report.warning(
             "channels.discord.token",
             "Token looks too short — expected a longer bot token",
+        );
+    }
+}
+
+fn validate_websocket(ws: &WebSocketConfig, report: &mut ValidationReport) {
+    // Validate listen_addr format — must contain a colon separating host and port
+    if ws.listen_addr.is_empty() {
+        report.error(
+            "channels.websocket.listen_addr",
+            "Listen address cannot be empty",
+        );
+    } else if !ws.listen_addr.contains(':') {
+        report.error(
+            "channels.websocket.listen_addr",
+            format!(
+                "Listen address '{}' must be in 'host:port' format",
+                ws.listen_addr
+            ),
+        );
+    } else {
+        // Try to parse the port portion
+        let port_str = ws.listen_addr.rsplit(':').next().unwrap_or("");
+        match port_str.parse::<u16>() {
+            Ok(port) => {
+                if port == 0 {
+                    report.warning(
+                        "channels.websocket.listen_addr",
+                        "Port 0 means the OS will assign a random port",
+                    );
+                }
+            }
+            Err(_) => {
+                report.error(
+                    "channels.websocket.listen_addr",
+                    format!("Invalid port in listen address '{}'", ws.listen_addr),
+                );
+            }
+        }
+    }
+
+    if ws.max_clients == 0 {
+        report.error("channels.websocket.max_clients", "max_clients must be > 0");
+    } else if ws.max_clients > 10000 {
+        report.warning(
+            "channels.websocket.max_clients",
+            format!(
+                "max_clients of {} is very high — may exhaust resources",
+                ws.max_clients
+            ),
+        );
+    }
+
+    if ws.max_message_size == 0 {
+        report.error(
+            "channels.websocket.max_message_size",
+            "max_message_size must be > 0",
+        );
+    }
+
+    if ws.auth.required && ws.auth.token.as_deref().is_none_or(|t| t.is_empty()) {
+        report.error(
+            "channels.websocket.auth.token",
+            "Auth token is required when authentication is enabled",
         );
     }
 }
@@ -1095,6 +1166,7 @@ fn validate_cross_field(
         channels.qq.as_ref().is_some_and(|q| q.enabled),
         channels.mochat.as_ref().is_some_and(|m| m.enabled),
         channels.whatsapp.as_ref().is_some_and(|w| w.enabled),
+        channels.websocket.as_ref().is_some_and(|w| w.enabled),
     ]
     .iter()
     .any(|&v| v);

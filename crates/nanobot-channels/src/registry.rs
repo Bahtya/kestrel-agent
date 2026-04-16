@@ -23,6 +23,9 @@ impl ChannelRegistry {
         registry.register("discord", || {
             Box::new(platforms::discord::DiscordChannel::new())
         });
+        registry.register("websocket", || {
+            Box::new(platforms::websocket::WebSocketChannel::new())
+        });
 
         registry
     }
@@ -67,13 +70,14 @@ mod tests {
         let names = registry.channel_names();
         assert!(names.contains(&"telegram".to_string()));
         assert!(names.contains(&"discord".to_string()));
+        assert!(names.contains(&"websocket".to_string()));
     }
 
     #[test]
     fn test_registry_default() {
         let registry = ChannelRegistry::default();
         let names = registry.channel_names();
-        assert_eq!(names.len(), 2);
+        assert_eq!(names.len(), 3);
     }
 
     #[test]
@@ -110,7 +114,7 @@ mod tests {
             Box::new(platforms::telegram::TelegramChannel::new())
         });
         let names = registry.channel_names();
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 4);
         assert!(names.contains(&"custom".to_string()));
 
         let channel = registry.create_channel("custom").unwrap();

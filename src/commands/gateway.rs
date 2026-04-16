@@ -161,6 +161,11 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
                 auto.push("discord".to_string());
             }
         }
+        if let Some(ref ws) = config.channels.websocket {
+            if ws.enabled {
+                auto.push("websocket".to_string());
+            }
+        }
         if auto.is_empty() {
             info!("No channels configured; starting with local-only mode");
         }

@@ -212,6 +212,9 @@ pub struct ChannelsConfig {
     /// Mochat channel settings.
     #[serde(default)]
     pub mochat: Option<MochatConfig>,
+    /// WebSocket channel settings.
+    #[serde(default)]
+    pub websocket: Option<WebSocketConfig>,
 }
 
 /// Telegram channel configuration.
@@ -398,6 +401,63 @@ pub struct MochatConfig {
     /// Whether this channel is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// WebSocket channel configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WebSocketConfig {
+    /// Whether WebSocket is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Listen address (e.g., "127.0.0.1:8090").
+    #[serde(default = "default_ws_addr")]
+    pub listen_addr: String,
+    /// Authentication settings.
+    #[serde(default)]
+    pub auth: WsAuthConfig,
+    /// Maximum concurrent clients.
+    #[serde(default = "default_max_clients")]
+    pub max_clients: u32,
+    /// Maximum message size in bytes.
+    #[serde(default = "default_max_msg_size")]
+    pub max_message_size: u64,
+}
+
+impl Default for WebSocketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: default_ws_addr(),
+            auth: WsAuthConfig::default(),
+            max_clients: default_max_clients(),
+            max_message_size: default_max_msg_size(),
+        }
+    }
+}
+
+/// WebSocket authentication configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct WsAuthConfig {
+    /// Whether authentication is required.
+    #[serde(default)]
+    pub required: bool,
+    /// Shared secret token for authentication.
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+fn default_ws_addr() -> String {
+    "127.0.0.1:8090".to_string()
+}
+
+fn default_max_clients() -> u32 {
+    100
+}
+
+fn default_max_msg_size() -> u64 {
+    1048576
 }
 
 /// Agent default settings.

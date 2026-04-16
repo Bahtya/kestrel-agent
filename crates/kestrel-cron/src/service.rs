@@ -369,7 +369,7 @@ impl CronService {
         // Sort due jobs by priority (highest first) before emitting events.
         // This ensures higher-priority jobs are processed first when multiple
         // jobs are due in the same tick.
-        due.sort_by(|a, b| b.priority.cmp(&a.priority));
+        due.sort_by_key(|b| std::cmp::Reverse(b.priority));
 
         // Emit events via bus
         if let Some(bus) = &self.bus {

@@ -6,9 +6,9 @@
 
 **A fast, streaming-first AI agent framework built in Rust**
 
-[![CI](https://github.com/Bahtya/nanobot-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/Bahtya/nanobot-rust/actions/workflows/ci.yml)
+[![CI](https://github.com/Bahtya/kestrel-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Bahtya/kestrel-agent/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Bahtya/nanobot-rust/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Bahtya/kestrel-agent/blob/main/LICENSE)
 [![Crates](https://img.shields.io/badge/crates-16-purple)](./crates)
 
 A fast, streaming-first AI agent framework built in Rust — connect any platform
@@ -277,4 +277,4 @@ CI runs format checks, clippy, build, tests, and a security audit on every push.
 
 ## License
 
-This project is licensed under the [MIT License](https://github.com/Bahtya/nanobot-rust/blob/main/LICENSE).
+This project is licensed under the [MIT License](https://github.com/Bahtya/kestrel-agent/blob/main/LICENSE).

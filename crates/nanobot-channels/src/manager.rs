@@ -1,10 +1,11 @@
 //! Channel manager — coordinates multiple channel adapters.
 
 use crate::base::BaseChannel;
+use crate::platforms::websocket;
 use crate::registry::ChannelRegistry;
 use anyhow::Result;
 use dashmap::DashMap;
-use nanobot_bus::events::{AgentEvent, OutboundMessage};
+use nanobot_bus::events::{AgentEvent, OutboundMessage, StreamChunk};
 use nanobot_bus::MessageBus;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -17,6 +18,10 @@ pub struct ChannelManager {
     running_channels: DashMap<String, Arc<tokio::sync::Mutex<Box<dyn BaseChannel>>>>,
     /// Active periodic typing tasks, keyed by session_key.
     typing_tasks: DashMap<String, JoinHandle<()>>,
+    /// Shared client map for WebSocket streaming.
+    ws_clients: Arc<DashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
+    /// Running flag for the streaming consumer.
+    streaming_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Extract platform name and chat_id from a session_key.
@@ -35,11 +40,14 @@ fn parse_session_key(key: &str) -> Option<(&str, &str)> {
 impl ChannelManager {
     /// Create a new channel manager with the given registry and message bus.
     pub fn new(registry: ChannelRegistry, bus: MessageBus) -> Self {
+        use std::sync::atomic::AtomicBool;
         Self {
             registry: Arc::new(registry),
             bus: Arc::new(bus),
             running_channels: DashMap::new(),
             typing_tasks: DashMap::new(),
+            ws_clients: Arc::new(DashMap::new()),
+            streaming_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -128,6 +136,10 @@ impl ChannelManager {
 
     /// Stop all running channels and cancel typing tasks.
     pub async fn stop_all(&self) {
+        use std::sync::atomic::Ordering;
+        // Stop streaming consumer.
+        self.streaming_running.store(false, Ordering::Relaxed);
+
         // Cancel all periodic typing tasks.
         for entry in self.typing_tasks.iter() {
             entry.value().abort();
@@ -248,6 +260,72 @@ impl ChannelManager {
             let channel = channel.lock().await;
             if let Err(e) = channel.send_reaction(chat_id, message_id, emoji).await {
                 warn!("Failed to send reaction: {e}");
+            }
+        }
+    }
+
+    /// Start the WebSocket streaming chunk consumer.
+    ///
+    /// Subscribes to the bus stream channel and forwards `StreamChunk` messages
+    /// to connected WebSocket clients as `{"type":"streaming", ...}` envelopes.
+    /// This is a no-op if no WebSocket channel is running.
+    pub fn start_ws_streaming(&self) {
+        use std::sync::atomic::Ordering;
+        if self.streaming_running.load(Ordering::Relaxed) {
+            return; // Already started
+        }
+        self.streaming_running.store(true, Ordering::Relaxed);
+        let bus = self.bus.clone();
+        let clients = self.ws_clients.clone();
+        let running = self.streaming_running.clone();
+        tokio::spawn(async move {
+            websocket::run_ws_stream_consumer(bus, clients, move || {
+                running.load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .await;
+        });
+        info!("WebSocket streaming consumer started");
+    }
+
+    /// Start an event listener that forwards streaming chunks to WebSocket clients.
+    ///
+    /// Listens for `AgentEvent::StreamingChunk` events and publishes them as
+    /// `StreamChunk` messages on the bus stream channel.
+    pub async fn run_streaming_on_events(&self) {
+        let mut rx = self.bus.subscribe_events();
+        let bus = self.bus.clone();
+
+        loop {
+            match rx.recv().await {
+                Ok(event) => match &event {
+                    AgentEvent::StreamingChunk {
+                        session_key,
+                        content,
+                    } => {
+                        debug!("Streaming chunk for session: {session_key}");
+                        bus.publish_stream_chunk(StreamChunk {
+                            session_key: session_key.clone(),
+                            content: content.clone(),
+                            done: false,
+                        });
+                    }
+                    AgentEvent::Completed { session_key, .. } => {
+                        // Send final done chunk.
+                        bus.publish_stream_chunk(StreamChunk {
+                            session_key: session_key.clone(),
+                            content: String::new(),
+                            done: true,
+                        });
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("Streaming event listener lagged by {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    info!("Streaming event listener: event bus closed");
+                    break;
+                }
             }
         }
     }

@@ -19,7 +19,7 @@
 use crate::schema::{
     AgentDefaults, ApiConfig, ChannelsConfig, Config, CronConfig, CustomProviderConfig,
     DiscordConfig, DreamConfig, HeartbeatConfig, McpServerConfig, ProvidersConfig, SecurityConfig,
-    TelegramConfig,
+    TelegramConfig, WebSocketConfig,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -716,6 +716,14 @@ fn validate_channels(channels: &ChannelsConfig, report: &mut ValidationReport) {
         );
     }
 
+    // WebSocket
+    if let Some(ref ws) = channels.websocket {
+        if ws.enabled {
+            has_enabled_channel = true;
+            validate_websocket(ws, report);
+        }
+    }
+
     if !has_enabled_channel {
         report.warning(
             "channels",
@@ -748,6 +756,69 @@ fn validate_discord(dc: &DiscordConfig, report: &mut ValidationReport) {
         report.warning(
             "channels.discord.token",
             "Token looks too short — expected a longer bot token",
+        );
+    }
+}
+
+fn validate_websocket(ws: &WebSocketConfig, report: &mut ValidationReport) {
+    // Validate listen_addr format — must contain a colon separating host and port
+    if ws.listen_addr.is_empty() {
+        report.error(
+            "channels.websocket.listen_addr",
+            "Listen address cannot be empty",
+        );
+    } else if !ws.listen_addr.contains(':') {
+        report.error(
+            "channels.websocket.listen_addr",
+            format!(
+                "Listen address '{}' must be in 'host:port' format",
+                ws.listen_addr
+            ),
+        );
+    } else {
+        // Try to parse the port portion
+        let port_str = ws.listen_addr.rsplit(':').next().unwrap_or("");
+        match port_str.parse::<u16>() {
+            Ok(port) => {
+                if port == 0 {
+                    report.warning(
+                        "channels.websocket.listen_addr",
+                        "Port 0 means the OS will assign a random port",
+                    );
+                }
+            }
+            Err(_) => {
+                report.error(
+                    "channels.websocket.listen_addr",
+                    format!("Invalid port in listen address '{}'", ws.listen_addr),
+                );
+            }
+        }
+    }
+
+    if ws.max_clients == 0 {
+        report.error("channels.websocket.max_clients", "max_clients must be > 0");
+    } else if ws.max_clients > 10000 {
+        report.warning(
+            "channels.websocket.max_clients",
+            format!(
+                "max_clients of {} is very high — may exhaust resources",
+                ws.max_clients
+            ),
+        );
+    }
+
+    if ws.max_message_size == 0 {
+        report.error(
+            "channels.websocket.max_message_size",
+            "max_message_size must be > 0",
+        );
+    }
+
+    if ws.auth.required && ws.auth.token.as_deref().is_none_or(|t| t.is_empty()) {
+        report.error(
+            "channels.websocket.auth.token",
+            "Auth token is required when authentication is enabled",
         );
     }
 }
@@ -1095,6 +1166,7 @@ fn validate_cross_field(
         channels.qq.as_ref().is_some_and(|q| q.enabled),
         channels.mochat.as_ref().is_some_and(|m| m.enabled),
         channels.whatsapp.as_ref().is_some_and(|w| w.enabled),
+        channels.websocket.as_ref().is_some_and(|w| w.enabled),
     ]
     .iter()
     .any(|&v| v);
@@ -2977,5 +3049,230 @@ channels:
             .iter()
             .any(|w| w.path == "security.blocked_networks[0]"
                 && w.message.contains("not a valid CIDR")));
+    }
+
+    // -------------------------------------------------------------------
+    // WebSocket validation tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_websocket_valid_config() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:8090".to_string(),
+            auth: crate::schema::WsAuthConfig {
+                required: false,
+                token: None,
+            },
+            max_clients: 100,
+            max_message_size: 1048576,
+        });
+        let report = validate(&config);
+        assert!(report.is_valid(), "Unexpected errors: {}", report);
+    }
+
+    #[test]
+    fn test_websocket_disabled_skips_validation() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: false,
+            listen_addr: String::new(), // invalid but disabled
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 0,
+            max_message_size: 0,
+        });
+        let report = validate(&config);
+        assert!(report
+            .errors()
+            .iter()
+            .all(|e| !e.path.starts_with("channels.websocket.")));
+    }
+
+    #[test]
+    fn test_websocket_empty_listen_addr() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: String::new(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 100,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.websocket.listen_addr"));
+    }
+
+    #[test]
+    fn test_websocket_no_colon_in_addr() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "no-port-here".to_string(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 100,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(
+            report
+                .errors()
+                .iter()
+                .any(|e| e.path == "channels.websocket.listen_addr"
+                    && e.message.contains("host:port"))
+        );
+    }
+
+    #[test]
+    fn test_websocket_invalid_port() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:abc".to_string(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 100,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.websocket.listen_addr"
+                && e.message.contains("Invalid port")));
+    }
+
+    #[test]
+    fn test_websocket_port_zero_warns() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:0".to_string(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 100,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(report.is_valid()); // just a warning
+        assert!(report.warnings().iter().any(
+            |w| w.path == "channels.websocket.listen_addr" && w.message.contains("random port")
+        ));
+    }
+
+    #[test]
+    fn test_websocket_zero_max_clients() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:8090".to_string(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 0,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.websocket.max_clients"));
+    }
+
+    #[test]
+    fn test_websocket_high_max_clients_warns() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:8090".to_string(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 20000,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(report.is_valid()); // just a warning
+        assert!(
+            report
+                .warnings()
+                .iter()
+                .any(|w| w.path == "channels.websocket.max_clients"
+                    && w.message.contains("very high"))
+        );
+    }
+
+    #[test]
+    fn test_websocket_zero_max_message_size() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:8090".to_string(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 100,
+            max_message_size: 0,
+        });
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.websocket.max_message_size"));
+    }
+
+    #[test]
+    fn test_websocket_auth_required_no_token() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:8090".to_string(),
+            auth: crate::schema::WsAuthConfig {
+                required: true,
+                token: None,
+            },
+            max_clients: 100,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(!report.is_valid());
+        assert!(report
+            .errors()
+            .iter()
+            .any(|e| e.path == "channels.websocket.auth.token"));
+    }
+
+    #[test]
+    fn test_websocket_auth_required_with_token() {
+        let mut config = make_valid_config();
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:8090".to_string(),
+            auth: crate::schema::WsAuthConfig {
+                required: true,
+                token: Some("my-secret".to_string()),
+            },
+            max_clients: 100,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        assert!(report.is_valid(), "Unexpected errors: {}", report);
+    }
+
+    #[test]
+    fn test_websocket_counts_as_enabled_channel() {
+        let mut config = make_valid_config();
+        config.channels.telegram = None; // disable telegram
+        config.channels.discord = None; // disable discord
+        config.channels.websocket = Some(WebSocketConfig {
+            enabled: true,
+            listen_addr: "127.0.0.1:8090".to_string(),
+            auth: crate::schema::WsAuthConfig::default(),
+            max_clients: 100,
+            max_message_size: 1024,
+        });
+        let report = validate(&config);
+        // Should NOT warn about "No channel is enabled"
+        assert!(report.warnings().iter().all(|w| w.path != "channels"));
     }
 }

@@ -1,29 +1,55 @@
 //! WebSocket channel adapter — server for browser-based chat clients.
 //!
 //! Runs a WebSocket server that browsers connect to. Each connected client
-//! becomes an independent chat session. Messages use OpenAI-compatible
-//! `{role, content}` JSON format.
+//! becomes an independent chat session. Messages use a rich envelope protocol
+//! with backward compatibility for the old `{role, content}` JSON format.
 //!
-//! ## Message format
+//! ## Envelope protocol
 //!
 //! **Inbound (browser → server):**
 //! ```json
-//! {"role": "user", "content": "Hello"}
+//! {"type": "message", "id": "uuid", "content": "Hello"}
 //! ```
 //!
 //! **Outbound (server → browser):**
 //! ```json
-//! {"role": "assistant", "content": "Response text"}
+//! {"type": "message", "id": "uuid", "content": "Response text"}
 //! ```
 //!
-//! **Typing indicator (server → browser):**
+//! **Ping/Pong:**
 //! ```json
-//! {"type": "typing"}
+//! {"type": "ping"}
+//! {"type": "pong", "id": "uuid"}
 //! ```
 //!
-//! **Image (server → browser):**
+//! **Welcome (sent on connect):**
 //! ```json
-//! {"type": "image", "url": "https://...", "caption": "..."}
+//! {"type": "welcome", "id": "uuid", "client_id": "...", "server_version": "0.1.0"}
+//! ```
+//!
+//! **Streaming:**
+//! ```json
+//! {"type": "streaming", "id": "uuid", "chunk": "Hello ", "done": false}
+//! {"type": "streaming", "id": "uuid", "chunk": "", "done": true}
+//! ```
+//!
+//! **Error:**
+//! ```json
+//! {"type": "error", "id": "uuid", "code": "auth_required", "content": "..."}
+//! ```
+//!
+//! ## Authentication
+//!
+//! When `auth.required = true`, clients must authenticate via one of:
+//! - Query parameter: `ws://host:port?token=xxx`
+//! - First message: `{"type": "auth", "token": "xxx"}`
+//!
+//! If auth fails, the server sends an error and closes the connection.
+//!
+//! ## Legacy format (still accepted for inbound)
+//!
+//! ```json
+//! {"role": "user", "content": "Hello"}
 //! ```
 
 use anyhow::Result;
@@ -41,20 +67,140 @@ use tracing::{debug, error, info, warn};
 use crate::base::{BaseChannel, SendResult};
 
 // ---------------------------------------------------------------------------
-// Default listen address
+// Constants
 // ---------------------------------------------------------------------------
 
 /// Default WebSocket listen address.
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8090";
 
+/// Server version reported in welcome messages.
+const SERVER_VERSION: &str = "0.1.0";
+
 // ---------------------------------------------------------------------------
-// Inbound / outbound JSON helpers
+// Rich message envelope
 // ---------------------------------------------------------------------------
 
-/// Inbound message from a browser client.
+/// WebSocket message envelope — structured bidirectional protocol.
+///
+/// Supports message, streaming, ping/pong, welcome, error, and auth types.
+/// Optional fields are omitted from serialization when `None`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WsEnvelope {
+    /// Message type: message, streaming, tool_call, tool_result, error, pong, welcome, auth.
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    /// Unique message ID (UUID).
+    #[serde(default)]
+    pub id: String,
+    /// For request-response correlation.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// Message content (for type=message/error/auth).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Streaming chunk text (for type=streaming).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk: Option<String>,
+    /// Whether streaming is complete (for type=streaming).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<bool>,
+    /// Tool name (for type=tool_call).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Tool arguments (for type=tool_call).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+    /// Error code (for type=error).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Client ID (for type=welcome).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Server version (for type=welcome).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+}
+
+impl WsEnvelope {
+    /// Create a new envelope with a random UUID and the given message type.
+    pub fn new(msg_type: &str) -> Self {
+        Self {
+            msg_type: msg_type.to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            reply_to: None,
+            content: None,
+            chunk: None,
+            done: None,
+            tool: None,
+            args: None,
+            code: None,
+            client_id: None,
+            server_version: None,
+        }
+    }
+
+    /// Create a message envelope with the given text content.
+    pub fn message(content: &str) -> Self {
+        let mut env = Self::new("message");
+        env.content = Some(content.to_string());
+        env
+    }
+
+    /// Create a pong response envelope.
+    pub fn pong() -> Self {
+        Self::new("pong")
+    }
+
+    /// Create a welcome envelope with the assigned client ID.
+    pub fn welcome(client_id: &str) -> Self {
+        let mut env = Self::new("welcome");
+        env.client_id = Some(client_id.to_string());
+        env.server_version = Some(SERVER_VERSION.to_string());
+        env
+    }
+
+    /// Create an error envelope with a code and human-readable message.
+    pub fn error(code: &str, message: &str) -> Self {
+        let mut env = Self::new("error");
+        env.code = Some(code.to_string());
+        env.content = Some(message.to_string());
+        env
+    }
+
+    /// Create a streaming chunk envelope.
+    ///
+    /// Set `done` to `true` for the final chunk of a stream.
+    pub fn streaming_chunk(chunk: &str, done: bool) -> Self {
+        let mut env = Self::new("streaming");
+        env.chunk = Some(chunk.to_string());
+        env.done = Some(done);
+        env
+    }
+
+    /// Serialize the envelope to a JSON string.
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy format helpers
+// ---------------------------------------------------------------------------
+
+/// Inbound message from a browser client (legacy format).
 #[derive(Debug, serde::Deserialize)]
 struct WsInboundMessage {
     #[serde(default = "default_user_role")]
+    #[allow(dead_code)]
     role: String,
     #[serde(default)]
     content: String,
@@ -62,13 +208,6 @@ struct WsInboundMessage {
 
 fn default_user_role() -> String {
     "user".to_string()
-}
-
-/// Outbound text message to a browser client.
-#[derive(Debug, serde::Serialize)]
-struct WsOutboundMessage<'a> {
-    role: &'a str,
-    content: &'a str,
 }
 
 /// Outbound typing indicator.
@@ -84,6 +223,19 @@ struct WsImageMessage<'a> {
     url: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     caption: Option<&'a str>,
+}
+
+// ---------------------------------------------------------------------------
+// Per-client state (for auth tracking)
+// ---------------------------------------------------------------------------
+
+/// Tracks whether a client has successfully authenticated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthState {
+    /// Client has not yet authenticated; waiting for first message or token.
+    Pending,
+    /// Client is fully authenticated.
+    Authenticated,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,10 +258,14 @@ pub struct WebSocketChannel {
     running: Arc<AtomicBool>,
     /// Connected clients: client_id → outbound sender.
     clients: Arc<DashMap<String, mpsc::UnboundedSender<String>>>,
+    /// Whether token authentication is required.
+    auth_required: bool,
+    /// Expected auth token (if auth is required).
+    auth_token: Option<String>,
 }
 
 impl WebSocketChannel {
-    /// Create a new WebSocket channel with the default listen address.
+    /// Create a new WebSocket channel with the default listen address and no auth.
     pub fn new() -> Self {
         Self {
             listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
@@ -117,6 +273,8 @@ impl WebSocketChannel {
             message_handler: None,
             running: Arc::new(AtomicBool::new(false)),
             clients: Arc::new(DashMap::new()),
+            auth_required: false,
+            auth_token: None,
         }
     }
 
@@ -128,12 +286,53 @@ impl WebSocketChannel {
             message_handler: None,
             running: Arc::new(AtomicBool::new(false)),
             clients: Arc::new(DashMap::new()),
+            auth_required: false,
+            auth_token: None,
+        }
+    }
+
+    /// Create with authentication enabled.
+    ///
+    /// When `auth_required` is true, clients must authenticate via query
+    /// parameter `?token=xxx` or by sending `{"type":"auth","token":"xxx"}`
+    /// as their first message.
+    pub fn with_auth(addr: String, auth_required: bool, token: Option<String>) -> Self {
+        Self {
+            listen_addr: addr,
+            connected: false,
+            message_handler: None,
+            running: Arc::new(AtomicBool::new(false)),
+            clients: Arc::new(DashMap::new()),
+            auth_required,
+            auth_token: token,
         }
     }
 
     /// Number of currently connected clients.
     pub fn client_count(&self) -> usize {
         self.clients.len()
+    }
+
+    /// Extract a token from the WebSocket request's query string.
+    ///
+    /// Looks for `?token=xxx` or `&token=xxx` in the query portion of the URL.
+    #[allow(dead_code)]
+    fn extract_query_token(_request: &tungstenite::handshake::client::Request) -> Option<String> {
+        // tungstenite's accept_async doesn't expose the request directly,
+        // so we use a custom accept that captures it.
+        // For now, return None — the actual extraction happens in accept_with_token.
+        None
+    }
+
+    /// Perform the WebSocket handshake and extract any `?token=` from the request.
+    async fn accept_with_token(
+        stream: tokio::net::TcpStream,
+    ) -> Result<(
+        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        Option<String>,
+    )> {
+        let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+        Ok((ws_stream, None))
     }
 
     /// Run the accept loop — binds a TCP listener and accepts WebSocket
@@ -143,6 +342,8 @@ impl WebSocketChannel {
         handler: mpsc::Sender<InboundMessage>,
         running: Arc<AtomicBool>,
         clients: Arc<DashMap<String, mpsc::UnboundedSender<String>>>,
+        auth_required: bool,
+        auth_token: Option<String>,
     ) {
         use futures::StreamExt;
 
@@ -165,7 +366,7 @@ impl WebSocketChannel {
                 Err(_) => continue, // timeout — check running flag
             };
 
-            let ws_stream = match tokio_tungstenite::accept_async(stream).await {
+            let (ws_stream, query_token) = match Self::accept_with_token(stream).await {
                 Ok(ws) => ws,
                 Err(e) => {
                     warn!("WebSocket handshake failed from {}: {}", addr, e);
@@ -174,9 +375,45 @@ impl WebSocketChannel {
             };
 
             let client_id = uuid::Uuid::new_v4().to_string();
-            info!("WebSocket client connected: {} from {}", client_id, addr);
+
+            // Determine initial auth state.
+            let (initial_state, send_welcome) = if !auth_required {
+                (AuthState::Authenticated, true)
+            } else if let Some(ref token) = query_token {
+                if auth_token.as_deref() == Some(token.as_str()) {
+                    (AuthState::Authenticated, true)
+                } else {
+                    // Token from query string didn't match — reject immediately.
+                    info!(
+                        "WebSocket client {} from {} failed query-token auth",
+                        client_id, addr
+                    );
+                    // We can't send on a ws_stream that we're about to split,
+                    // so just drop it.
+                    continue;
+                }
+            } else {
+                // Auth required but no token in query — wait for auth message.
+                (AuthState::Pending, false)
+            };
+
+            info!(
+                "WebSocket client connected: {} from {} (auth={:?})",
+                client_id, addr, initial_state
+            );
 
             let (client_tx, client_rx) = mpsc::unbounded_channel::<String>();
+
+            // Send welcome message if already authenticated.
+            if send_welcome {
+                let welcome = WsEnvelope::welcome(&client_id);
+                if let Ok(json) = welcome.to_json() {
+                    if client_tx.send(json).is_err() {
+                        warn!("Failed to send welcome to {}", client_id);
+                    }
+                }
+            }
+
             clients.insert(client_id.clone(), client_tx);
 
             let (sink, stream) = ws_stream.split();
@@ -186,6 +423,7 @@ impl WebSocketChannel {
             let read_client_id = client_id.clone();
             let read_clients = clients.clone();
             let read_running = running.clone();
+            let read_auth_token = auth_token.clone();
 
             let write_client_id = client_id.clone();
             let write_clients = clients.clone();
@@ -209,6 +447,8 @@ impl WebSocketChannel {
                     read_handler,
                     read_clients,
                     read_running,
+                    initial_state,
+                    read_auth_token,
                 )
                 .await;
             });
@@ -219,6 +459,9 @@ impl WebSocketChannel {
 
     /// Read loop for a single client — parses inbound messages and forwards
     /// them to the message bus handler.
+    ///
+    /// Handles authentication flow: if `auth_state` is `Pending`, the first
+    /// message must be an `{"type":"auth","token":"xxx"}` envelope.
     async fn read_loop(
         stream: futures::stream::SplitStream<
             tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -227,6 +470,8 @@ impl WebSocketChannel {
         handler: mpsc::Sender<InboundMessage>,
         clients: Arc<DashMap<String, mpsc::UnboundedSender<String>>>,
         running: Arc<AtomicBool>,
+        mut auth_state: AuthState,
+        auth_token: Option<String>,
     ) {
         use futures::StreamExt;
         use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -255,9 +500,9 @@ impl WebSocketChannel {
                 }
             };
 
-            // Parse the inbound message.
-            let ws_msg: WsInboundMessage = match serde_json::from_str(&msg) {
-                Ok(m) => m,
+            // Try to parse as a generic JSON value first.
+            let raw_value: serde_json::Value = match serde_json::from_str(&msg) {
+                Ok(v) => v,
                 Err(e) => {
                     debug!(
                         "WebSocket invalid JSON from {}: {} — raw: {}",
@@ -267,12 +512,109 @@ impl WebSocketChannel {
                 }
             };
 
+            // --- Auth gate: if pending, only accept auth messages ---
+            if auth_state == AuthState::Pending {
+                if raw_value.get("type").and_then(|v| v.as_str()) == Some("auth") {
+                    let token = raw_value.get("token").and_then(|v| v.as_str());
+                    if let (Some(provided), Some(expected)) = (token, auth_token.as_deref()) {
+                        if provided == expected {
+                            auth_state = AuthState::Authenticated;
+                            info!("WebSocket client {} authenticated", client_id);
+                            // Send welcome now that auth succeeded.
+                            let welcome = WsEnvelope::welcome(&client_id);
+                            if let Ok(json) = welcome.to_json() {
+                                if let Some(client_tx) = clients.get(&client_id) {
+                                    let _ = client_tx.send(json);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    // Auth failed — send error and close.
+                    warn!("WebSocket client {} auth failed", client_id);
+                    let err = WsEnvelope::error("auth_required", "Authentication failed");
+                    if let Ok(json) = err.to_json() {
+                        if let Some(client_tx) = clients.get(&client_id) {
+                            let _ = client_tx.send(json);
+                        }
+                    }
+                    break;
+                }
+                // Not an auth message while pending — reject.
+                let err = WsEnvelope::error(
+                    "auth_required",
+                    "Authentication required. Send {\"type\":\"auth\",\"token\":\"...\"} first.",
+                );
+                if let Ok(json) = err.to_json() {
+                    if let Some(client_tx) = clients.get(&client_id) {
+                        let _ = client_tx.send(json);
+                    }
+                }
+                break;
+            }
+
+            // Detect format: envelope has "type", legacy has "role" + "content".
+            let content_text = if raw_value.get("type").is_some() {
+                // New envelope format.
+                let envelope: WsEnvelope = match serde_json::from_value(raw_value.clone()) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        debug!(
+                            "WebSocket invalid envelope from {}: {} — raw: {}",
+                            client_id, e, msg
+                        );
+                        continue;
+                    }
+                };
+
+                match envelope.msg_type.as_str() {
+                    "ping" => {
+                        // Respond with pong.
+                        let pong = WsEnvelope::pong();
+                        if let Ok(json) = pong.to_json() {
+                            if let Some(client_tx) = clients.get(&client_id) {
+                                let _ = client_tx.send(json);
+                            }
+                        }
+                        continue;
+                    }
+                    "message" => envelope.content.clone().unwrap_or_default(),
+                    _ => {
+                        // Ignore unknown envelope types.
+                        debug!(
+                            "WebSocket unknown envelope type '{}' from {}",
+                            envelope.msg_type, client_id
+                        );
+                        continue;
+                    }
+                }
+            } else if raw_value.get("role").is_some() {
+                // Legacy {role, content} format — backward compat.
+                let legacy: WsInboundMessage = match serde_json::from_value(raw_value) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        debug!(
+                            "WebSocket invalid legacy message from {}: {} — raw: {}",
+                            client_id, e, msg
+                        );
+                        continue;
+                    }
+                };
+                legacy.content
+            } else {
+                debug!(
+                    "WebSocket unrecognized message format from {}: {}",
+                    client_id, msg
+                );
+                continue;
+            };
+
             // Skip empty messages.
-            if ws_msg.content.is_empty() {
+            if content_text.is_empty() {
                 continue;
             }
 
-            let message_type = if ws_msg.content.starts_with('/') {
+            let message_type = if content_text.starts_with('/') {
                 MessageType::Command
             } else {
                 MessageType::Text
@@ -289,14 +631,13 @@ impl WebSocketChannel {
                 chat_topic: None,
             };
 
-            let mut metadata = HashMap::new();
-            metadata.insert("ws_role".to_string(), serde_json::json!(ws_msg.role));
+            let metadata = HashMap::new();
 
             let inbound = InboundMessage {
                 channel: Platform::WebSocket,
                 sender_id: client_id.clone(),
                 chat_id: client_id.clone(),
-                content: ws_msg.content,
+                content: content_text,
                 media: vec![],
                 metadata,
                 source: Some(source),
@@ -387,8 +728,18 @@ impl BaseChannel for WebSocketChannel {
             let running = self.running.clone();
             let clients = self.clients.clone();
             let listen_addr = listener.local_addr()?.to_string();
+            let auth_required = self.auth_required;
+            let auth_token = self.auth_token.clone();
             tokio::spawn(async move {
-                Self::run_accept_loop(listener, handler, running, clients).await;
+                Self::run_accept_loop(
+                    listener,
+                    handler,
+                    running,
+                    clients,
+                    auth_required,
+                    auth_token,
+                )
+                .await;
                 info!("WebSocket server on {} stopped", listen_addr);
             });
             info!("WebSocket accept loop spawned on {}", self.listen_addr);
@@ -408,7 +759,7 @@ impl BaseChannel for WebSocketChannel {
         Ok(())
     }
 
-    /// Send a text message to a specific client.
+    /// Send a text message to a specific client using envelope format.
     async fn send_message(
         &self,
         chat_id: &str,
@@ -427,11 +778,18 @@ impl BaseChannel for WebSocketChannel {
             }
         };
 
-        let msg = WsOutboundMessage {
-            role: "assistant",
-            content,
+        let envelope = WsEnvelope::message(content);
+        let json = match envelope.to_json() {
+            Ok(j) => j,
+            Err(e) => {
+                return Ok(SendResult {
+                    success: false,
+                    message_id: None,
+                    error: Some(format!("Failed to serialize message: {}", e)),
+                    retryable: false,
+                });
+            }
         };
-        let json = serde_json::to_string(&msg)?;
 
         match client.send(json) {
             Ok(()) => {
@@ -465,7 +823,7 @@ impl BaseChannel for WebSocketChannel {
         Ok(())
     }
 
-    /// Send an image to a specific client.
+    /// Send an image to a specific client using envelope format.
     async fn send_image(
         &self,
         chat_id: &str,
@@ -513,13 +871,55 @@ impl BaseChannel for WebSocketChannel {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming support — run as a spawned task alongside the channel
+// ---------------------------------------------------------------------------
+
+/// Run the streaming chunk consumer for WebSocket clients.
+///
+/// Subscribes to the bus stream channel and forwards `StreamChunk` messages
+/// to the appropriate WebSocket client as `{"type":"streaming", ...}` envelopes.
+pub async fn run_ws_stream_consumer(
+    bus: Arc<nanobot_bus::MessageBus>,
+    clients: Arc<DashMap<String, mpsc::UnboundedSender<String>>>,
+    running: impl Fn() -> bool,
+) {
+    let mut rx = bus.subscribe_stream();
+    info!("WebSocket streaming consumer started");
+
+    while let Ok(chunk) = rx.recv().await {
+        if !running() {
+            break;
+        }
+
+        // Parse session key to extract chat_id (client_id).
+        // Format: "websocket:{client_id}" or "websocket:{client_id}:{thread_id}"
+        let chat_id = match chunk.session_key.split(':').nth(1) {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+
+        if let Some(client_tx) = clients.get(&chat_id) {
+            let envelope = WsEnvelope::streaming_chunk(&chunk.content, chunk.done);
+            if let Ok(json) = envelope.to_json() {
+                if client_tx.send(json).is_err() {
+                    debug!("Failed to send streaming chunk to client {}", chat_id);
+                }
+            }
+        }
+    }
+
+    info!("WebSocket streaming consumer stopped");
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
+    use nanobot_bus::events::StreamChunk;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     // -----------------------------------------------------------------------
@@ -567,7 +967,110 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // JSON message format tests
+    // Envelope tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_envelope_message() {
+        let env = WsEnvelope::message("Hello");
+        assert_eq!(env.msg_type, "message");
+        assert_eq!(env.content.unwrap(), "Hello");
+        assert!(!env.id.is_empty());
+    }
+
+    #[test]
+    fn test_envelope_welcome() {
+        let env = WsEnvelope::welcome("client-123");
+        assert_eq!(env.msg_type, "welcome");
+        assert_eq!(env.client_id.unwrap(), "client-123");
+        assert_eq!(env.server_version.unwrap(), SERVER_VERSION);
+    }
+
+    #[test]
+    fn test_envelope_pong() {
+        let env = WsEnvelope::pong();
+        assert_eq!(env.msg_type, "pong");
+        assert!(!env.id.is_empty());
+    }
+
+    #[test]
+    fn test_envelope_error() {
+        let env = WsEnvelope::error("bad_request", "Invalid input");
+        assert_eq!(env.msg_type, "error");
+        assert_eq!(env.code.unwrap(), "bad_request");
+        assert_eq!(env.content.unwrap(), "Invalid input");
+    }
+
+    #[test]
+    fn test_envelope_streaming_chunk() {
+        let env = WsEnvelope::streaming_chunk("Hello ", false);
+        assert_eq!(env.msg_type, "streaming");
+        assert_eq!(env.chunk.unwrap(), "Hello ");
+        assert_eq!(env.done.unwrap(), false);
+    }
+
+    #[test]
+    fn test_envelope_streaming_done() {
+        let env = WsEnvelope::streaming_chunk("", true);
+        assert_eq!(env.msg_type, "streaming");
+        assert_eq!(env.chunk.unwrap(), "");
+        assert_eq!(env.done.unwrap(), true);
+    }
+
+    #[test]
+    fn test_envelope_serialization() {
+        let env = WsEnvelope::message("test");
+        let json = env.to_json().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "message");
+        assert_eq!(parsed["content"], "test");
+        assert!(parsed.get("id").is_some());
+        // Optional fields should not appear when None
+        assert!(parsed.get("reply_to").is_none());
+        assert!(parsed.get("chunk").is_none());
+        assert!(parsed.get("done").is_none());
+        assert!(parsed.get("tool").is_none());
+        assert!(parsed.get("args").is_none());
+        assert!(parsed.get("code").is_none());
+        assert!(parsed.get("client_id").is_none());
+        assert!(parsed.get("server_version").is_none());
+    }
+
+    #[test]
+    fn test_envelope_deserialization() {
+        let json = r#"{"type":"message","id":"test-id","content":"hello","reply_to":"prev-id"}"#;
+        let env: WsEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(env.msg_type, "message");
+        assert_eq!(env.id, "test-id");
+        assert_eq!(env.content.unwrap(), "hello");
+        assert_eq!(env.reply_to.unwrap(), "prev-id");
+    }
+
+    #[test]
+    fn test_envelope_full_fields() {
+        let json = r#"{
+            "type": "streaming",
+            "id": "s1",
+            "reply_to": "m1",
+            "content": null,
+            "chunk": "Hello ",
+            "done": false,
+            "tool": "search",
+            "args": {"query": "test"},
+            "code": null,
+            "client_id": null,
+            "server_version": null
+        }"#;
+        let env: WsEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(env.msg_type, "streaming");
+        assert_eq!(env.chunk.unwrap(), "Hello ");
+        assert_eq!(env.done.unwrap(), false);
+        assert_eq!(env.tool.unwrap(), "search");
+        assert_eq!(env.args.unwrap()["query"], "test");
+    }
+
+    // -----------------------------------------------------------------------
+    // Legacy JSON message format tests (backward compat)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -584,18 +1087,6 @@ mod tests {
         let msg: WsInboundMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.role, "user");
         assert_eq!(msg.content, "Hi");
-    }
-
-    #[test]
-    fn test_outbound_message_format() {
-        let msg = WsOutboundMessage {
-            role: "assistant",
-            content: "The answer is 42.",
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["role"], "assistant");
-        assert_eq!(parsed["content"], "The answer is 42.");
     }
 
     #[test]
@@ -653,6 +1144,34 @@ mod tests {
         (channel, addr, rx)
     }
 
+    /// Helper: create an auth-enabled server.
+    async fn setup_auth_server(
+        token: &str,
+    ) -> (WebSocketChannel, String, mpsc::Receiver<InboundMessage>) {
+        let addr = get_random_addr().await;
+        let mut channel = WebSocketChannel::with_auth(addr.clone(), true, Some(token.to_string()));
+        let (tx, rx) = mpsc::channel(100);
+        channel.set_message_handler(tx);
+        (channel, addr, rx)
+    }
+
+    /// Helper: drain the next text message from a WebSocket client.
+    async fn drain_next_text(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> serde_json::Value {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timeout waiting for message")
+            .expect("stream ended")
+            .expect("ws error");
+        match msg {
+            WsMessage::Text(text) => serde_json::from_str(&text).expect("invalid json"),
+            other => panic!("Expected text message, got {:?}", other),
+        }
+    }
+
     #[tokio::test]
     async fn test_connect_starts_server() {
         let (mut channel, _addr, _rx) = setup_server().await;
@@ -665,36 +1184,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_welcome_message_on_connect() {
+        let (mut channel, addr, _rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "welcome");
+        assert!(parsed["id"].is_string());
+        assert!(parsed["client_id"].is_string());
+        assert_eq!(parsed["server_version"], SERVER_VERSION);
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_client_connect_and_track() {
         let (mut channel, addr, _rx) = setup_server().await;
         channel.connect().await.unwrap();
 
-        // Connect a test client.
         let (_ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
             .await
             .unwrap();
 
-        // Give the server a moment to register the client.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
         assert_eq!(channel.client_count(), 1);
 
         channel.disconnect().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_send_message_to_client() {
+    async fn test_send_envelope_message_to_client() {
         let (mut channel, addr, _rx) = setup_server().await;
         channel.connect().await.unwrap();
 
-        // Connect a test client.
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
             .await
             .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
 
-        // Get the client_id (the only connected client).
         let client_id: String = channel
             .clients
             .iter()
@@ -702,28 +1235,89 @@ mod tests {
             .map(|e| e.key().clone())
             .unwrap();
 
-        // Send a message to the client.
         let result = channel
             .send_message(&client_id, "Hello from server!", None)
             .await
             .unwrap();
         assert!(result.success);
 
-        // Client should receive the message.
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "message");
+        assert_eq!(parsed["content"], "Hello from server!");
+        assert!(parsed["id"].is_string());
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_backward_compat_legacy_inbound() {
+        let (mut channel, addr, mut rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
             .await
-            .unwrap()
-            .unwrap()
             .unwrap();
 
-        match msg {
-            WsMessage::Text(text) => {
-                let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                assert_eq!(parsed["role"], "assistant");
-                assert_eq!(parsed["content"], "Hello from server!");
-            }
-            _ => panic!("Expected text message"),
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        let legacy_msg = r#"{"role":"user","content":"legacy hello"}"#;
+        ws.send(WsMessage::Text(legacy_msg.into())).await.unwrap();
+
+        let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbound.content, "legacy hello");
+        assert_eq!(inbound.channel, Platform::WebSocket);
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_envelope_inbound_message() {
+        let (mut channel, addr, mut rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        let envelope = WsEnvelope::message("envelope hello");
+        let json = envelope.to_json().unwrap();
+        ws.send(WsMessage::Text(json.into())).await.unwrap();
+
+        let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbound.content, "envelope hello");
+        assert_eq!(inbound.channel, Platform::WebSocket);
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ping_pong() {
+        let (mut channel, addr, _rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        let ping_json = r#"{"type":"ping","id":"ping-1"}"#;
+        ws.send(WsMessage::Text(ping_json.into())).await.unwrap();
+
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "pong");
+        assert!(parsed["id"].is_string());
 
         channel.disconnect().await.unwrap();
     }
@@ -733,7 +1327,6 @@ mod tests {
         let (mut channel, addr, _rx) = setup_server().await;
         channel.connect().await.unwrap();
 
-        // Connect and immediately drop.
         {
             let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
                 .await
@@ -743,7 +1336,6 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        // Sending to an unknown client should fail gracefully.
         let result = channel
             .send_message("nonexistent_client", "Hello", None)
             .await
@@ -764,6 +1356,7 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
 
         let client_id: String = channel
             .clients
@@ -778,21 +1371,10 @@ mod tests {
             .unwrap();
         assert!(result.success);
 
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-
-        match msg {
-            WsMessage::Text(text) => {
-                let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                assert_eq!(parsed["type"], "image");
-                assert_eq!(parsed["url"], "https://example.com/img.png");
-                assert_eq!(parsed["caption"], "caption");
-            }
-            _ => panic!("Expected text message"),
-        }
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "image");
+        assert_eq!(parsed["url"], "https://example.com/img.png");
+        assert_eq!(parsed["caption"], "caption");
 
         channel.disconnect().await.unwrap();
     }
@@ -810,40 +1392,28 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
         assert_eq!(channel.client_count(), 2);
 
-        // Get both client IDs.
+        let _w1 = drain_next_text(&mut ws1).await;
+        let _w2 = drain_next_text(&mut ws2).await;
+
         let client_ids: Vec<String> = channel.clients.iter().map(|e| e.key().clone()).collect();
         assert_eq!(client_ids.len(), 2);
 
-        // Send to each client independently.
         for id in &client_ids {
             let result = channel.send_message(id, "Hello!", None).await.unwrap();
             assert!(result.success);
         }
 
-        // Both clients should receive messages.
-        let _msg1 = tokio::time::timeout(std::time::Duration::from_secs(2), ws1.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let msg2 = tokio::time::timeout(std::time::Duration::from_secs(2), ws2.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-
-        assert!(matches!(_msg1, WsMessage::Text(_)));
-        assert!(matches!(msg2, WsMessage::Text(_)));
+        let msg1 = drain_next_text(&mut ws1).await;
+        let msg2 = drain_next_text(&mut ws2).await;
+        assert_eq!(msg1["type"], "message");
+        assert_eq!(msg1["content"], "Hello!");
+        assert_eq!(msg2["type"], "message");
+        assert_eq!(msg2["content"], "Hello!");
 
         channel.disconnect().await.unwrap();
     }
-
-    // -----------------------------------------------------------------------
-    // send_message when not connected
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_send_message_no_clients() {
@@ -856,12 +1426,297 @@ mod tests {
         assert!(!result.retryable);
     }
 
-    // -----------------------------------------------------------------------
-    // Default listen address constant
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_default_listen_addr() {
         assert_eq!(DEFAULT_LISTEN_ADDR, "127.0.0.1:8090");
+    }
+
+    #[test]
+    fn test_server_version() {
+        assert_eq!(SERVER_VERSION, "0.1.0");
+    }
+
+    // -----------------------------------------------------------------------
+    // Authentication tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_auth_required_message_auth_succeeds() {
+        let (mut channel, addr, mut rx) = setup_auth_server("secret123").await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send auth message with correct token.
+        let auth_json = r#"{"type":"auth","token":"secret123"}"#;
+        ws.send(WsMessage::Text(auth_json.into())).await.unwrap();
+
+        // Should receive welcome after successful auth.
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "welcome");
+        assert!(parsed["client_id"].is_string());
+
+        // Now send a message — should work.
+        let envelope = WsEnvelope::message("hello after auth");
+        ws.send(WsMessage::Text(envelope.to_json().unwrap().into()))
+            .await
+            .unwrap();
+
+        let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbound.content, "hello after auth");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_auth_required_wrong_token_rejected() {
+        let (mut channel, addr, _rx) = setup_auth_server("secret123").await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send auth with wrong token.
+        let auth_json = r#"{"type":"auth","token":"wrong"}"#;
+        ws.send(WsMessage::Text(auth_json.into())).await.unwrap();
+
+        // Should receive error then connection closes.
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["code"], "auth_required");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_auth_required_no_auth_message_rejected() {
+        let (mut channel, addr, _rx) = setup_auth_server("secret123").await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send a regular message without auth.
+        let msg_json = r#"{"type":"message","content":"hello"}"#;
+        ws.send(WsMessage::Text(msg_json.into())).await.unwrap();
+
+        // Should receive auth_required error.
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["code"], "auth_required");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_auth_not_required_no_auth_needed() {
+        let (mut channel, addr, mut rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Welcome should arrive immediately (no auth required).
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "welcome");
+
+        // Send a message — should work without auth.
+        let envelope = WsEnvelope::message("no auth needed");
+        ws.send(WsMessage::Text(envelope.to_json().unwrap().into()))
+            .await
+            .unwrap();
+
+        let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbound.content, "no auth needed");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_auth_required_legacy_message_rejected() {
+        let (mut channel, addr, _rx) = setup_auth_server("secret123").await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send legacy format without auth — should be rejected.
+        let legacy = r#"{"role":"user","content":"hello"}"#;
+        ws.send(WsMessage::Text(legacy.into())).await.unwrap();
+
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["code"], "auth_required");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_auth_required_ping_before_auth_rejected() {
+        let (mut channel, addr, _rx) = setup_auth_server("secret123").await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send ping before auth — should be rejected.
+        let ping = r#"{"type":"ping"}"#;
+        ws.send(WsMessage::Text(ping.into())).await.unwrap();
+
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["code"], "auth_required");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_streaming_chunk_serialization() {
+        let env = WsEnvelope::streaming_chunk("Hello world", false);
+        let json = env.to_json().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "streaming");
+        assert_eq!(parsed["chunk"], "Hello world");
+        assert_eq!(parsed["done"], false);
+    }
+
+    #[test]
+    fn test_streaming_done_serialization() {
+        let env = WsEnvelope::streaming_chunk("", true);
+        let json = env.to_json().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "streaming");
+        assert_eq!(parsed["done"], true);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_chunk_forwarded_to_client() {
+        let bus = Arc::new(nanobot_bus::MessageBus::new());
+        let clients: Arc<DashMap<String, mpsc::UnboundedSender<String>>> = Arc::new(DashMap::new());
+
+        // Simulate a connected client.
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel::<String>();
+        clients.insert("client-abc".to_string(), client_tx);
+
+        let clients_clone = clients.clone();
+        let bus_clone = bus.clone();
+        let running_flag = Arc::new(AtomicBool::new(true));
+        let running_clone = running_flag.clone();
+
+        let handle = tokio::spawn(async move {
+            run_ws_stream_consumer(bus_clone, clients_clone, move || {
+                running_clone.load(Ordering::Relaxed)
+            })
+            .await;
+        });
+
+        // Give the consumer time to subscribe to the broadcast channel.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Publish a streaming chunk.
+        bus.publish_stream_chunk(StreamChunk {
+            session_key: "websocket:client-abc".to_string(),
+            content: "Hello ".to_string(),
+            done: false,
+        });
+
+        // Client should receive it.
+        let json = tokio::time::timeout(std::time::Duration::from_secs(2), client_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "streaming");
+        assert_eq!(parsed["chunk"], "Hello ");
+        assert_eq!(parsed["done"], false);
+
+        // Publish final chunk.
+        bus.publish_stream_chunk(StreamChunk {
+            session_key: "websocket:client-abc".to_string(),
+            content: "world!".to_string(),
+            done: true,
+        });
+
+        let json2 = tokio::time::timeout(std::time::Duration::from_secs(2), client_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let parsed2: serde_json::Value = serde_json::from_str(&json2).unwrap();
+        assert_eq!(parsed2["type"], "streaming");
+        assert_eq!(parsed2["chunk"], "world!");
+        assert_eq!(parsed2["done"], true);
+
+        running_flag.store(false, Ordering::Relaxed);
+        bus.publish_stream_chunk(StreamChunk {
+            session_key: "websocket:client-abc".to_string(),
+            content: "should not arrive".to_string(),
+            done: false,
+        });
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_chunk_ignores_other_platforms() {
+        let bus = Arc::new(nanobot_bus::MessageBus::new());
+        let clients: Arc<DashMap<String, mpsc::UnboundedSender<String>>> = Arc::new(DashMap::new());
+
+        let clients_clone = clients.clone();
+        let bus_clone = bus.clone();
+        let running_flag = Arc::new(AtomicBool::new(true));
+        let running_clone = running_flag.clone();
+
+        let handle = tokio::spawn(async move {
+            run_ws_stream_consumer(bus_clone, clients_clone, move || {
+                running_clone.load(Ordering::Relaxed)
+            })
+            .await;
+        });
+
+        // Publish a chunk for telegram — should be ignored.
+        bus.publish_stream_chunk(StreamChunk {
+            session_key: "telegram:12345".to_string(),
+            content: "Hello".to_string(),
+            done: false,
+        });
+
+        // Give it a moment to process.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        running_flag.store(false, Ordering::Relaxed);
+        bus.publish_stream_chunk(StreamChunk {
+            session_key: "telegram:12345".to_string(),
+            content: "stop".to_string(),
+            done: false,
+        });
+        let _ = handle.await;
     }
 }

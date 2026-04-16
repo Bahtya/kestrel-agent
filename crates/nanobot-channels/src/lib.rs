@@ -18,7 +18,7 @@ pub use platforms::telegram::{
     CallbackAction, CallbackContext, CallbackResponse, CallbackRouter, InlineKeyboardBuilder,
     InlineKeyboardButton, InlineKeyboardMarkup,
 };
-pub use platforms::websocket::WebSocketChannel;
+pub use platforms::websocket::{run_ws_stream_consumer, WebSocketChannel};
 pub use registry::ChannelRegistry;
 
 #[cfg(test)]

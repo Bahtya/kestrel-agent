@@ -796,7 +796,7 @@ impl TelegramChannel {
         Ok(())
     }
 
-    fn bot_commands() -> Vec<BotCommand> {
+    fn static_bot_commands() -> Vec<BotCommand> {
         vec![
             BotCommand {
                 command: "help".to_string(),
@@ -833,13 +833,30 @@ impl TelegramChannel {
         ]
     }
 
+    async fn bot_commands() -> Vec<BotCommand> {
+        let mut commands = Self::static_bot_commands();
+        let dynamic_commands = crate::commands::dynamic_skill_commands().await;
+        commands.extend(dynamic_commands.into_iter().map(|(command, description)| {
+            let description = if description.len() > 256 {
+                description.chars().take(253).collect::<String>() + "..."
+            } else {
+                description
+            };
+            BotCommand {
+                command,
+                description,
+            }
+        }));
+        commands
+    }
+
     async fn register_bot_commands(&self) -> Result<()> {
         let url = self.api_url("setMyCommands");
         let resp = self
             .client
             .post(&url)
             .json(&SetMyCommandsBody {
-                commands: Self::bot_commands(),
+                commands: Self::bot_commands().await,
             })
             .send()
             .await
@@ -1044,20 +1061,48 @@ impl TelegramChannel {
                             .await;
                         Self::send_read_receipt(&client, &base_url, msg.chat.id, msg.message_id)
                             .await;
-                    } else if let Some(response) = crate::commands::try_handle_command(text).await {
-                        // Built-in command matched — reply directly, skip bus.
-                        Self::send_direct_reply(
-                            &client,
-                            &base_url,
-                            msg.chat.id,
-                            &response.text,
-                            response.keyboard.as_ref(),
-                        )
-                        .await;
-                        Self::send_read_receipt(&client, &base_url, msg.chat.id, msg.message_id)
-                            .await;
+                    } else if let Some(dispatch) = crate::commands::try_handle_command(text).await {
+                        match dispatch {
+                            crate::commands::CommandDispatch::Respond(response) => {
+                                Self::send_direct_reply(
+                                    &client,
+                                    &base_url,
+                                    msg.chat.id,
+                                    &response.text,
+                                    response.keyboard.as_ref(),
+                                )
+                                .await;
+                                Self::send_read_receipt(
+                                    &client,
+                                    &base_url,
+                                    msg.chat.id,
+                                    msg.message_id,
+                                )
+                                .await;
+                            }
+                            crate::commands::CommandDispatch::Rewrite(rewritten) => {
+                                match Self::dispatch_message(&handler, &msg, Some(rewritten)).await
+                                {
+                                    Ok(true) => {
+                                        Self::send_read_receipt(
+                                            &client,
+                                            &base_url,
+                                            msg.chat.id,
+                                            msg.message_id,
+                                        )
+                                        .await;
+                                    }
+                                    Ok(false) => {}
+                                    Err(e) => {
+                                        error!(
+                                            "Failed to dispatch rewritten Telegram message: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     } else {
-                        match Self::dispatch_message(&handler, &msg).await {
+                        match Self::dispatch_message(&handler, &msg, None).await {
                             Ok(true) => {
                                 // Message dispatched — send 👀 read receipt.
                                 Self::send_read_receipt(
@@ -1096,6 +1141,7 @@ impl TelegramChannel {
     async fn dispatch_message(
         handler: &tokio::sync::mpsc::Sender<InboundMessage>,
         msg: &TgMessage,
+        text_override: Option<String>,
     ) -> Result<bool> {
         let sender_id = msg
             .from
@@ -1113,7 +1159,7 @@ impl TelegramChannel {
             }
         });
 
-        let text = msg.text.clone().unwrap_or_default();
+        let text = text_override.unwrap_or_else(|| msg.text.clone().unwrap_or_default());
 
         // If there is no text and no photo, skip the message.
         if text.is_empty() && msg.photo.is_none() {
@@ -2214,10 +2260,35 @@ mod tests {
         assert_eq!(url, "https://api.telegram.org/bot123456:ABC-DEF/getMe");
     }
 
-    #[test]
-    fn test_bot_commands_include_skill() {
-        let commands = TelegramChannel::bot_commands();
+    #[tokio::test]
+    async fn test_bot_commands_include_skill() {
+        let commands = TelegramChannel::bot_commands().await;
         assert!(commands.iter().any(|command| command.command == "skill"));
+    }
+
+    #[tokio::test]
+    async fn test_bot_commands_include_dynamic_skills() {
+        let registry = Arc::new(kestrel_skill::SkillRegistry::new());
+        registry
+            .register(kestrel_skill::skill::CompiledSkill::new(
+                kestrel_skill::manifest::SkillManifestBuilder::new(
+                    "plan-release",
+                    "1.0.0",
+                    "Plan releases",
+                )
+                .triggers(["plan", "release"])
+                .build(),
+            ))
+            .await
+            .unwrap();
+        crate::commands::set_skill_registry(Some(registry));
+
+        let commands = TelegramChannel::bot_commands().await;
+        assert!(commands
+            .iter()
+            .any(|command| command.command == "plan-release"));
+
+        crate::commands::set_skill_registry(None);
     }
 
     #[tokio::test]
@@ -2421,7 +2492,9 @@ mod tests {
             reply_to_message: None,
         };
 
-        TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        TelegramChannel::dispatch_message(&tx, &msg, None)
+            .await
+            .unwrap();
 
         let inbound = rx.try_recv().unwrap();
         assert_eq!(inbound.channel, Platform::Telegram);
@@ -2461,7 +2534,9 @@ mod tests {
             reply_to_message: None,
         };
 
-        TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        TelegramChannel::dispatch_message(&tx, &msg, None)
+            .await
+            .unwrap();
 
         let inbound = rx.try_recv().unwrap();
         assert_eq!(inbound.message_type, MessageType::Command);
@@ -2508,7 +2583,9 @@ mod tests {
             reply_to_message: None,
         };
 
-        TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        TelegramChannel::dispatch_message(&tx, &msg, None)
+            .await
+            .unwrap();
 
         let inbound = rx.try_recv().unwrap();
         assert_eq!(inbound.message_type, MessageType::Photo);
@@ -2554,7 +2631,9 @@ mod tests {
             })),
         };
 
-        TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        TelegramChannel::dispatch_message(&tx, &msg, None)
+            .await
+            .unwrap();
 
         let inbound = rx.try_recv().unwrap();
         assert_eq!(inbound.reply_to.as_deref(), Some("299"));
@@ -2585,7 +2664,9 @@ mod tests {
         };
 
         // Should succeed but not send anything — no text, no photo.
-        let dispatched = TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        let dispatched = TelegramChannel::dispatch_message(&tx, &msg, None)
+            .await
+            .unwrap();
         assert!(!dispatched);
     }
 
@@ -2606,7 +2687,9 @@ mod tests {
             caption: None,
             reply_to_message: None,
         };
-        let dispatched = TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        let dispatched = TelegramChannel::dispatch_message(&tx, &msg, None)
+            .await
+            .unwrap();
         assert!(dispatched);
     }
 
@@ -2631,7 +2714,9 @@ mod tests {
             caption: None,
             reply_to_message: None,
         };
-        let dispatched = TelegramChannel::dispatch_message(&tx, &msg).await.unwrap();
+        let dispatched = TelegramChannel::dispatch_message(&tx, &msg, None)
+            .await
+            .unwrap();
         assert!(dispatched);
     }
 

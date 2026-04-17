@@ -839,32 +839,59 @@ impl DiscordChannel {
                                                         &msg_data.id,
                                                     )
                                                     .await;
-                                                } else if let Some(response) =
+                                                } else if let Some(dispatch) =
                                                     crate::commands::try_handle_command(
                                                         &msg_data.content,
                                                     )
                                                     .await
                                                 {
-                                                    Self::send_direct_reply(
-                                                        &rest.client,
-                                                        &rest.api_base,
-                                                        &rest.auth_header,
-                                                        &msg_data.channel_id,
-                                                        &response.text,
-                                                    )
-                                                    .await;
-                                                    Self::send_read_receipt(
-                                                        &rest.client,
-                                                        &rest.api_base,
-                                                        &rest.auth_header,
-                                                        &msg_data.channel_id,
-                                                        &msg_data.id,
-                                                    )
-                                                    .await;
+                                                    match dispatch {
+                                                        crate::commands::CommandDispatch::Respond(response) => {
+                                                            Self::send_direct_reply(
+                                                                &rest.client,
+                                                                &rest.api_base,
+                                                                &rest.auth_header,
+                                                                &msg_data.channel_id,
+                                                                &response.text,
+                                                            )
+                                                            .await;
+                                                            Self::send_read_receipt(
+                                                                &rest.client,
+                                                                &rest.api_base,
+                                                                &rest.auth_header,
+                                                                &msg_data.channel_id,
+                                                                &msg_data.id,
+                                                            )
+                                                            .await;
+                                                        }
+                                                        crate::commands::CommandDispatch::Rewrite(rewritten) => {
+                                                            let dispatched =
+                                                                Self::dispatch_message(
+                                                                    handler,
+                                                                    &msg_data,
+                                                                    Some(rewritten),
+                                                                )
+                                                                .await;
+                                                            if dispatched {
+                                                                Self::send_read_receipt(
+                                                                    &rest.client,
+                                                                    &rest.api_base,
+                                                                    &rest.auth_header,
+                                                                    &msg_data.channel_id,
+                                                                    &msg_data.id,
+                                                                )
+                                                                .await;
+                                                            }
+                                                        }
+                                                    }
                                                 } else {
                                                     let dispatched =
-                                                        Self::dispatch_message(handler, &msg_data)
-                                                            .await;
+                                                        Self::dispatch_message(
+                                                            handler,
+                                                            &msg_data,
+                                                            None,
+                                                        )
+                                                        .await;
                                                     if dispatched {
                                                         Self::send_read_receipt(
                                                             &rest.client,
@@ -940,9 +967,11 @@ impl DiscordChannel {
     async fn dispatch_message(
         handler: &tokio::sync::mpsc::Sender<InboundMessage>,
         msg: &GatewayMessage,
+        content_override: Option<String>,
     ) -> bool {
+        let content = content_override.unwrap_or_else(|| msg.content.clone());
         // Skip empty messages
-        if msg.content.is_empty() {
+        if content.is_empty() {
             return false;
         }
 
@@ -950,7 +979,7 @@ impl DiscordChannel {
         let sender_id = author.map(|a| a.id.clone()).unwrap_or_default();
         let user_name = author.map(|a| a.username.clone());
 
-        let message_type = if msg.content.starts_with('/') {
+        let message_type = if content.starts_with('/') {
             MessageType::Command
         } else {
             MessageType::Text
@@ -986,7 +1015,7 @@ impl DiscordChannel {
             channel: Platform::Discord,
             sender_id,
             chat_id: msg.channel_id.clone(),
-            content: msg.content.clone(),
+            content,
             media: vec![],
             metadata,
             source: Some(source),
@@ -1458,7 +1487,7 @@ mod tests {
             guild_id: Some("444".to_string()),
         };
 
-        DiscordChannel::dispatch_message(&tx, &msg).await;
+        DiscordChannel::dispatch_message(&tx, &msg, None).await;
 
         let inbound = rx.try_recv().unwrap();
         assert_eq!(inbound.channel, Platform::Discord);
@@ -1488,7 +1517,7 @@ mod tests {
             guild_id: None,
         };
 
-        DiscordChannel::dispatch_message(&tx, &msg).await;
+        DiscordChannel::dispatch_message(&tx, &msg, None).await;
 
         let inbound = rx.try_recv().unwrap();
         assert_eq!(inbound.message_type, MessageType::Command);
@@ -1508,7 +1537,7 @@ mod tests {
             guild_id: None,
         };
 
-        DiscordChannel::dispatch_message(&tx, &msg).await;
+        DiscordChannel::dispatch_message(&tx, &msg, None).await;
         // Should not send — empty content
     }
 
@@ -2108,7 +2137,7 @@ mod tests {
             }),
             guild_id: None,
         };
-        assert!(DiscordChannel::dispatch_message(&tx, &msg).await);
+        assert!(DiscordChannel::dispatch_message(&tx, &msg, None).await);
     }
 
     #[tokio::test]
@@ -2121,7 +2150,7 @@ mod tests {
             author: None,
             guild_id: None,
         };
-        assert!(!DiscordChannel::dispatch_message(&tx, &msg).await);
+        assert!(!DiscordChannel::dispatch_message(&tx, &msg, None).await);
     }
 
     #[tokio::test]

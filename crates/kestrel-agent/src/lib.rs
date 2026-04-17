@@ -57,9 +57,7 @@ impl From<StreamingResult> for kestrel_providers::CompletionResponse {
 
 #[cfg(test)]
 mod tests {
-    use kestrel_memory::{
-        MemoryCategory, MemoryConfig, MemoryEntry, MemoryQuery, MemoryStore,
-    };
+    use kestrel_memory::{MemoryCategory, MemoryConfig, MemoryEntry, MemoryQuery, MemoryStore};
 
     /// Verify that kestrel-memory types are accessible and functional through
     /// the unified memory system. This test confirms the legacy `memory.rs`
@@ -71,8 +69,8 @@ mod tests {
         let store = kestrel_memory::HotStore::new(&config).await.unwrap();
 
         // Store a memory entry
-        let entry = MemoryEntry::new("User prefers Rust", MemoryCategory::Preference)
-            .with_confidence(0.9);
+        let entry =
+            MemoryEntry::new("User prefers Rust", MemoryCategory::Preference).with_confidence(0.9);
         store.store(entry).await.unwrap();
 
         // Search for it

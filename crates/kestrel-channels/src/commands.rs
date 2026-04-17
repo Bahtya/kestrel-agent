@@ -64,6 +64,15 @@ impl CommandResponse {
     }
 }
 
+/// Outcome of command dispatch before a message enters the agent loop.
+#[derive(Debug, Clone)]
+pub enum CommandDispatch {
+    /// Reply directly and do not forward to the agent loop.
+    Respond(CommandResponse),
+    /// Rewrite the slash command into a normal user message and forward it.
+    Rewrite(String),
+}
+
 // ---------------------------------------------------------------------------
 // Command matching
 // ---------------------------------------------------------------------------
@@ -88,26 +97,155 @@ pub fn matches_command(text: &str, command: &str) -> bool {
     cmd_word.eq_ignore_ascii_case(command)
 }
 
+fn command_name(text: &str) -> Option<&str> {
+    let text = text.trim();
+    if !text.starts_with('/') {
+        return None;
+    }
+
+    let rest = &text[1..];
+    let cmd_part = rest.split('@').next().unwrap_or(rest);
+    let cmd_word = cmd_part
+        .split_whitespace()
+        .next()
+        .unwrap_or(cmd_part)
+        .trim();
+    if cmd_word.is_empty() {
+        None
+    } else {
+        Some(cmd_word)
+    }
+}
+
+fn is_reserved_command(command: &str) -> bool {
+    matches!(
+        command.to_ascii_lowercase().as_str(),
+        "help" | "status" | "validate" | "skill" | "settings" | "history" | "reset" | "menu"
+    )
+}
+
+fn normalize_skill_command_key(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len());
+    let mut last_was_dash = false;
+
+    for ch in name.chars().flat_map(char::to_lowercase) {
+        let mapped = match ch {
+            'a'..='z' | '0'..='9' => Some(ch),
+            '-' | '_' | ' ' => Some('-'),
+            _ => None,
+        };
+
+        match mapped {
+            Some('-') if !last_was_dash && !normalized.is_empty() => {
+                normalized.push('-');
+                last_was_dash = true;
+            }
+            Some('-') => {}
+            Some(value) => {
+                normalized.push(value);
+                last_was_dash = false;
+            }
+            None => {}
+        }
+    }
+
+    normalized.trim_matches('-').to_string()
+}
+
+async fn resolve_skill_command(
+    registry: &SkillRegistry,
+    command: &str,
+) -> Option<(String, String)> {
+    let requested = normalize_skill_command_key(command);
+    if requested.is_empty() {
+        return None;
+    }
+
+    let mut names = registry.skill_names().await;
+    names.sort();
+    for name in names {
+        let Some(skill) = registry.get(&name).await else {
+            continue;
+        };
+        let guard = skill.read();
+        if guard.is_deprecated() {
+            continue;
+        }
+
+        if normalize_skill_command_key(guard.name()) == requested {
+            return Some((guard.name().to_string(), requested));
+        }
+    }
+
+    None
+}
+
+/// Return dynamic `/<skill-name>` commands discovered from the skill registry.
+pub async fn dynamic_skill_commands() -> Vec<(String, String)> {
+    let Some(registry) = configured_skill_registry() else {
+        return Vec::new();
+    };
+
+    let mut names = registry.skill_names().await;
+    names.sort();
+
+    let mut commands = Vec::new();
+    for name in names {
+        let Some(skill) = registry.get(&name).await else {
+            continue;
+        };
+        let guard = skill.read();
+        if guard.is_deprecated() {
+            continue;
+        }
+
+        let command = normalize_skill_command_key(guard.name());
+        if command.is_empty() || is_reserved_command(&command) {
+            continue;
+        }
+
+        commands.push((command, guard.description().to_string()));
+    }
+
+    commands
+}
+
 /// Try to handle a built-in command.
 ///
 /// If `text` matches a known built-in command, returns `Some(response)`.
 /// Otherwise returns `None`, signalling the caller to forward the message
 /// through the normal bus path.
-pub async fn try_handle_command(text: &str) -> Option<CommandResponse> {
+pub async fn try_handle_command(text: &str) -> Option<CommandDispatch> {
     if matches_command(text, "help") {
-        Some(CommandResponse::text(handle_help()))
+        Some(CommandDispatch::Respond(CommandResponse::text(
+            handle_help(),
+        )))
     } else if matches_command(text, "status") {
-        Some(CommandResponse::text(handle_status()))
+        Some(CommandDispatch::Respond(CommandResponse::text(
+            handle_status(),
+        )))
     } else if matches_command(text, "validate") {
-        Some(CommandResponse::text(handle_validate()))
+        Some(CommandDispatch::Respond(CommandResponse::text(
+            handle_validate(),
+        )))
     } else if matches_command(text, "menu") {
-        Some(handle_menu())
+        Some(CommandDispatch::Respond(handle_menu()))
     } else if matches_command(text, "settings") {
-        Some(handle_settings())
+        Some(CommandDispatch::Respond(handle_settings()))
     } else if matches_command(text, "history") {
-        Some(handle_history_page(0))
+        Some(CommandDispatch::Respond(handle_history_page(0)))
     } else if matches_command(text, "skill") {
-        Some(handle_skill_command(text).await)
+        Some(CommandDispatch::Respond(handle_skill_command(text).await))
+    } else if let (Some(registry), Some(name)) = (configured_skill_registry(), command_name(text)) {
+        if let Some((skill_name, invoked_as)) = resolve_skill_command(&registry, name).await {
+            let user_input = command_arguments(text);
+            let rewritten =
+                build_skill_invocation_message(&registry, &skill_name, &invoked_as, user_input)
+                    .await;
+            Some(CommandDispatch::Rewrite(rewritten))
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -237,6 +375,41 @@ async fn handle_skill_search(registry: &SkillRegistry, query: &str) -> String {
     }
 
     out.trim_end().to_string()
+}
+
+async fn build_skill_invocation_message(
+    registry: &SkillRegistry,
+    skill_name: &str,
+    invoked_as: &str,
+    user_input: &str,
+) -> String {
+    let Some(skill) = registry.get(skill_name).await else {
+        return format!("Use the skill '{skill_name}'.");
+    };
+
+    let guard = skill.read();
+    let manifest = match toml::to_string_pretty(guard.manifest()) {
+        Ok(manifest) => manifest,
+        Err(error) => format!("failed to render manifest: {error}"),
+    };
+    let instructions = if guard.instructions().trim().is_empty() {
+        "(none)"
+    } else {
+        guard.instructions()
+    };
+    let supplemental = if user_input.trim().is_empty() {
+        "No additional user instruction was provided after the slash command.".to_string()
+    } else {
+        format!("Additional user instruction:\n{}", user_input.trim())
+    };
+
+    format!(
+        "[SYSTEM: The user explicitly invoked the /{invoked_as} skill. Treat the following skill contents as active context for this request.]\n\n\
+Skill name: {skill_name}\n\n\
+Manifest:\n{manifest}\n\n\
+Instructions:\n{instructions}\n\n\
+{supplemental}"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,6 +1307,30 @@ mod tests {
         skill
     }
 
+    fn make_deprecated_skill(name: &str, description: &str, triggers: &[&str]) -> CompiledSkill {
+        let manifest = SkillManifestBuilder::new(name, "1.0.0", description)
+            .triggers(triggers.iter().copied())
+            .deprecated("replaced")
+            .build();
+        let mut skill = CompiledSkill::new(manifest);
+        skill.set_instructions(format!("Instructions for {name}"));
+        skill
+    }
+
+    fn expect_response(dispatch: CommandDispatch) -> CommandResponse {
+        match dispatch {
+            CommandDispatch::Respond(response) => response,
+            CommandDispatch::Rewrite(_) => panic!("expected direct response"),
+        }
+    }
+
+    fn expect_rewrite(dispatch: CommandDispatch) -> String {
+        match dispatch {
+            CommandDispatch::Rewrite(text) => text,
+            CommandDispatch::Respond(_) => panic!("expected rewritten user message"),
+        }
+    }
+
     // -- matches_command tests ------------------------------------------------
 
     #[test]
@@ -1173,7 +1370,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_handle_command_validate() {
-        let result = try_handle_command("/validate").await.unwrap();
+        let result = expect_response(try_handle_command("/validate").await.unwrap());
         assert!(result.text.contains("Configuration"));
         assert!(result.keyboard.is_none());
     }
@@ -1182,7 +1379,7 @@ mod tests {
     async fn test_try_handle_command_menu() {
         let result = try_handle_command("/menu").await;
         assert!(result.is_some());
-        let resp = result.unwrap();
+        let resp = expect_response(result.unwrap());
         assert_eq!(resp.text, "What would you like to do?");
         assert!(resp.keyboard.is_some());
         let kb = resp.keyboard.unwrap();
@@ -1402,7 +1599,7 @@ providers:
 
     #[tokio::test]
     async fn test_try_handle_command_help() {
-        let r = try_handle_command("/help").await.unwrap();
+        let r = expect_response(try_handle_command("/help").await.unwrap());
         assert!(r.text.contains("/help"));
     }
 
@@ -1552,7 +1749,7 @@ providers:
     api_key: "sk-test"
 "#;
         let _dir = with_temp_config(yaml);
-        let r = try_handle_command("/settings").await.unwrap();
+        let r = expect_response(try_handle_command("/settings").await.unwrap());
         assert!(r.text.contains("Settings"));
         assert!(r.keyboard.is_some());
     }
@@ -1698,7 +1895,7 @@ providers:
     async fn test_try_handle_command_history() {
         let result = try_handle_command("/history").await;
         assert!(result.is_some());
-        let resp = result.unwrap();
+        let resp = expect_response(result.unwrap());
         assert_eq!(resp.text, "No conversation history found.");
         assert!(resp.keyboard.is_none());
     }
@@ -1716,7 +1913,7 @@ providers:
             .unwrap();
         let _guard = SkillRegistryGuard::install(registry);
 
-        let response = try_handle_command("/skill").await.unwrap();
+        let response = expect_response(try_handle_command("/skill").await.unwrap());
 
         assert!(response.text.contains("Registered skills"));
         assert!(response.text.contains("deploy-k8s"));
@@ -1736,9 +1933,11 @@ providers:
             .unwrap();
         let _guard = SkillRegistryGuard::install(registry);
 
-        let response = try_handle_command("/skill view plan-release")
-            .await
-            .unwrap();
+        let response = expect_response(
+            try_handle_command("/skill view plan-release")
+                .await
+                .unwrap(),
+        );
 
         assert!(response.text.contains("Skill: plan-release"));
         assert!(response.text.contains("description = \"Plan a release\""));
@@ -1758,13 +1957,76 @@ providers:
             .unwrap();
         let _guard = SkillRegistryGuard::install(registry);
 
-        let response = try_handle_command("/skill search pager alert")
-            .await
-            .unwrap();
+        let response = expect_response(
+            try_handle_command("/skill search pager alert")
+                .await
+                .unwrap(),
+        );
 
         assert!(response.text.contains("Skill matches"));
         assert!(response.text.contains("incident-response"));
         assert!(response.text.contains("score"));
+    }
+
+    #[tokio::test]
+    async fn test_try_handle_dynamic_skill_command_rewrites_to_user_message() {
+        let registry = Arc::new(SkillRegistry::new());
+        registry
+            .register(make_skill(
+                "plan-release",
+                "Plan a release",
+                &["plan", "release"],
+            ))
+            .await
+            .unwrap();
+        let _guard = SkillRegistryGuard::install(registry);
+
+        let rewritten = expect_rewrite(
+            try_handle_command("/plan-release prepare the rollback checklist")
+                .await
+                .unwrap(),
+        );
+
+        assert!(rewritten.contains("The user explicitly invoked the /plan-release skill"));
+        assert!(rewritten.contains("Skill name: plan-release"));
+        assert!(rewritten.contains("Instructions for plan-release"));
+        assert!(rewritten.contains("prepare the rollback checklist"));
+    }
+
+    #[tokio::test]
+    async fn test_try_handle_dynamic_skill_command_ignores_deprecated_skills() {
+        let registry = Arc::new(SkillRegistry::new());
+        registry
+            .register(make_deprecated_skill(
+                "legacy-plan",
+                "Old plan skill",
+                &["legacy"],
+            ))
+            .await
+            .unwrap();
+        let _guard = SkillRegistryGuard::install(registry);
+
+        assert!(try_handle_command("/legacy-plan").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_skill_commands_excludes_reserved_names() {
+        let registry = Arc::new(SkillRegistry::new());
+        registry
+            .register(make_skill("skill", "Conflicting name", &["skill"]))
+            .await
+            .unwrap();
+        registry
+            .register(make_skill("release-plan", "Release planning", &["release"]))
+            .await
+            .unwrap();
+        let _guard = SkillRegistryGuard::install(registry);
+
+        let commands = dynamic_skill_commands().await;
+        assert!(commands
+            .iter()
+            .any(|(command, _)| command == "release-plan"));
+        assert!(!commands.iter().any(|(command, _)| command == "skill"));
     }
 
     #[test]

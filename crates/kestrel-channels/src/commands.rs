@@ -269,6 +269,8 @@ async fn handle_skill_command(text: &str) -> CommandResponse {
         return CommandResponse::text("Skill registry is not available.");
     };
 
+    // TODO(issue #75): synthesize dynamic `/<skill-name>` commands from the
+    // registry and inject the selected skill as a user message.
     let args = command_arguments(text);
     if args.is_empty() || args.eq_ignore_ascii_case("list") {
         return CommandResponse::text(handle_skill_list(&registry).await);

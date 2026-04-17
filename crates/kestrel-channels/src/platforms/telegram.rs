@@ -21,6 +21,9 @@ use kestrel_bus::events::InboundMessage;
 use kestrel_core::{MediaAttachment, MessageType, Platform, SessionSource};
 
 use crate::base::{BaseChannel, SendResult};
+use crate::platforms::telegram_format::markdown_to_telegram;
+
+const TELEGRAM_PARSE_MODE: &str = "MarkdownV2";
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API response types
@@ -141,6 +144,8 @@ struct SendMessageBody {
     chat_id: i64,
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reply_to_message_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_markup: Option<serde_json::Value>,
@@ -152,6 +157,8 @@ struct SendPhotoBody {
     photo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     caption: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caption_parse_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_to_message_id: Option<i64>,
 }
@@ -167,6 +174,8 @@ struct EditMessageTextBody {
     chat_id: i64,
     message_id: i64,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_markup: Option<serde_json::Value>,
 }
@@ -533,6 +542,25 @@ pub struct TelegramChannel {
 }
 
 impl TelegramChannel {
+    /// Prepare outbound text for Telegram delivery with a safe MarkdownV2 fallback.
+    fn prepare_outbound_text(text: &str) -> (String, Option<String>) {
+        match markdown_to_telegram(text) {
+            Some(converted) => (converted, Some(TELEGRAM_PARSE_MODE.to_string())),
+            None => (text.to_string(), None),
+        }
+    }
+
+    /// Prepare an optional Telegram photo caption for MarkdownV2 delivery.
+    fn prepare_outbound_caption(caption: Option<&str>) -> (Option<String>, Option<String>) {
+        match caption {
+            Some(text) => {
+                let (formatted, parse_mode) = Self::prepare_outbound_text(text);
+                (Some(formatted), parse_mode)
+            }
+            None => (None, None),
+        }
+    }
+
     /// Build a reqwest client with config-driven proxy support.
     ///
     /// Priority: `proxy_config` > env vars (`HTTPS_PROXY`, `ALL_PROXY`, etc.) > direct.
@@ -732,9 +760,11 @@ impl TelegramChannel {
         keyboard: Option<&InlineKeyboardMarkup>,
     ) {
         let reply_markup = keyboard.map(|kb| serde_json::to_value(kb).unwrap_or_default());
+        let (text, parse_mode) = Self::prepare_outbound_text(text);
         let body = SendMessageBody {
             chat_id,
-            text: text.to_string(),
+            text,
+            parse_mode,
             reply_to_message_id: None,
             reply_markup,
         };
@@ -1208,10 +1238,12 @@ impl TelegramChannel {
         if let (Ok(chat_id_num), Ok(msg_id_num)) =
             (chat_id.parse::<i64>(), message_id.parse::<i64>())
         {
+            let (text, parse_mode) = Self::prepare_outbound_text(text);
             let body = EditMessageTextBody {
                 chat_id: chat_id_num,
                 message_id: msg_id_num,
-                text: text.to_string(),
+                text,
+                parse_mode,
                 reply_markup,
             };
             let url = format!("{}/editMessageText", base_url);
@@ -1232,9 +1264,11 @@ impl TelegramChannel {
         match response {
             CallbackResponse::Reply(text) => {
                 if let Ok(chat_id_num) = chat_id.parse::<i64>() {
+                    let (text, parse_mode) = Self::prepare_outbound_text(&text);
                     let body = SendMessageBody {
                         chat_id: chat_id_num,
                         text,
+                        parse_mode,
                         reply_to_message_id: None,
                         reply_markup: None,
                     };
@@ -1250,10 +1284,12 @@ impl TelegramChannel {
                 {
                     let reply_markup =
                         keyboard.map(|kb| serde_json::to_value(&kb).unwrap_or_default());
+                    let (text, parse_mode) = Self::prepare_outbound_text(&text);
                     let body = EditMessageTextBody {
                         chat_id: chat_id_num,
                         message_id: msg_id_num,
                         text,
+                        parse_mode,
                         reply_markup,
                     };
                     let url = format!("{}/editMessageText", base_url);
@@ -1472,10 +1508,12 @@ impl BaseChannel for TelegramChannel {
         };
 
         let reply_to_id = reply_to.and_then(|r| r.parse::<i64>().ok());
+        let (text, parse_mode) = Self::prepare_outbound_text(content);
 
         let body = SendMessageBody {
             chat_id: chat_id_num,
-            text: content.to_string(),
+            text,
+            parse_mode,
             reply_to_message_id: reply_to_id,
             reply_markup: None,
         };
@@ -1607,10 +1645,12 @@ impl BaseChannel for TelegramChannel {
             }
         };
 
+        let (caption, caption_parse_mode) = Self::prepare_outbound_caption(caption);
         let body = SendPhotoBody {
             chat_id: chat_id_num,
             photo: image_url.to_string(),
-            caption: caption.map(|s| s.to_string()),
+            caption,
+            caption_parse_mode,
             reply_to_message_id: None,
         };
 
@@ -1703,10 +1743,12 @@ impl TelegramChannel {
             }
         };
 
+        let (text, parse_mode) = Self::prepare_outbound_text(text);
         let body = EditMessageTextBody {
             chat_id: chat_id_num,
             message_id: message_id_num,
-            text: text.to_string(),
+            text,
+            parse_mode,
             reply_markup,
         };
 
@@ -1867,13 +1909,17 @@ impl TelegramChannel {
             chat_id: i64,
             text: String,
             #[serde(skip_serializing_if = "Option::is_none")]
+            parse_mode: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             reply_to_message_id: Option<i64>,
             reply_markup: InlineKeyboardMarkup,
         }
 
+        let (text, parse_mode) = Self::prepare_outbound_text(text);
         let body = SendMessageWithKeyboardBody {
             chat_id: chat_id_num,
-            text: text.to_string(),
+            text,
+            parse_mode,
             reply_to_message_id: reply_to_id,
             reply_markup: keyboard.clone(),
         };
@@ -2543,6 +2589,7 @@ mod tests {
             chat_id: 123,
             message_id: 456,
             text: "updated text".to_string(),
+            parse_mode: Some(TELEGRAM_PARSE_MODE.to_string()),
             reply_markup: Some(serde_json::json!({
                 "inline_keyboard": [[{"text": "Click", "callback_data": "yes"}]]
             })),
@@ -2551,7 +2598,37 @@ mod tests {
         assert_eq!(json["chat_id"], 123);
         assert_eq!(json["message_id"], 456);
         assert_eq!(json["text"], "updated text");
+        assert_eq!(json["parse_mode"], TELEGRAM_PARSE_MODE);
         assert!(json["reply_markup"]["inline_keyboard"].is_array());
+    }
+
+    #[test]
+    fn test_prepare_outbound_text_enables_markdown_v2() {
+        let (text, parse_mode) = TelegramChannel::prepare_outbound_text("**bold**");
+        assert_eq!(text, "*bold*");
+        assert_eq!(parse_mode.as_deref(), Some(TELEGRAM_PARSE_MODE));
+    }
+
+    #[test]
+    fn test_prepare_outbound_text_falls_back_to_plain_text() {
+        let input = "[broken](https://example.com";
+        let (text, parse_mode) = TelegramChannel::prepare_outbound_text(input);
+        assert_eq!(text, input);
+        assert!(parse_mode.is_none());
+    }
+
+    #[test]
+    fn test_prepare_outbound_caption_applies_markdown_v2() {
+        let (caption, parse_mode) = TelegramChannel::prepare_outbound_caption(Some("## Title"));
+        assert_eq!(caption.as_deref(), Some("*Title*"));
+        assert_eq!(parse_mode.as_deref(), Some(TELEGRAM_PARSE_MODE));
+    }
+
+    #[test]
+    fn test_prepare_outbound_caption_none_stays_empty() {
+        let (caption, parse_mode) = TelegramChannel::prepare_outbound_caption(None);
+        assert!(caption.is_none());
+        assert!(parse_mode.is_none());
     }
 
     #[test]

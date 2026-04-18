@@ -160,8 +160,16 @@ impl AgentLoop {
     /// Process a single inbound message.
     pub async fn process_message(&self, msg: InboundMessage) -> Result<()> {
         let session_key = msg.session_key();
+        let trace_id = msg.trace_id.as_deref().unwrap_or("no-trace");
+        let _span = tracing::info_span!(
+            "process_message",
+            session_key = %session_key,
+            trace_id = %trace_id,
+            channel = %msg.channel,
+        );
         info!(
             session_key = %session_key,
+            trace_id = %trace_id,
             channel = %msg.channel,
             "Processing message"
         );
@@ -357,6 +365,7 @@ impl AgentLoop {
                     chat_id: msg.chat_id.clone(),
                     content: result.content,
                     reply_to: msg.message_id.clone(),
+                    trace_id: msg.trace_id.clone(),
                     media: vec![],
                     metadata: Default::default(),
                 };
@@ -1064,6 +1073,7 @@ mod tests {
             source: None,
             message_type: MessageType::Text,
             message_id: Some("msg-1".to_string()),
+            trace_id: None,
             reply_to: None,
             timestamp: chrono::Local::now(),
         };
@@ -1497,6 +1507,7 @@ mod tests {
             source: None,
             message_type: MessageType::Text,
             message_id: None,
+            trace_id: None,
             reply_to: None,
             timestamp: chrono::Local::now(),
         };

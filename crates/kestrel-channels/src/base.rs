@@ -53,6 +53,22 @@ pub trait BaseChannel: Send + Sync {
         reply_to: Option<&str>,
     ) -> Result<SendResult>;
 
+    /// Send a text message with trace context for request-response correlation.
+    ///
+    /// Default implementation delegates to [`send_message`](Self::send_message)
+    /// ignoring the trace_id. Channels that support tracing (e.g. WebSocket)
+    /// should override this to include the trace_id in outbound frames.
+    async fn send_message_with_trace(
+        &self,
+        chat_id: &str,
+        content: &str,
+        reply_to: Option<&str>,
+        trace_id: Option<&str>,
+    ) -> Result<SendResult> {
+        let _ = trace_id;
+        self.send_message(chat_id, content, reply_to).await
+    }
+
     /// Send a typing indicator.
     async fn send_typing(&self, chat_id: &str) -> Result<()>;
 

@@ -1021,6 +1021,7 @@ impl DiscordChannel {
             source: Some(source),
             message_type,
             message_id: Some(msg.id.clone()),
+            trace_id: None,
             reply_to: None,
             timestamp: chrono::Local::now(),
         };

@@ -154,6 +154,7 @@ mod tests {
             source: None,
             message_type: MessageType::Text,
             message_id: None,
+            trace_id: None,
             reply_to: None,
             timestamp: chrono::Local::now(),
         };
@@ -184,6 +185,7 @@ mod tests {
             chat_id: "chat1".to_string(),
             content: "Response".to_string(),
             reply_to: None,
+            trace_id: None,
             media: vec![],
             metadata: Default::default(),
         };
@@ -277,6 +279,7 @@ mod tests {
             source: None,
             message_type: MessageType::Text,
             message_id: None,
+            trace_id: None,
             reply_to: None,
             timestamp: chrono::Local::now(),
         };
@@ -307,6 +310,7 @@ mod tests {
             source: None,
             message_type: MessageType::Text,
             message_id: None,
+            trace_id: None,
             reply_to: None,
             timestamp: chrono::Local::now(),
         };
@@ -330,6 +334,7 @@ mod tests {
             chat_id: "c".to_string(),
             content: "outbound".to_string(),
             reply_to: None,
+            trace_id: None,
             media: vec![],
             metadata: Default::default(),
         };

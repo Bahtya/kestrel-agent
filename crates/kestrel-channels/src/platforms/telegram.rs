@@ -1240,6 +1240,7 @@ impl TelegramChannel {
             source: Some(source),
             message_type,
             message_id: Some(msg.message_id.to_string()),
+            trace_id: None,
             reply_to: msg
                 .reply_to_message
                 .as_ref()
@@ -1381,6 +1382,7 @@ impl TelegramChannel {
             source: Some(source),
             message_type: MessageType::Command,
             message_id: Some(msg.message_id.to_string()),
+            trace_id: None,
             reply_to: None,
             timestamp: Local::now(),
         };

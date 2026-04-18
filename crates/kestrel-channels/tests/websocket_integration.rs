@@ -338,3 +338,218 @@ async fn test_multiple_clients_individual_sessions() {
 
     channel.disconnect().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Test 5: trace_id propagation through the full chain
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_trace_id_from_envelope_to_inbound_message() {
+    let bus = Arc::new(MessageBus::new());
+    let addr = random_addr().await;
+
+    let mut channel = WebSocketChannel::with_addr(addr.clone());
+    channel.set_message_handler(bus.inbound_sender());
+    channel.connect().await.unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Drain welcome.
+    let _welcome = drain_text(&mut ws).await;
+
+    // Send a message with a custom trace_id.
+    let mut env = WsEnvelope::message("trace me");
+    env.trace_id = Some("custom-trace-abc123".to_string());
+    ws.send(WsMessage::Text(env.to_json().unwrap().into()))
+        .await
+        .unwrap();
+
+    let mut inbound_rx = bus.consume_inbound().await.unwrap();
+    let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Verify trace_id propagated from envelope to InboundMessage.
+    assert_eq!(inbound.content, "trace me");
+    assert_eq!(
+        inbound.trace_id.as_deref(),
+        Some("custom-trace-abc123"),
+        "trace_id should be propagated from WsEnvelope to InboundMessage"
+    );
+
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_trace_id_auto_generated_when_missing() {
+    let bus = Arc::new(MessageBus::new());
+    let addr = random_addr().await;
+
+    let mut channel = WebSocketChannel::with_addr(addr.clone());
+    channel.set_message_handler(bus.inbound_sender());
+    channel.connect().await.unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let _welcome = drain_text(&mut ws).await;
+
+    // Send a message WITHOUT a trace_id — should be auto-generated.
+    let env = WsEnvelope::message("no trace");
+    ws.send(WsMessage::Text(env.to_json().unwrap().into()))
+        .await
+        .unwrap();
+
+    let mut inbound_rx = bus.consume_inbound().await.unwrap();
+    let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Verify auto-generated trace_id starts with "ws_".
+    assert!(
+        inbound.trace_id.is_some(),
+        "trace_id should be auto-generated when not provided"
+    );
+    let tid = inbound.trace_id.unwrap();
+    assert!(
+        tid.starts_with("ws_"),
+        "auto-generated trace_id should start with 'ws_', got: {tid}"
+    );
+
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_welcome_contains_session_trace_id() {
+    let addr = random_addr().await;
+    let mut channel = WebSocketChannel::with_addr(addr.clone());
+    let (tx, _rx) = tokio::sync::mpsc::channel(100);
+    channel.set_message_handler(tx);
+    channel.connect().await.unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+        .await
+        .unwrap();
+
+    let welcome = drain_text(&mut ws).await;
+    assert_eq!(welcome["type"], "welcome");
+    // Welcome should contain a session_trace_id (serialized as trace_id on the envelope).
+    assert!(
+        welcome["trace_id"].is_string(),
+        "welcome should contain trace_id field"
+    );
+    let session_trace = welcome["trace_id"].as_str().unwrap();
+    assert!(
+        session_trace.starts_with("session_"),
+        "session trace_id should start with 'session_', got: {session_trace}"
+    );
+
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_outbound_message_carries_trace_id() {
+    let bus = Arc::new(MessageBus::new());
+    let addr = random_addr().await;
+
+    let mut channel = WebSocketChannel::with_addr(addr.clone());
+    channel.set_message_handler(bus.inbound_sender());
+    channel.connect().await.unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let welcome = drain_text(&mut ws).await;
+    let client_id = welcome["client_id"].as_str().unwrap().to_string();
+
+    // Send a message with trace_id via send_message_with_trace.
+    let result = channel
+        .send_message_with_trace(
+            &client_id,
+            "traced response",
+            None,
+            Some("outbound-trace-xyz"),
+        )
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let response = drain_text(&mut ws).await;
+    assert_eq!(response["type"], "message");
+    assert_eq!(response["content"], "traced response");
+    assert_eq!(
+        response["trace_id"].as_str(),
+        Some("outbound-trace-xyz"),
+        "outbound envelope should carry the trace_id"
+    );
+
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_trace_id_round_trip_full_chain() {
+    let bus = Arc::new(MessageBus::new());
+    let addr = random_addr().await;
+
+    let mut channel = WebSocketChannel::with_addr(addr.clone());
+    channel.set_message_handler(bus.inbound_sender());
+    channel.connect().await.unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let welcome = drain_text(&mut ws).await;
+    // The client_id from welcome equals the chat_id in InboundMessage.
+    let _client_id = welcome["client_id"].as_str().unwrap().to_string();
+
+    // Send with custom trace_id.
+    let custom_trace = "chain-trace-999";
+    let mut env = WsEnvelope::message("round trip test");
+    env.trace_id = Some(custom_trace.to_string());
+    ws.send(WsMessage::Text(env.to_json().unwrap().into()))
+        .await
+        .unwrap();
+
+    let mut inbound_rx = bus.consume_inbound().await.unwrap();
+    let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Verify inbound has the custom trace_id.
+    assert_eq!(inbound.trace_id.as_deref(), Some(custom_trace));
+
+    // Simulate the agent sending back a response with the same trace_id
+    // (this is what AgentLoop does via OutboundMessage.trace_id).
+    let result = channel
+        .send_message_with_trace(
+            &inbound.chat_id,
+            "response to round trip",
+            None,
+            inbound.trace_id.as_deref(),
+        )
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let response = drain_text(&mut ws).await;
+    assert_eq!(response["content"], "response to round trip");
+    assert_eq!(
+        response["trace_id"].as_str(),
+        Some(custom_trace),
+        "round-trip: response trace_id should match request trace_id"
+    );
+
+    channel.disconnect().await.unwrap();
+}

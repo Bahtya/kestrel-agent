@@ -101,6 +101,31 @@ to any LLM with built-in memory, skills, and self-evolution.
 
 ## Quick Start
 
+### Prerequisites
+
+**Rust** 1.75+ and **protobuf-compiler** (required by LanceDB).
+
+```bash
+# Fedora / RHEL
+sudo dnf install protobuf-compiler gcc
+
+# Ubuntu / Debian
+sudo apt install protobuf-compiler build-essential
+```
+
+Optional — [mold linker](https://github.com/rui314/mold) for faster release linking:
+
+```bash
+# Fedora
+sudo dnf install mold
+# Then add to .cargo/config.toml:
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+```
+
+The project ships a `.cargo/config.toml` with profile optimizations (thin LTO, dependency pre-optimization in dev mode, symbol stripping in release).
+
 ### Build
 
 ```bash
@@ -161,34 +186,112 @@ providers:
   anthropic:
     api_key: ${ANTHROPIC_API_KEY}
     model: claude-sonnet-4-6
+  openrouter:
+    api_key: ${OPENROUTER_API_KEY}
+    model: anthropic/claude-sonnet-4-6
+  ollama:
+    base_url: http://localhost:11434/v1
+    model: llama3
+  deepseek:
+    api_key: ${DEEPSEEK_API_KEY}
+    model: deepseek-chat
+  groq:
+    api_key: ${GROQ_API_KEY}
+    model: llama-3.3-70b-versatile
+  gemini:
+    api_key: ${GEMINI_API_KEY}
+    model: gemini-2.0-flash
+  # no_proxy: true              # skip proxy for domestic APIs (e.g. ZAI, Qwen)
 
 channels:
   telegram:
     token: ${TELEGRAM_BOT_TOKEN}
+    allowed_users: ["123456789"]         # optional: restrict to user IDs
+    admin_users: ["123456789"]           # optional: admin user IDs
     enabled: true
+    streaming: false                     # telegram doesn't support token-by-token
+    proxy: ""                            # optional: http/socks5 proxy URL
   discord:
     token: ${DISCORD_BOT_TOKEN}
+    allowed_guilds: ["111222333"]        # optional: restrict to guild IDs
     enabled: true
+  # websocket:
+  #   enabled: true
+  #   listen_addr: "127.0.0.1:8090"
+  #   auth:
+  #     required: true
+  #     token: "my-secret"
+  #   max_clients: 100
+  #   max_message_size: 1048576
 
 agent:
   model: gpt-4o
   temperature: 0.7
   max_tokens: 4096
+  max_iterations: 50                    # tool loop limit
   streaming: true
+  tool_timeout: 120                     # seconds per tool execution
+  system_prompt: "You are a helpful AI assistant."  # optional override
+  workspace: /tmp/workspace             # optional: default working directory
+
+dream:                                  # memory consolidation
+  enabled: true
+  interval_secs: 7200                   # consolidate every 2h
+  model: gpt-4o-mini                    # optional: use cheaper model
+
+heartbeat:
+  enabled: false
+  interval_secs: 1800
+
+cron:
+  enabled: false
+  state_file: ~/.kestrel/cron_state.json
+  tick_secs: 60
 
 security:
-  network:
-    deny:
-      - "10.0.0.0/8"
-      - "172.16.0.0/12"
-      - "192.168.0.0/16"
+  block_private_ips: true               # block RFC1918 by default
+  ssrf_whitelist: []                    # allowed IP ranges for outbound
+  blocked_networks: []                  # additional blocked ranges
+
+api:
+  host: 0.0.0.0
+  port: 8080
+  allowed_origins: ["*"]                # CORS origins
+  max_body_size: 10485760               # 10 MB
 
 daemon:
   pid_file: ~/.kestrel/kestrel.pid
   log_dir: ~/.kestrel/logs
   working_directory: /
   grace_period_secs: 30
+
+# optional: custom system prompt additions
+custom_instructions: "Always respond in English."
+
+# optional: agent identity
+name: "Kestrel"
+
+# optional: MCP tool servers
+# mcp_servers:
+#   filesystem:
+#     transport: stdio
+#     command: "mcp-filesystem"
+#     args: ["--root", "/data"]
+
+# optional: custom provider endpoints
+# custom_providers:
+#   - name: my_provider
+#     base_url: https://my-api.com/v1
+#     api_key: key123
+#     model_patterns: ["my-model"]
+
+notifications:
+  online_notify: true
+  # notify_chat_id: "-1001234567890"    # which chat receives the ping
+  online_message: "Kestrel v{version} online — {channel} connected"
 ```
+
+Environment variables in values (`${VAR}`) are expanded at load time.
 
 ## CLI Commands
 
@@ -232,10 +335,109 @@ daemon:
 
 | Metric | Value |
 |--------|-------|
-| Rust source files | 126 |
-| Lines of Rust code | ~62,800 |
+| Rust source files | 115 |
+| Lines of Rust code | ~67,800 |
 | Crates | 16 |
 | Minimum Rust version | 1.75 |
+
+## API
+
+kestrel exposes an OpenAI-compatible HTTP API. Start with `kestrel serve`:
+
+```bash
+kestrel serve --port 8080
+```
+
+### List models
+
+```bash
+curl http://localhost:8080/v1/models
+```
+
+### Chat completion (non-streaming)
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "What is 2+2?"}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 256
+  }'
+```
+
+### Chat completion (SSE streaming)
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": true
+  }'
+```
+
+### Health and readiness
+
+```bash
+curl http://localhost:8080/health    # detailed health snapshot
+curl http://localhost:8080/ready     # 200=ready, 503=not ready (Kubernetes probe)
+```
+
+### Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/v1/chat/completions` | POST | Bearer token (if configured) | OpenAI-compatible chat (streaming + non-streaming) |
+| `/v1/models` | GET | No | List available models |
+| `/health` | GET | No | Health check with component details |
+| `/ready` | GET | No | Readiness probe (200/503) |
+
+## Troubleshooting
+
+<details>
+<summary><strong>Build error: <code>protoc not found</code></strong></summary>
+
+LanceDB requires the protobuf compiler.
+
+```bash
+# Fedora / RHEL
+sudo dnf install protobuf-compiler
+
+# Ubuntu / Debian
+sudo apt install protobuf-compiler
+```
+</details>
+
+<details>
+<summary><strong>Build error: <code>linker 'mold' not found</code></strong></summary>
+
+Remove or update the linker override in `.cargo/config.toml`. The shipped config does not require mold — this only happens if you added the optional mold config without installing it.
+</details>
+
+<details>
+<summary><strong><code>kestrel serve</code> fails with "address already in use"</strong></summary>
+
+Another process is using port 8080. Either stop it or override the port:
+
+```bash
+kestrel serve --port 9090
+# or set in config:
+# api:
+#   port: 9090
+```
+</details>
+
+<details>
+<summary><strong>Clippy warnings on <code>cargo clippy --workspace</code></strong></summary>
+
+Run `cargo clippy --workspace --fix` to auto-fix trivial issues. For persistent warnings, ensure you're on Rust 1.75+ and all dependencies are up to date (`cargo update`).
+</details>
 
 ## Development
 

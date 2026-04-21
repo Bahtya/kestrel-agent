@@ -482,6 +482,7 @@ mod tests {
             },
             tool_calls_made: 2,
             iterations_used: 3,
+            hit_limit: false,
         };
         assert_eq!(rr.content, "done");
         assert_eq!(rr.usage.prompt_tokens, Some(10));

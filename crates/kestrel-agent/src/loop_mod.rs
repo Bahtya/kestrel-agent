@@ -361,6 +361,7 @@ impl AgentLoop {
                     let result_content = result.content.clone();
                     let tool_calls = result.tool_calls_made;
                     let iterations = result.iterations_used;
+                    let success = iterations < self.config.agent.max_iterations;
                     let outbound = OutboundMessage {
                         channel: msg.channel.clone(),
                         chat_id: msg.chat_id.clone(),
@@ -388,7 +389,7 @@ impl AgentLoop {
                                 user_message: user_msg,
                                 tool_calls_made: tool_calls,
                                 iterations_used: iterations,
-                                success: true,
+                                success,
                                 response_preview: result_content,
                             })
                             .await;
@@ -423,6 +424,27 @@ impl AgentLoop {
                             error_message: e.to_string(),
                             retry_count: 0,
                             timestamp: chrono::Utc::now(),
+                        });
+                    }
+
+                    // Post-task reflection for failed runs
+                    if let Some(bus) = self.learning_bus.clone() {
+                        let provider_registry = self.provider_registry.clone();
+                        let config = self.config.clone();
+                        let user_msg = msg.content.clone();
+                        let error_msg = e.to_string();
+                        tokio::spawn(async move {
+                            post_task_reflect(ReflectionTask {
+                                learning_bus: bus,
+                                provider_registry,
+                                config,
+                                user_message: user_msg,
+                                tool_calls_made: 0,
+                                iterations_used: 0,
+                                success: false,
+                                response_preview: error_msg,
+                            })
+                            .await;
                         });
                     }
 

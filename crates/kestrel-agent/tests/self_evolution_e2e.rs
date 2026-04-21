@@ -1137,3 +1137,282 @@ async fn test_self_evolution_no_skill_match() {
 
     agent_handle.abort();
 }
+
+// ---------------------------------------------------------------------------
+// E2E Test 8: task_reflection success=false when max_iterations reached
+// ---------------------------------------------------------------------------
+
+/// Verifies that when the agent loop hits max_iterations, the TaskReflection
+/// event carries success=false instead of always being true.
+#[tokio::test]
+async fn test_task_reflection_success_false_on_max_iterations() {
+    let mut config = make_config();
+    config.agent.max_iterations = 2;
+
+    let bus = MessageBus::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
+
+    // Mock provider: always returns a tool call so the agent loops until max_iterations.
+    // Then one more response for the post-task reflection call.
+    let mock_provider = Arc::new(MockProvider::new(vec![
+        CompletionResponse {
+            content: Some(String::new()),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_loop".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "glob".to_string(),
+                    arguments: r#"{"pattern":"*"}"#.to_string(),
+                },
+            }]),
+            usage: None,
+            finish_reason: Some("tool_calls".to_string()),
+        },
+        CompletionResponse {
+            content: Some(String::new()),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_loop2".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "glob".to_string(),
+                    arguments: r#"{"pattern":"*"}"#.to_string(),
+                },
+            }]),
+            usage: None,
+            finish_reason: Some("tool_calls".to_string()),
+        },
+        // Reflection call
+        CompletionResponse {
+            content: Some("Hit iteration limit.".to_string()),
+            tool_calls: None,
+            usage: None,
+            finish_reason: Some("stop".to_string()),
+        },
+    ]));
+
+    let providers = make_providers(mock_provider.clone());
+    let tools = make_tools();
+
+    let learning_bus = LearningEventBus::new();
+    let mut learning_rx = learning_bus.subscribe();
+
+    let agent_loop = AgentLoop::new(config, bus.clone(), session_manager, providers, tools)
+        .with_learning_bus(learning_bus);
+
+    let mut outbound_rx = bus.consume_outbound().await.unwrap();
+    let mut events_rx = bus.subscribe_events();
+
+    let agent_handle = tokio::spawn(async move {
+        agent_loop.run().await.unwrap();
+    });
+
+    bus.publish_inbound(make_inbound("loop forever"))
+        .await
+        .unwrap();
+
+    // Wait for outbound (max iterations message)
+    let outbound = tokio::time::timeout(std::time::Duration::from_secs(10), outbound_rx.recv())
+        .await
+        .expect("timed out")
+        .expect("closed");
+    assert!(
+        outbound.content.contains("maximum number of iterations"),
+        "expected max iterations message, got: {}",
+        outbound.content
+    );
+
+    // Drain agent events
+    for _ in 0..10 {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), events_rx.recv()).await {
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+
+    // Collect learning events — look for TaskReflection with success=false
+    let mut saw_reflection_with_false = false;
+    for _ in 0..15 {
+        let event =
+            match tokio::time::timeout(std::time::Duration::from_secs(3), learning_rx.recv()).await
+            {
+                Ok(Ok(event)) => event,
+                _ => break,
+            };
+
+        if let LearningEvent::TaskReflection { success, .. } = &event {
+            if !success {
+                saw_reflection_with_false = true;
+            }
+        }
+    }
+
+    assert!(
+        saw_reflection_with_false,
+        "expected TaskReflection with success=false when max_iterations reached"
+    );
+
+    agent_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
+// E2E Test 9: task_reflection success=false on provider error
+// ---------------------------------------------------------------------------
+
+/// Verifies that when the agent loop encounters a provider error, a
+/// TaskReflection event with success=false is still generated (via the
+/// error-path reflection).
+#[tokio::test]
+async fn test_task_reflection_success_false_on_provider_error() {
+    use std::sync::atomic::AtomicBool;
+
+    struct FailOnceProvider {
+        failed: Arc<AtomicBool>,
+    }
+
+    impl Clone for FailOnceProvider {
+        fn clone(&self) -> Self {
+            Self {
+                failed: self.failed.clone(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for FailOnceProvider {
+        fn name(&self) -> &str {
+            "fail-once"
+        }
+        fn default_model(&self) -> &str {
+            "mock-model"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> anyhow::Result<CompletionResponse> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                // First call (agent): fail
+                anyhow::bail!("Provider temporarily unavailable")
+            }
+            // Second call (reflection): succeed
+            Ok(CompletionResponse {
+                content: Some("Agent error occurred.".to_string()),
+                tool_calls: None,
+                usage: None,
+                finish_reason: Some("stop".to_string()),
+            })
+        }
+        async fn complete_stream(&self, _request: CompletionRequest) -> anyhow::Result<BoxStream> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                anyhow::bail!("Provider temporarily unavailable")
+            }
+            // Second call should not reach here — reflection uses complete()
+            anyhow::bail!("Not implemented")
+        }
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
+    }
+
+    let config = make_config();
+    let bus = MessageBus::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
+
+    let mut providers = kestrel_providers::ProviderRegistry::new();
+    providers.register(
+        "fail-once",
+        FailOnceProvider {
+            failed: Arc::new(AtomicBool::new(false)),
+        },
+    );
+    providers.set_default("fail-once");
+
+    let tools = make_tools();
+
+    let learning_bus = LearningEventBus::new();
+    let mut learning_rx = learning_bus.subscribe();
+
+    let agent_loop = AgentLoop::new(config, bus.clone(), session_manager, providers, tools)
+        .with_learning_bus(learning_bus);
+
+    let mut events_rx = bus.subscribe_events();
+
+    let agent_handle = tokio::spawn(async move {
+        agent_loop.run().await.unwrap();
+    });
+
+    bus.publish_inbound(make_inbound("test message"))
+        .await
+        .unwrap();
+
+    // Drain events until we see Error
+    let mut saw_error = false;
+    for _ in 0..5 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("closed");
+        if matches!(event, AgentEvent::Error { .. }) {
+            saw_error = true;
+            break;
+        }
+    }
+    assert!(saw_error, "expected Error event");
+
+    // Collect learning events — look for TaskReflection with success=false
+    let mut saw_reflection_with_false = false;
+    let mut saw_tool_failed = false;
+    for _ in 0..15 {
+        let event =
+            match tokio::time::timeout(std::time::Duration::from_secs(3), learning_rx.recv()).await
+            {
+                Ok(Ok(event)) => event,
+                _ => break,
+            };
+
+        match &event {
+            LearningEvent::TaskReflection { success, .. } => {
+                if !success {
+                    saw_reflection_with_false = true;
+                }
+            }
+            LearningEvent::ToolFailed { tool, .. } => {
+                if tool == "agent_loop" {
+                    saw_tool_failed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    for _ in 0..15 {
+        let event =
+            match tokio::time::timeout(std::time::Duration::from_secs(3), learning_rx.recv()).await
+            {
+                Ok(Ok(event)) => event,
+                _ => break,
+            };
+
+        match &event {
+            LearningEvent::TaskReflection { success, .. } => {
+                if !success {
+                    saw_reflection_with_false = true;
+                }
+            }
+            LearningEvent::ToolFailed { tool, .. } => {
+                if tool == "agent_loop" {
+                    saw_tool_failed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_tool_failed, "expected ToolFailed learning event");
+    assert!(
+        saw_reflection_with_false,
+        "expected TaskReflection with success=false on provider error"
+    );
+
+    agent_handle.abort();
+}

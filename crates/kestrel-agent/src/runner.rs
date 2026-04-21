@@ -171,6 +171,7 @@ impl AgentRunner {
                         usage: total_usage,
                         tool_calls_made,
                         iterations_used: iteration + 1,
+                        hit_limit: false,
                     });
                 }
             };
@@ -216,6 +217,7 @@ impl AgentRunner {
             usage: total_usage,
             tool_calls_made,
             iterations_used: max_iterations,
+            hit_limit: true,
         })
     }
 

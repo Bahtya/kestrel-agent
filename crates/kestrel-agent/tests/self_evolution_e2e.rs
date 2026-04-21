@@ -1385,28 +1385,6 @@ async fn test_task_reflection_success_false_on_provider_error() {
             _ => {}
         }
     }
-    for _ in 0..15 {
-        let event =
-            match tokio::time::timeout(std::time::Duration::from_secs(3), learning_rx.recv()).await
-            {
-                Ok(Ok(event)) => event,
-                _ => break,
-            };
-
-        match &event {
-            LearningEvent::TaskReflection { success, .. } => {
-                if !success {
-                    saw_reflection_with_false = true;
-                }
-            }
-            LearningEvent::ToolFailed { tool, .. } => {
-                if tool == "agent_loop" {
-                    saw_tool_failed = true;
-                }
-            }
-            _ => {}
-        }
-    }
 
     assert!(saw_tool_failed, "expected ToolFailed learning event");
     assert!(

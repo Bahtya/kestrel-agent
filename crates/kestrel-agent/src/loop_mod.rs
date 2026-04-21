@@ -361,7 +361,7 @@ impl AgentLoop {
                     let result_content = result.content.clone();
                     let tool_calls = result.tool_calls_made;
                     let iterations = result.iterations_used;
-                    let success = iterations < self.config.agent.max_iterations;
+                    let success = !result.hit_limit;
                     let outbound = OutboundMessage {
                         channel: msg.channel.clone(),
                         chat_id: msg.chat_id.clone(),

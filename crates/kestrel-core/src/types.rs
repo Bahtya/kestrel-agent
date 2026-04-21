@@ -215,6 +215,9 @@ pub struct RunResult {
     pub tool_calls_made: usize,
     /// Number of agent-loop iterations consumed.
     pub iterations_used: usize,
+    /// Whether the agent hit the max_iterations limit.
+    /// When true, the agent was forcibly stopped before producing a final answer.
+    pub hit_limit: bool,
 }
 
 /// Session source identifies where a conversation originates.
@@ -479,6 +482,7 @@ mod tests {
             },
             tool_calls_made: 2,
             iterations_used: 3,
+            hit_limit: false,
         };
         assert_eq!(rr.content, "done");
         assert_eq!(rr.usage.prompt_tokens, Some(10));

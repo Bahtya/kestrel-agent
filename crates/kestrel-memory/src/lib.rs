@@ -17,6 +17,7 @@ pub mod error;
 pub mod hot_store;
 pub mod security_scan;
 pub mod store;
+pub mod text_search;
 pub mod tiered;
 pub mod types;
 pub mod warm_store;

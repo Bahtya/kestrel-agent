@@ -10,6 +10,8 @@ pub mod spawn;
 pub mod web;
 
 use crate::registry::ToolRegistry;
+use kestrel_memory::{EmbeddingGenerator, MemoryStore};
+use std::sync::Arc;
 
 /// Configuration applied when registering built-in tools.
 #[derive(Debug, Clone, Copy, Default)]
@@ -37,6 +39,19 @@ pub fn register_all_with_config(registry: &ToolRegistry, config: BuiltinsConfig)
     registry.register(message::MessageTool::new());
     registry.register(cron::CronTool::new());
     registry.register(spawn::SpawnTool::new());
+}
+
+/// Register memory tools that require a memory store and embedding generator.
+pub fn register_memory_tools(
+    registry: &ToolRegistry,
+    store: Arc<dyn MemoryStore>,
+    embedding: Arc<dyn EmbeddingGenerator>,
+) {
+    registry.register(memory::StoreMemoryTool::new(
+        store.clone(),
+        embedding.clone(),
+    ));
+    registry.register(memory::RecallMemoryTool::new(store, embedding));
 }
 
 #[cfg(test)]
@@ -84,5 +99,47 @@ mod tests {
         );
         assert!(!registry.is_mutating("grep"), "grep should NOT be mutating");
         assert!(!registry.is_mutating("glob"), "glob should NOT be mutating");
+
+        // Memory tools are NOT in register_all — they need deps
+        assert!(
+            registry.get("store_memory").is_none(),
+            "store_memory should not be in register_all"
+        );
+        assert!(
+            registry.get("recall_memory").is_none(),
+            "recall_memory should not be in register_all"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_memory_tools() {
+        use kestrel_memory::{HashEmbedding, HotStore, MemoryConfig};
+
+        let registry = ToolRegistry::new();
+        register_all(&registry);
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = MemoryConfig::for_test(dir.path());
+        let store: Arc<dyn MemoryStore> = Arc::new(HotStore::new(&config).await.unwrap());
+        let embedding: Arc<dyn EmbeddingGenerator> = Arc::new(HashEmbedding::default_dim());
+
+        register_memory_tools(&registry, store, embedding);
+
+        assert!(
+            registry.get("store_memory").is_some(),
+            "store_memory should be registered"
+        );
+        assert!(
+            registry.get("recall_memory").is_some(),
+            "recall_memory should be registered"
+        );
+        assert!(
+            registry.is_mutating("store_memory"),
+            "store_memory should be mutating"
+        );
+        assert!(
+            !registry.is_mutating("recall_memory"),
+            "recall_memory should NOT be mutating"
+        );
     }
 }

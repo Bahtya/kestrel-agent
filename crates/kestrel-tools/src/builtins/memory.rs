@@ -76,8 +76,13 @@ impl Tool for StoreMemoryTool {
     async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let content = args["content"]
             .as_str()
-            .ok_or_else(|| ToolError::Validation("missing or invalid 'content' field".into()))?
-            .to_string();
+            .ok_or_else(|| ToolError::Validation("missing or invalid 'content' field".into()))?;
+
+        if content.trim().is_empty() {
+            return Err(ToolError::Validation("content must not be empty".into()));
+        }
+
+        let content = content.to_string();
 
         let category_str = args["category"]
             .as_str()
@@ -85,7 +90,12 @@ impl Tool for StoreMemoryTool {
 
         let category = parse_category(category_str)?;
 
-        let confidence = args["confidence"].as_f64().unwrap_or(1.0);
+        let confidence = match args.get("confidence") {
+            Some(v) if !v.is_null() => v.as_f64().ok_or_else(|| {
+                ToolError::Validation("confidence must be a number between 0.0 and 1.0".into())
+            })?,
+            _ => 1.0,
+        };
 
         let embedding_vec = self
             .embedding
@@ -507,5 +517,41 @@ mod tests {
         assert!(recall_tool.description().len() > 20);
         assert!(!recall_tool.is_mutating());
         assert!(recall_tool.is_available());
+    }
+
+    #[tokio::test]
+    async fn test_store_memory_invalid_confidence() {
+        let (_store, store_tool, _recall_tool, _dir) = make_tools().await;
+
+        let result = store_tool
+            .execute(json!({
+                "content": "test",
+                "category": "fact",
+                "confidence": "high"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("confidence"),
+            "error should mention confidence: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_memory_empty_content() {
+        let (_store, store_tool, _recall_tool, _dir) = make_tools().await;
+
+        let result = store_tool
+            .execute(json!({
+                "content": "   ",
+                "category": "fact"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty"), "error should mention empty: {err}");
     }
 }

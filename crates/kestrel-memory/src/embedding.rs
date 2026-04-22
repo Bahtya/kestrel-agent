@@ -34,6 +34,12 @@ pub struct HashEmbedding {
     dimension: usize,
 }
 
+impl Default for HashEmbedding {
+    fn default() -> Self {
+        Self::default_dim()
+    }
+}
+
 impl HashEmbedding {
     /// Create a new hash embedding generator with the given vector dimension.
     pub fn new(dimension: usize) -> Self {
@@ -190,5 +196,11 @@ mod tests {
     fn test_tokenize_empty() {
         let tokens = HashEmbedding::tokenize("   !!! ... ");
         assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let default: HashEmbedding = HashEmbedding::default();
+        assert_eq!(default.dimension(), 256);
     }
 }

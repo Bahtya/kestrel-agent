@@ -393,6 +393,14 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
     let heartbeat_memory_store = memory_store.clone();
     let learning_memory_store = memory_store.clone();
 
+    // Register memory tools if the memory store is available.
+    if let Some(ref ms) = memory_store {
+        let embedding: Arc<dyn kestrel_memory::EmbeddingGenerator> =
+            Arc::new(kestrel_memory::HashEmbedding::default_dim());
+        builtins::register_memory_tools(&tool_registry, ms.clone(), embedding);
+        info!("Memory tools registered (store_memory, recall_memory)");
+    }
+
     let agent_loop = {
         let mut al = AgentLoop::new(
             config.clone(),

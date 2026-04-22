@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-22
+
+### Added
+
+- Self-evolution observability: learning event consumers, action outcome tracking, and processor metrics (#125)
+- JSONL schema versioning for HotStore persistence with backward-compatible migration (#123)
+- Word-boundary text search precision with `\b` regex patterns and ReDoS mitigation (#122)
+- XML memory isolation with `<memory-context>` tags and budget-aware truncation (#120)
+- Deferred writes for HotStore with auto-flush threshold and `Drop` best-effort flush (#120)
+- Token budget control for memory injection (`MEMORY_CHAR_BUDGET` at 2200/1375 chars) (#120)
+- Entry-level memory budget skipping — no more broken mid-entry truncation (#133)
+- Configurable memory char budgets via `MemoryConfig` (backward compatible defaults) (#133)
+- LanceDB predicate input validation to prevent injection (#132)
+- WarmStore write serialization with `tokio::sync::Mutex` (#132)
+- Security scanner limitation documentation (#134)
+
+### Fixed
+
+- XML escaping of memory content to prevent prompt injection via `</memory-context>` (#126)
+- Session persistence race condition in e2e tests (#124)
+- Clippy warnings and dead code cleanup
+- `mark_dirty()` error handling in HotStore auto-flush (#126)
+
+### Changed
+
+- Removed expired documentation: Six Hats analysis, sprint plans, and task files
+
 ## [0.1.0] - 2025-04-20
 
 ### Added
@@ -65,5 +92,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed cargo fmt after PR merges
 - Removed legacy memory.rs, unified on kestrel-memory crate
 
-[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Bahtya/kestrel-agent/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Bahtya/kestrel-agent/releases/tag/v0.1.0

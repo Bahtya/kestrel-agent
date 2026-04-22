@@ -34,8 +34,8 @@ pub struct SessionManager {
     /// Maximum messages per session before truncation.
     max_history: usize,
 
-    /// Background persistence queue.
-    persist_tx: Arc<SyncSender<Session>>,
+    /// Background persistence queue (sends session keys, not snapshots).
+    persist_tx: Arc<SyncSender<String>>,
 
     /// Optional persistence hook for tests and fault injection.
     persist_hook: Arc<Mutex<Option<Arc<PersistHook>>>>,
@@ -61,8 +61,10 @@ impl SessionManager {
         let note_store = Arc::new(Mutex::new(note_store));
         let persist_hook = Arc::new(Mutex::new(None));
         let (persist_tx, persist_rx) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
+        let sessions = Arc::new(DashMap::new());
 
         Self::spawn_persist_worker(
+            sessions.clone(),
             store.clone(),
             note_store.clone(),
             persist_hook.clone(),
@@ -70,7 +72,7 @@ impl SessionManager {
         );
 
         Ok(Self {
-            sessions: Arc::new(DashMap::new()),
+            sessions,
             store,
             note_store,
             max_history,
@@ -122,22 +124,25 @@ impl SessionManager {
 
     /// Update the cache immediately and queue a background persistence write.
     ///
+    /// Sends only the session key — the worker reads the latest snapshot from
+    /// the in-memory cache, preventing stale overwrites from queued snapshots.
     /// Disk write failures are logged by the background worker and do not
     /// propagate to the caller.
     pub fn save_session_async(&self, session: &Session) {
         let session = self.prepare_session_for_save(session);
+        let key = session.key.clone();
 
-        match self.persist_tx.try_send(session) {
+        match self.persist_tx.try_send(key) {
             Ok(()) => {}
-            Err(TrySendError::Full(session)) => {
+            Err(TrySendError::Full(key)) => {
                 warn!(
-                    session_key = %session.key,
+                    session_key = %key,
                     "Persistence queue full; dropping background save"
                 );
             }
-            Err(TrySendError::Disconnected(session)) => {
+            Err(TrySendError::Disconnected(key)) => {
                 error!(
-                    session_key = %session.key,
+                    session_key = %key,
                     "Persistence queue disconnected; dropping background save"
                 );
             }
@@ -302,15 +307,27 @@ impl SessionManager {
     }
 
     fn spawn_persist_worker(
+        sessions: Arc<DashMap<String, Session>>,
         store: Arc<Mutex<SessionStore>>,
         note_store: Arc<Mutex<NoteStore>>,
         persist_hook: Arc<Mutex<Option<Arc<PersistHook>>>>,
-        persist_rx: Receiver<Session>,
+        persist_rx: Receiver<String>,
     ) {
         let _ = std::thread::Builder::new()
             .name("kestrel-session-persist".to_string())
             .spawn(move || {
-                while let Ok(session) = persist_rx.recv() {
+                while let Ok(key) = persist_rx.recv() {
+                    // Read the latest snapshot from the in-memory cache rather
+                    // than a stale copy queued earlier. This prevents a slow
+                    // async write from overwriting a newer synchronous write.
+                    let Some(session) = sessions.get(&key).map(|r| r.value().clone()) else {
+                        debug!(
+                            session_key = %key,
+                            "Session no longer in cache; skipping background persist"
+                        );
+                        continue;
+                    };
+
                     if let Err(e) =
                         Self::persist_snapshot_inner(&store, &note_store, &persist_hook, &session)
                     {

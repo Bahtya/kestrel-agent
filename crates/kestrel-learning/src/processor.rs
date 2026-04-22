@@ -982,8 +982,8 @@ mod tests {
         let mut proc2 = BasicEventProcessor::new().with_stats_path(&stats_path);
         proc2.load_stats().await.unwrap();
 
-        let outcomes = proc2
-            .stats()
+        let stats2 = proc2.stats();
+        let outcomes = stats2
             .action_outcomes
             .get("adjust_confidence")
             .expect("should exist");

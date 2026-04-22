@@ -57,11 +57,11 @@ impl LearningConsumer {
         async move {
             match action {
                 LearningAction::RecordInsight { insight, category } => {
-                    tracing::Span::current().record("category", &category.as_str());
+                    tracing::Span::current().record("category", category.as_str());
                     self.handle_record_insight(insight, category).await;
                 }
                 LearningAction::AdjustConfidence { skill, delta } => {
-                    tracing::Span::current().record("skill", &skill.as_str());
+                    tracing::Span::current().record("skill", skill.as_str());
                     tracing::Span::current().record("delta", delta);
                     self.handle_adjust_confidence(skill, delta).await;
                 }

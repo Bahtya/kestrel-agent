@@ -906,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn test_seed_default_skills_preserves_bundled_manifest_fields() {
         let home = tempfile::tempdir().unwrap();
-        let skills_dir = home.path().join("skills");
+        let _skills_dir = home.path().join("skills");
         // Don't create dir — init_skill_registry will create and seed
 
         let registry = init_skill_registry(home.path()).await;

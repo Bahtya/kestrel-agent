@@ -982,7 +982,7 @@ mod tests {
     async fn test_recall_persists_via_drop() {
         let dir = tempfile::tempdir().unwrap();
         let config = MemoryConfig::for_test(dir.path());
-        let path = config.hot_store_path.clone();
+        let _path = config.hot_store_path.clone();
 
         let entry = MemoryEntry::new("drop-persist", MemoryCategory::Fact);
         let id = entry.id.clone();

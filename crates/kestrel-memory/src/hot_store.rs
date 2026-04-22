@@ -24,6 +24,7 @@ use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
 use crate::security_scan::{scan_memory_entry, SecurityScanResult};
 use crate::store::MemoryStore;
+use crate::text_search::matches_filters;
 use crate::types::{EntryId, MemoryCategory, MemoryEntry, MemoryQuery, ScoredEntry};
 
 #[derive(Clone)]
@@ -404,30 +405,10 @@ fn compute_score(entry: &MemoryEntry, query: &MemoryQuery) -> f64 {
     1.0
 }
 
-/// Check if an entry matches the filter criteria in a query.
-fn matches_filters(entry: &MemoryEntry, query: &MemoryQuery) -> bool {
-    if let Some(ref cat) = query.category {
-        if entry.category != *cat {
-            return false;
-        }
-    }
-    if let Some(min_conf) = query.min_confidence {
-        if entry.confidence < min_conf {
-            return false;
-        }
-    }
-    if let Some(ref text) = query.text {
-        if !entry.content.to_lowercase().contains(&text.to_lowercase()) {
-            return false;
-        }
-    }
-    true
-}
-
 /// Compute cosine similarity between two vectors.
 ///
 /// Returns 0.0 if vectors have different lengths or are empty.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }

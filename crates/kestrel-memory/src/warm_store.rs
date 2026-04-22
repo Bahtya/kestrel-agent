@@ -19,6 +19,7 @@ use crate::error::{MemoryError, Result};
 use crate::hot_store::cosine_similarity;
 use crate::security_scan::{scan_memory_entry, SecurityScanResult};
 use crate::store::MemoryStore;
+use crate::text_search::matches_filters;
 use crate::types::{MemoryCategory, MemoryEntry, MemoryQuery, ScoredEntry};
 
 const TABLE_NAME: &str = "warm_memory";
@@ -437,26 +438,6 @@ fn parse_datetime(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.to_utc())
         .map_err(|e| MemoryError::LanceDb(format!("invalid datetime '{s}': {e}")))
-}
-
-/// Check if an entry matches the filter criteria in a query.
-fn matches_filters(entry: &MemoryEntry, query: &MemoryQuery) -> bool {
-    if let Some(ref cat) = query.category {
-        if entry.category != *cat {
-            return false;
-        }
-    }
-    if let Some(min_conf) = query.min_confidence {
-        if entry.confidence < min_conf {
-            return false;
-        }
-    }
-    if let Some(ref text) = query.text {
-        if !entry.content.to_lowercase().contains(&text.to_lowercase()) {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]

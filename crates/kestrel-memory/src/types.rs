@@ -123,7 +123,7 @@ pub struct ScoredEntry {
 /// Query parameters for searching memories.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryQuery {
-    /// Full-text search pattern (case-insensitive substring match).
+    /// Full-text search pattern (case-insensitive word-boundary match).
     pub text: Option<String>,
     /// Filter by category.
     pub category: Option<MemoryCategory>,

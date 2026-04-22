@@ -68,14 +68,20 @@ impl MemoryStore for TieredMemoryStore {
         let l2_results = self.l2.search(query).await?;
 
         // Merge and deduplicate by entry ID, keeping the higher score.
-        let mut seen = std::collections::HashSet::new();
-        let mut merged: Vec<ScoredEntry> = Vec::with_capacity(l1_results.len() + l2_results.len());
+        let mut best: std::collections::HashMap<String, ScoredEntry> =
+            std::collections::HashMap::new();
 
         for scored in l1_results.into_iter().chain(l2_results) {
-            if seen.insert(scored.entry.id.clone()) {
-                merged.push(scored);
+            let id = scored.entry.id.clone();
+            let dominated = match best.get(&id) {
+                Some(existing) => scored.score > existing.score,
+                None => true,
+            };
+            if dominated {
+                best.insert(id, scored);
             }
         }
+        let mut merged: Vec<ScoredEntry> = best.into_values().collect();
 
         merged.sort_by(|a, b| {
             b.score
@@ -312,5 +318,99 @@ mod tests {
         // Exact match (L2) scores 1.0, partial match (L1) scores ~0.707
         assert!(results[0].entry.content.contains("warm cat"));
         assert!(results[0].score > results[1].score);
+    }
+
+    /// Mock store that returns a fixed set of scored entries for search.
+    struct MockStore {
+        results: Vec<ScoredEntry>,
+        len: usize,
+    }
+
+    impl MockStore {
+        fn with_results(results: Vec<ScoredEntry>) -> Self {
+            let len = results.len();
+            Self { results, len }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for MockStore {
+        async fn store(&self, _entry: MemoryEntry) -> Result<()> {
+            Ok(())
+        }
+        async fn recall(&self, _id: &str) -> Result<Option<MemoryEntry>> {
+            Ok(None)
+        }
+        async fn search(&self, _query: &MemoryQuery) -> Result<Vec<ScoredEntry>> {
+            Ok(self.results.clone())
+        }
+        async fn delete(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn len(&self) -> usize {
+            self.len
+        }
+        async fn clear(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_dedup_keeps_higher_score() {
+        // Same entry ID in both layers, but L2 has the higher score.
+        let entry = MemoryEntry::new("shared", MemoryCategory::Fact);
+        let id = entry.id.clone();
+
+        let l1 = Arc::new(MockStore::with_results(vec![ScoredEntry {
+            entry: entry.clone(),
+            score: 0.3,
+        }]));
+        let l2 = Arc::new(MockStore::with_results(vec![ScoredEntry {
+            entry: entry.clone(),
+            score: 0.9,
+        }]));
+
+        let tiered = TieredMemoryStore::new(l1, l2);
+        let results = tiered
+            .search(&MemoryQuery::new().with_limit(10))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1, "should deduplicate to 1 entry");
+        assert_eq!(results[0].entry.id, id);
+        assert!(
+            (results[0].score - 0.9).abs() < f64::EPSILON,
+            "expected L2's higher score 0.9, got {}",
+            results[0].score
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_dedup_keeps_l1_score_when_higher() {
+        let entry = MemoryEntry::new("shared", MemoryCategory::Fact);
+        let id = entry.id.clone();
+
+        let l1 = Arc::new(MockStore::with_results(vec![ScoredEntry {
+            entry: entry.clone(),
+            score: 0.95,
+        }]));
+        let l2 = Arc::new(MockStore::with_results(vec![ScoredEntry {
+            entry: entry.clone(),
+            score: 0.4,
+        }]));
+
+        let tiered = TieredMemoryStore::new(l1, l2);
+        let results = tiered
+            .search(&MemoryQuery::new().with_limit(10))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.id, id);
+        assert!(
+            (results[0].score - 0.95).abs() < f64::EPSILON,
+            "expected L1's higher score 0.95, got {}",
+            results[0].score
+        );
     }
 }

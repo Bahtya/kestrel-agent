@@ -14,7 +14,7 @@ use kestrel_config::Config;
 use kestrel_core::{FunctionCall, MessageType, Platform, ToolCall, Usage};
 use kestrel_providers::base::{BoxStream, CompletionChunk};
 use kestrel_providers::{CompletionRequest, CompletionResponse, LlmProvider, ProviderRegistry};
-use kestrel_session::SessionManager;
+use kestrel_session::{Session, SessionManager};
 use kestrel_tools::{Tool, ToolError, ToolRegistry};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -197,13 +197,13 @@ async fn wait_for_session_message_count(
     session_dir: std::path::PathBuf,
     session_key: &str,
     expected_len: usize,
-) {
+) -> Session {
     let deadline = Instant::now() + TEST_TIMEOUT;
     loop {
         let mgr = SessionManager::new(session_dir.clone()).unwrap();
         let session = mgr.get_or_create(session_key, None);
         if session.messages.len() >= expected_len {
-            return;
+            return session;
         }
         assert!(
             Instant::now() < deadline,
@@ -444,13 +444,13 @@ async fn test_e2e_session_persistence() {
 
     let provider = MockProvider::multi_step(vec![
         CompletionResponse {
-            content: Some("First response.".to_string()),
+            content: Some("Async Rust uses futures and an executor to manage concurrent tasks efficiently.".to_string()),
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
         },
         CompletionResponse {
-            content: Some("Second response.".to_string()),
+            content: Some("Tokyo has humid summers and mild winters, while Paris has oceanic climate with steady rainfall.".to_string()),
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -466,14 +466,19 @@ async fn test_e2e_session_persistence() {
     let agent_handle = tokio::spawn(async move { agent_loop.run().await.unwrap() });
 
     // First message
-    bus.publish_inbound(make_inbound("First message"))
-        .await
-        .unwrap();
+    bus.publish_inbound(make_inbound(
+        "Explain the architecture of async Rust with concrete examples",
+    ))
+    .await
+    .unwrap();
     let out1 = timeout(TEST_TIMEOUT, outbound_rx.recv())
         .await
         .expect("Timeout on first")
         .expect("Channel closed");
-    assert_eq!(out1.content, "First response.");
+    assert_eq!(
+        out1.content,
+        "Async Rust uses futures and an executor to manage concurrent tasks efficiently."
+    );
 
     // Second message — same chat
     bus.publish_inbound(make_inbound("Second message"))
@@ -483,13 +488,10 @@ async fn test_e2e_session_persistence() {
         .await
         .expect("Timeout on second")
         .expect("Channel closed");
-    assert_eq!(out2.content, "Second response.");
+    assert_eq!(out2.content, "Tokyo has humid summers and mild winters, while Paris has oceanic climate with steady rainfall.");
 
     // Verify session has at least 4 entries: user1, assistant1, user2, assistant2
-    wait_for_session_message_count(session_dir.clone(), "telegram:chat_100", 4).await;
-
-    let mgr2 = SessionManager::new(session_dir).unwrap();
-    let session = mgr2.get_or_create("telegram:chat_100", None);
+    let session = wait_for_session_message_count(session_dir.clone(), "telegram:chat_100", 4).await;
     assert!(session.messages.len() >= 4);
 
     agent_handle.abort();

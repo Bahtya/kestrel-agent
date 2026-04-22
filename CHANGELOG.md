@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-23
+
+### Fixed
+
+- Fix session persistence race condition in e2e tests by sending session keys instead of snapshots to the background worker (#136)
+- Suppress unused variable warnings in test code (#136)
+
 ## [0.2.1] - 2026-04-22
 
 ### Fixed
@@ -98,6 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed cargo fmt after PR merges
 - Removed legacy memory.rs, unified on kestrel-memory crate
 
-[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Bahtya/kestrel-agent/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Bahtya/kestrel-agent/releases/tag/v0.1.0

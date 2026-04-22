@@ -14,7 +14,7 @@ use kestrel_config::Config;
 use kestrel_core::{FunctionCall, MessageType, Platform, ToolCall, Usage};
 use kestrel_providers::base::{BoxStream, CompletionChunk};
 use kestrel_providers::{CompletionRequest, CompletionResponse, LlmProvider, ProviderRegistry};
-use kestrel_session::SessionManager;
+use kestrel_session::{Session, SessionManager};
 use kestrel_tools::{Tool, ToolError, ToolRegistry};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -197,13 +197,13 @@ async fn wait_for_session_message_count(
     session_dir: std::path::PathBuf,
     session_key: &str,
     expected_len: usize,
-) {
+) -> Session {
     let deadline = Instant::now() + TEST_TIMEOUT;
     loop {
         let mgr = SessionManager::new(session_dir.clone()).unwrap();
         let session = mgr.get_or_create(session_key, None);
         if session.messages.len() >= expected_len {
-            return;
+            return session;
         }
         assert!(
             Instant::now() < deadline,
@@ -491,10 +491,7 @@ async fn test_e2e_session_persistence() {
     assert_eq!(out2.content, "Tokyo has humid summers and mild winters, while Paris has oceanic climate with steady rainfall.");
 
     // Verify session has at least 4 entries: user1, assistant1, user2, assistant2
-    wait_for_session_message_count(session_dir.clone(), "telegram:chat_100", 4).await;
-
-    let mgr2 = SessionManager::new(session_dir).unwrap();
-    let session = mgr2.get_or_create("telegram:chat_100", None);
+    let session = wait_for_session_message_count(session_dir.clone(), "telegram:chat_100", 4).await;
     assert!(session.messages.len() >= 4);
 
     agent_handle.abort();

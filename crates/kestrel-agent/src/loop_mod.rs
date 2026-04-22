@@ -538,9 +538,37 @@ impl AgentLoop {
             return;
         };
 
-        // Create a concise summary from the conversation turn.
+        let quality = summary_quality(user_msg, agent_response);
+        if quality < MEMORY_QUALITY_THRESHOLD {
+            tracing::debug!(
+                "Skipping low-quality conversation memory (quality={:.2}): {:.80}",
+                quality,
+                user_msg
+            );
+            return;
+        }
+
         let content = format_conversation_summary(user_msg, agent_response);
-        let entry = MemoryEntry::new(content, MemoryCategory::AgentNote).with_confidence(0.6);
+
+        // Deduplication: skip if a near-duplicate already exists.
+        if let Ok(existing) = store
+            .search(
+                &MemoryQuery::new()
+                    .with_category(MemoryCategory::AgentNote)
+                    .with_limit(20),
+            )
+            .await
+        {
+            let entries: Vec<_> = existing.into_iter().map(|s| s.entry).collect();
+            if is_near_duplicate(&content, &entries) {
+                tracing::debug!("Skipping duplicate conversation memory: {:.80}", content);
+                return;
+            }
+        }
+
+        let confidence = quality_to_confidence(quality);
+        let entry =
+            MemoryEntry::new(content, MemoryCategory::AgentNote).with_confidence(confidence);
 
         if let Err(e) = store.store(entry).await {
             warn!("Failed to store conversation memory: {}", e);
@@ -847,6 +875,113 @@ fn format_conversation_summary(user_msg: &str, agent_response: &str) -> String {
     let user_preview = truncate_str(user_msg, 200);
     let response_preview = truncate_str(agent_response, 100);
     format!("User: {} | Agent: {}", user_preview, response_preview)
+}
+
+/// Words that indicate trivial or low-information exchanges.
+const TRIVIAL_WORDS: &[&str] = &[
+    "hi", "hello", "hey", "thanks", "thank", "ok", "okay", "bye", "goodbye", "sure", "yes", "no",
+    "please", "sorry", "welcome", "cool", "nice", "great", "awesome", "got", "gotcha", "right",
+    "yep", "nope", "aha", "hmm", "lol", "haha",
+];
+
+/// Compute a quality score (0.0–1.0) for a conversation summary.
+///
+/// Uses deterministic heuristics: content length, information density (unique
+/// meaningful words / total), specificity signals (numbers, CamelCase tokens,
+/// file paths), and triviality detection.
+fn summary_quality(user_msg: &str, agent_response: &str) -> f64 {
+    let combined = format!("{user_msg} {agent_response}");
+    let tokens: Vec<&str> = combined
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        return 0.0;
+    }
+
+    // 1. Length component — penalize very short inputs
+    let total_chars: usize = combined.chars().count();
+    let length_score = (total_chars as f64 / 80.0).min(1.0);
+
+    // 2. Information density — unique lowercase words / total words
+    let lower: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+    let unique_count = {
+        let mut set = std::collections::HashSet::new();
+        for word in &lower {
+            set.insert(word.as_str());
+        }
+        set.len()
+    };
+    let density = unique_count as f64 / lower.len() as f64;
+
+    // 3. Specificity — bonus for numbers, CamelCase, paths, code-like tokens
+    let mut specificity_hits = 0usize;
+    for token in &tokens {
+        if token.chars().any(|c| c.is_ascii_digit()) {
+            specificity_hits += 1;
+        } else if token.chars().filter(|c| c.is_uppercase()).count() >= 2
+            && token.chars().filter(|c| c.is_lowercase()).count() >= 1
+        {
+            // CamelCase or ALL_CAPS with lowercase
+            specificity_hits += 1;
+        } else if token.contains('/') || token.contains('.') || token.contains('_') {
+            specificity_hits += 1;
+        }
+    }
+    let specificity = (specificity_hits as f64 / 4.0).min(1.0);
+
+    // 4. Triviality penalty — if most words are trivial filler
+    let trivial_count = lower
+        .iter()
+        .filter(|w| TRIVIAL_WORDS.contains(&w.as_str()))
+        .count();
+    let trivial_ratio = trivial_count as f64 / lower.len() as f64;
+    let triviality_penalty = if trivial_ratio > 0.6 { 0.3 } else { 1.0 };
+
+    // Weighted combination
+    let score =
+        (0.3 * length_score + 0.3 * density + 0.2 * specificity + 0.2 * 1.0) * triviality_penalty;
+
+    score.clamp(0.0, 1.0)
+}
+
+/// Minimum quality score required to store a conversation summary.
+const MEMORY_QUALITY_THRESHOLD: f64 = 0.2;
+
+/// Map a quality score to a confidence value in [0.3, 0.9].
+fn quality_to_confidence(quality: f64) -> f64 {
+    0.3 + quality * 0.6
+}
+
+/// Check whether a new summary is a near-duplicate of existing entries.
+///
+/// Returns `true` if any existing entry shares ≥ 80% of words with the new content.
+fn is_near_duplicate(new_content: &str, existing: &[kestrel_memory::MemoryEntry]) -> bool {
+    let new_words: std::collections::HashSet<String> = new_content
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+    if new_words.is_empty() {
+        return false;
+    }
+
+    for entry in existing {
+        let existing_words: std::collections::HashSet<String> = entry
+            .content
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .collect();
+        if existing_words.is_empty() {
+            continue;
+        }
+        let overlap = new_words.intersection(&existing_words).count();
+        let ratio = overlap as f64 / new_words.len().min(existing_words.len()) as f64;
+        if ratio >= 0.8 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Truncate a string to at most `max_len` characters, appending "..." if truncated.
@@ -1385,7 +1520,12 @@ mod tests {
         assert!(entries[0].content.contains("What is Rust?"));
         assert!(entries[0].content.contains("Rust is a systems language"));
         assert_eq!(entries[0].category, MemoryCategory::AgentNote);
-        assert!((entries[0].confidence - 0.6).abs() < f64::EPSILON);
+        // Confidence is now dynamic based on quality score.
+        assert!(
+            entries[0].confidence >= 0.3 && entries[0].confidence <= 0.9,
+            "confidence should be in [0.3, 0.9]: got {}",
+            entries[0].confidence
+        );
     }
 
     #[tokio::test]
@@ -1393,8 +1533,16 @@ mod tests {
         let mock = Arc::new(MockMemoryStore::new());
         let al = make_agent_loop().with_memory_store(mock.clone());
 
-        al.store_conversation_memory("msg1", "resp1").await;
-        al.store_conversation_memory("msg2", "resp2").await;
+        al.store_conversation_memory(
+            "How do I run the test suite?",
+            "Use cargo test --workspace to run all tests across crates",
+        )
+        .await;
+        al.store_conversation_memory(
+            "What database driver should I use?",
+            "The sqlx crate provides async database access with compile-time query checking",
+        )
+        .await;
 
         assert_eq!(mock.store_count(), 2);
     }
@@ -1415,6 +1563,158 @@ mod tests {
         assert!(summary.contains("Agent: "));
         // Should not contain the full 300 chars
         assert!(!summary.contains(&long_user));
+    }
+
+    // ── quality scoring tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_summary_quality_empty() {
+        let q = summary_quality("", "");
+        assert!((q - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_summary_quality_trivial_greeting() {
+        let q = summary_quality("hello", "hi there");
+        assert!(
+            q < MEMORY_QUALITY_THRESHOLD,
+            "trivial greeting should score below threshold: got {q}"
+        );
+    }
+
+    #[test]
+    fn test_summary_quality_substantive() {
+        let q = summary_quality(
+            "How do I configure the database connection pool in Rust?",
+            "Use the r2d2 crate with your database driver. Set max_size to control pool capacity.",
+        );
+        assert!(q > 0.4, "substantive exchange should score well: got {q}");
+    }
+
+    #[test]
+    fn test_summary_quality_short_acknowledgment() {
+        let q = summary_quality("ok", "got it");
+        assert!(
+            q < MEMORY_QUALITY_THRESHOLD,
+            "short acknowledgment should score low: got {q}"
+        );
+    }
+
+    #[test]
+    fn test_summary_quality_with_code() {
+        let q = summary_quality(
+            "Fix the build error in src/main.rs line 42",
+            "Changed `let x = 5` to `let x: i32 = 5` to satisfy the type checker",
+        );
+        assert!(
+            q > 0.5,
+            "exchange with code and file paths should score high: got {q}"
+        );
+    }
+
+    #[test]
+    fn test_summary_quality_numbers_boost() {
+        let q_with = summary_quality(
+            "The server runs on port 8080 with 4 threads",
+            "Configured the server on port 8080 with 4 threads",
+        );
+        let q_without = summary_quality(
+            "The server runs on a port with threads",
+            "Configured the server on a port with threads",
+        );
+        assert!(
+            q_with >= q_without,
+            "numbers should boost quality: with={q_with}, without={q_without}"
+        );
+    }
+
+    #[test]
+    fn test_quality_to_confidence_range() {
+        assert!((quality_to_confidence(0.0) - 0.3).abs() < f64::EPSILON);
+        assert!((quality_to_confidence(1.0) - 0.9).abs() < f64::EPSILON);
+        let mid = quality_to_confidence(0.5);
+        assert!(mid > 0.3 && mid < 0.9, "mid={mid}");
+    }
+
+    // ── deduplication tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_is_near_duplicate_identical() {
+        let existing = vec![MemoryEntry::new(
+            "User: hello | Agent: hi",
+            MemoryCategory::AgentNote,
+        )];
+        assert!(is_near_duplicate("User: hello | Agent: hi", &existing));
+    }
+
+    #[test]
+    fn test_is_near_duplicate_similar() {
+        let existing = vec![MemoryEntry::new(
+            "User: How do I build the project? | Agent: Use cargo build --release",
+            MemoryCategory::AgentNote,
+        )];
+        assert!(is_near_duplicate(
+            "User: How do I build the project? | Agent: Use cargo build --workspace",
+            &existing
+        ));
+    }
+
+    #[test]
+    fn test_is_near_duplicate_different() {
+        let existing = vec![MemoryEntry::new(
+            "User: What is Rust? | Agent: A systems programming language",
+            MemoryCategory::AgentNote,
+        )];
+        assert!(!is_near_duplicate(
+            "User: How do I configure Docker? | Agent: Create a Dockerfile in the project root",
+            &existing
+        ));
+    }
+
+    #[test]
+    fn test_is_near_duplicate_empty_new() {
+        let existing = vec![MemoryEntry::new("some content", MemoryCategory::AgentNote)];
+        assert!(!is_near_duplicate("", &existing));
+    }
+
+    #[test]
+    fn test_is_near_duplicate_empty_existing_list() {
+        assert!(!is_near_duplicate("some content", &[]));
+    }
+
+    // ── quality gate integration tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_store_conversation_memory_skips_low_quality() {
+        let mock = Arc::new(MockMemoryStore::new());
+        let al = make_agent_loop().with_memory_store(mock.clone());
+
+        al.store_conversation_memory("hi", "hello").await;
+        assert_eq!(
+            mock.store_count(),
+            0,
+            "trivial exchange should not be stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_conversation_memory_stores_high_quality() {
+        let mock = Arc::new(MockMemoryStore::new());
+        let al = make_agent_loop().with_memory_store(mock.clone());
+
+        al.store_conversation_memory(
+            "How do I configure the database connection pool?",
+            "Use the r2d2 crate with your database driver to manage the pool",
+        )
+        .await;
+        assert_eq!(mock.store_count(), 1);
+
+        let entries = mock.entries.read().await;
+        let conf = entries[0].confidence;
+        assert!(
+            conf > 0.5 && conf <= 0.9,
+            "confidence should be dynamic: got {conf}"
+        );
     }
 
     #[test]
@@ -1754,8 +2054,6 @@ mod tests {
         let assembler = PromptAssembler::with_separator("\n===\n");
         let al = make_agent_loop().with_prompt_assembler(assembler);
 
-        // We can't call process_message without a full agent setup,
-        // but we can verify the builder method is wired correctly.
         assert!(al.prompt_assembler().is_some());
     }
 
@@ -1803,7 +2101,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_task_reflect_no_learning_bus() {
-        // No learning bus means the background helper is never spawned.
         let al = make_agent_loop_with_provider("reflection");
         let _ = al;
     }
@@ -1813,7 +2110,6 @@ mod tests {
         let bus = LearningEventBus::new();
         let mut rx = bus.subscribe();
 
-        // make_agent_loop creates a ProviderRegistry with no providers.
         let al = make_agent_loop();
 
         post_task_reflect(ReflectionTask {
@@ -1828,7 +2124,6 @@ mod tests {
         })
         .await;
 
-        // No event should be published since no provider is configured.
         assert!(rx.try_recv().is_err());
     }
 
@@ -1837,7 +2132,6 @@ mod tests {
         let bus = LearningEventBus::new();
         let mut rx = bus.subscribe();
 
-        // MockProvider returns an empty string.
         let al = make_agent_loop_with_provider("");
 
         post_task_reflect(ReflectionTask {
@@ -1852,7 +2146,6 @@ mod tests {
         })
         .await;
 
-        // Empty content should not publish an event.
         assert!(rx.try_recv().is_err());
     }
 }

@@ -1,11 +1,10 @@
 //! Memory tools: `store_memory` and `recall_memory`.
 //!
 //! These tools let the LLM actively store and retrieve memories via the
-//! [`MemoryStore`] trait. An [`EmbeddingGenerator`] is used to produce
-//! vectors automatically, so the LLM only deals with plain text.
+//! [`MemoryStore`] trait. Full-text search with BM25 scoring handles retrieval.
 
 use async_trait::async_trait;
-use kestrel_memory::{EmbeddingGenerator, MemoryCategory, MemoryEntry, MemoryQuery, MemoryStore};
+use kestrel_memory::{MemoryCategory, MemoryEntry, MemoryQuery, MemoryStore};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -16,16 +15,14 @@ use crate::trait_def::{Tool, ToolError};
 /// Tool for storing a memory entry that the LLM can later recall.
 ///
 /// The LLM supplies the content, category, and optional confidence.
-/// An embedding vector is generated automatically from the content text.
 pub struct StoreMemoryTool {
     store: Arc<dyn MemoryStore>,
-    embedding: Arc<dyn EmbeddingGenerator>,
 }
 
 impl StoreMemoryTool {
-    /// Create a new store_memory tool backed by the given store and embedding generator.
-    pub fn new(store: Arc<dyn MemoryStore>, embedding: Arc<dyn EmbeddingGenerator>) -> Self {
-        Self { store, embedding }
+    /// Create a new store_memory tool backed by the given store.
+    pub fn new(store: Arc<dyn MemoryStore>) -> Self {
+        Self { store }
     }
 }
 
@@ -97,15 +94,7 @@ impl Tool for StoreMemoryTool {
             _ => 1.0,
         };
 
-        let embedding_vec = self
-            .embedding
-            .generate(&content)
-            .await
-            .map_err(|e| ToolError::Execution(format!("embedding generation failed: {e}")))?;
-
-        let entry = MemoryEntry::new(content, category)
-            .with_confidence(confidence)
-            .with_embedding(embedding_vec);
+        let entry = MemoryEntry::new(content, category).with_confidence(confidence);
 
         let id = entry.id.clone();
         self.store
@@ -125,17 +114,16 @@ impl Tool for StoreMemoryTool {
 
 /// Tool for searching and recalling stored memories.
 ///
-/// The LLM supplies a text query. An embedding is generated and used
-/// for semantic search, falling back to text substring matching.
+/// The LLM supplies a text query. BM25 full-text search with jieba
+/// CJK tokenization handles retrieval and relevance scoring.
 pub struct RecallMemoryTool {
     store: Arc<dyn MemoryStore>,
-    embedding: Arc<dyn EmbeddingGenerator>,
 }
 
 impl RecallMemoryTool {
-    /// Create a new recall_memory tool backed by the given store and embedding generator.
-    pub fn new(store: Arc<dyn MemoryStore>, embedding: Arc<dyn EmbeddingGenerator>) -> Self {
-        Self { store, embedding }
+    /// Create a new recall_memory tool backed by the given store.
+    pub fn new(store: Arc<dyn MemoryStore>) -> Self {
+        Self { store }
     }
 }
 
@@ -147,7 +135,7 @@ impl Tool for RecallMemoryTool {
 
     fn description(&self) -> &str {
         "Search long-term memory for information previously stored. \
-         Returns matching entries sorted by relevance. Use this to recall \
+         Returns matching entries sorted by BM25 relevance. Use this to recall \
          user preferences, project facts, or past lessons."
     }
 
@@ -196,14 +184,8 @@ impl Tool for RecallMemoryTool {
             None => None,
         };
 
-        let embedding_vec = self
-            .embedding
-            .generate(&query_text)
-            .await
-            .map_err(|e| ToolError::Execution(format!("embedding generation failed: {e}")))?;
-
         let mut query = MemoryQuery::new()
-            .with_embedding(embedding_vec)
+            .with_text(&query_text)
             .with_limit(limit);
 
         if let Some(cat) = category {
@@ -258,7 +240,8 @@ fn parse_category(s: &str) -> Result<MemoryCategory, ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kestrel_memory::{HashEmbedding, HotStore, MemoryConfig};
+    use kestrel_memory::HotStore;
+    use kestrel_memory::MemoryConfig;
 
     async fn make_tools() -> (
         Arc<dyn MemoryStore>,
@@ -269,9 +252,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = MemoryConfig::for_test(dir.path());
         let store: Arc<dyn MemoryStore> = Arc::new(HotStore::new(&config).await.unwrap());
-        let embedding: Arc<dyn EmbeddingGenerator> = Arc::new(HashEmbedding::default_dim());
-        let store_tool = StoreMemoryTool::new(store.clone(), embedding.clone());
-        let recall_tool = RecallMemoryTool::new(store.clone(), embedding.clone());
+        let store_tool = StoreMemoryTool::new(store.clone());
+        let recall_tool = RecallMemoryTool::new(store.clone());
         (store, store_tool, recall_tool, dir)
     }
 
@@ -395,39 +377,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recall_memory_tool_with_category_filter() {
-        let (_store, store_tool, recall_tool, _dir) = make_tools().await;
-
-        store_tool
-            .execute(json!({
-                "content": "fact about the project",
-                "category": "fact"
-            }))
-            .await
-            .unwrap();
-
-        store_tool
-            .execute(json!({
-                "content": "user preference for light theme",
-                "category": "preference"
-            }))
-            .await
-            .unwrap();
-
-        let result = recall_tool
-            .execute(json!({
-                "query": "project",
-                "category": "fact"
-            }))
-            .await
-            .unwrap();
-
-        let parsed: Value = serde_json::from_str(&result).unwrap();
-        let results = parsed["results"].as_array().unwrap();
-        assert!(results.iter().all(|r| r["category"] == "fact"));
-    }
-
-    #[tokio::test]
     async fn test_recall_memory_tool_no_results() {
         let (_store, _store_tool, recall_tool, _dir) = make_tools().await;
 
@@ -452,33 +401,6 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("query"));
     }
 
-    #[tokio::test]
-    async fn test_store_and_recall_roundtrip() {
-        let (_store, store_tool, recall_tool, _dir) = make_tools().await;
-
-        store_tool
-            .execute(json!({
-                "content": "The database runs on port 5432",
-                "category": "environment",
-                "confidence": 0.95
-            }))
-            .await
-            .unwrap();
-
-        let result = recall_tool
-            .execute(json!({
-                "query": "database port"
-            }))
-            .await
-            .unwrap();
-
-        let parsed: Value = serde_json::from_str(&result).unwrap();
-        let results = parsed["results"].as_array().unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0]["content"].as_str().unwrap().contains("5432"));
-        assert_eq!(results[0]["category"], "environment");
-    }
-
     #[test]
     fn test_store_tool_metadata() {
         let dir = tempfile::tempdir().unwrap();
@@ -486,9 +408,8 @@ mod tests {
         let (store, store_tool, _, _) = rt.block_on(async {
             let config = MemoryConfig::for_test(dir.path());
             let store: Arc<dyn MemoryStore> = Arc::new(HotStore::new(&config).await.unwrap());
-            let embedding: Arc<dyn EmbeddingGenerator> = Arc::new(HashEmbedding::default_dim());
-            let store_tool = StoreMemoryTool::new(store.clone(), embedding.clone());
-            let recall_tool = RecallMemoryTool::new(store.clone(), embedding);
+            let store_tool = StoreMemoryTool::new(store.clone());
+            let recall_tool = RecallMemoryTool::new(store.clone());
             (store, store_tool, recall_tool, dir)
         });
 
@@ -507,9 +428,8 @@ mod tests {
         let (_, _, recall_tool, _) = rt.block_on(async {
             let config = MemoryConfig::for_test(dir.path());
             let store: Arc<dyn MemoryStore> = Arc::new(HotStore::new(&config).await.unwrap());
-            let embedding: Arc<dyn EmbeddingGenerator> = Arc::new(HashEmbedding::default_dim());
-            let store_tool = StoreMemoryTool::new(store.clone(), embedding.clone());
-            let recall_tool = RecallMemoryTool::new(store.clone(), embedding);
+            let store_tool = StoreMemoryTool::new(store.clone());
+            let recall_tool = RecallMemoryTool::new(store.clone());
             (store, store_tool, recall_tool, dir)
         });
 

@@ -1,4 +1,4 @@
-//! TieredMemoryStore — composes L1 (HotStore) and L2 (WarmStore) into a single MemoryStore.
+//! TieredMemoryStore — composes L1 (HotStore) and L2 (TantivyStore) into a single MemoryStore.
 //!
 //! Write-through: `store` writes to L1 then L2. L2 failures are logged but don't fail the call.
 //! Read-fallback: `recall` checks L1 first, then L2. A hit in L2 is promoted to L1.
@@ -20,7 +20,7 @@ use crate::types::{MemoryEntry, MemoryQuery, ScoredEntry};
 pub struct TieredMemoryStore {
     /// L1 — fast in-memory LRU cache with JSONL persistence.
     l1: Arc<dyn MemoryStore>,
-    /// L2 — persistent semantic vector store (WarmStore / LanceDB).
+    /// L2 — persistent full-text search store (TantivyStore).
     l2: Arc<dyn MemoryStore>,
 }
 
@@ -120,14 +120,14 @@ mod tests {
     use super::*;
     use crate::config::MemoryConfig;
     use crate::hot_store::HotStore;
+    use crate::tantivy_store::TantivyStore;
     use crate::types::MemoryCategory;
-    use crate::warm_store::WarmStore;
 
     async fn make_tiered_store() -> (TieredMemoryStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let config = MemoryConfig::for_test(dir.path());
         let l1 = Arc::new(HotStore::new(&config).await.unwrap());
-        let l2 = Arc::new(WarmStore::new(&config).await.unwrap());
+        let l2 = Arc::new(TantivyStore::new(&config).await.unwrap());
         (TieredMemoryStore::new(l1, l2), dir)
     }
 
@@ -195,7 +195,7 @@ mod tests {
 
         // Only L2 has entries, L1 is empty
         let l1 = Arc::new(HotStore::new(&config).await.unwrap());
-        let l2 = Arc::new(WarmStore::new(&config).await.unwrap());
+        let l2 = Arc::new(TantivyStore::new(&config).await.unwrap());
 
         l2.store(MemoryEntry::new("from l2", MemoryCategory::Fact))
             .await
@@ -218,7 +218,7 @@ mod tests {
         let config = MemoryConfig::for_test(dir.path());
 
         let l1 = Arc::new(HotStore::new(&config).await.unwrap());
-        let l2 = Arc::new(WarmStore::new(&config).await.unwrap());
+        let l2 = Arc::new(TantivyStore::new(&config).await.unwrap());
 
         // Store only in L2 (bypass tiered)
         let entry = MemoryEntry::new("l2 only", MemoryCategory::Fact);
@@ -242,11 +242,10 @@ mod tests {
         let config = MemoryConfig::for_test(dir.path());
 
         let l1 = Arc::new(HotStore::new(&config).await.unwrap());
-        let l2 = Arc::new(WarmStore::new(&config).await.unwrap());
+        let l2 = Arc::new(TantivyStore::new(&config).await.unwrap());
 
         // Same entry in both layers
-        let mut entry = MemoryEntry::new("dup", MemoryCategory::Fact);
-        entry.embedding = Some(vec![1.0_f32; 8]);
+        let entry = MemoryEntry::new("dup", MemoryCategory::Fact);
         let id = entry.id.clone();
         l1.store(entry.clone()).await.unwrap();
         l2.store(entry).await.unwrap();
@@ -271,53 +270,19 @@ mod tests {
 
         {
             let l1 = Arc::new(HotStore::new(&config).await.unwrap());
-            let l2 = Arc::new(WarmStore::new(&config).await.unwrap());
+            let l2 = Arc::new(TantivyStore::new(&config).await.unwrap());
             let tiered = TieredMemoryStore::new(l1, l2);
             tiered.store(entry).await.unwrap();
         }
 
         // Re-create from same paths
         let l1 = Arc::new(HotStore::new(&config).await.unwrap());
-        let l2 = Arc::new(WarmStore::new(&config).await.unwrap());
+        let l2 = Arc::new(TantivyStore::new(&config).await.unwrap());
         let tiered = TieredMemoryStore::new(l1, l2);
 
         let recalled = tiered.recall(&id).await.unwrap();
         assert!(recalled.is_some());
         assert_eq!(recalled.unwrap().content, "persisted");
-    }
-
-    #[tokio::test]
-    async fn test_search_with_embedding_merges_scores() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = MemoryConfig::for_test(dir.path());
-
-        let l1 = Arc::new(HotStore::new(&config).await.unwrap());
-        let l2 = Arc::new(WarmStore::new(&config).await.unwrap());
-
-        // L1: entry somewhat similar to [1,0,0,...]
-        let mut e1 = MemoryEntry::new("hot cat", MemoryCategory::Fact);
-        e1.embedding = Some(vec![0.5_f32, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        l1.store(e1).await.unwrap();
-
-        // L2: entry identical to query → cosine similarity = 1.0
-        let mut e2 = MemoryEntry::new("warm cat", MemoryCategory::Fact);
-        e2.embedding = Some(vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        l2.store(e2).await.unwrap();
-
-        let tiered = TieredMemoryStore::new(l1, l2);
-        let results = tiered
-            .search(
-                &MemoryQuery::new()
-                    .with_embedding(vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-                    .with_limit(2),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-        // Exact match (L2) scores 1.0, partial match (L1) scores ~0.707
-        assert!(results[0].entry.content.contains("warm cat"));
-        assert!(results[0].score > results[1].score);
     }
 
     /// Mock store that returns a fixed set of scored entries for search.

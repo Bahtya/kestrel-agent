@@ -26,22 +26,13 @@ pub enum MemoryError {
         current: usize,
     },
 
-    /// An invalid embedding vector was provided.
-    #[error("Invalid embedding: expected dimension {expected}, got {actual}")]
-    InvalidEmbedding {
-        /// Expected embedding dimension.
-        expected: usize,
-        /// Actual embedding dimension provided.
-        actual: usize,
-    },
-
     /// A configuration error occurred.
     #[error("Configuration error: {0}")]
     Config(String),
 
-    /// A LanceDB error occurred.
-    #[error("LanceDB error: {0}")]
-    LanceDb(String),
+    /// A search engine (tantivy) error occurred.
+    #[error("Search engine error: {0}")]
+    SearchEngine(String),
 
     /// A security violation was detected in a memory entry.
     #[error("Security violation: {0}")]
@@ -70,18 +61,11 @@ mod tests {
         };
         assert!(err.to_string().contains("100"));
 
-        let err = MemoryError::InvalidEmbedding {
-            expected: 1536,
-            actual: 512,
-        };
-        assert!(err.to_string().contains("1536"));
-        assert!(err.to_string().contains("512"));
-
         let err = MemoryError::Config("bad config".to_string());
         assert!(err.to_string().contains("bad config"));
 
-        let err = MemoryError::LanceDb("table not found".to_string());
-        assert!(err.to_string().contains("table not found"));
+        let err = MemoryError::SearchEngine("index corrupted".to_string());
+        assert!(err.to_string().contains("index corrupted"));
     }
 
     #[test]

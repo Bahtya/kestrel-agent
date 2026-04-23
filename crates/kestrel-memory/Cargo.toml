@@ -18,11 +18,9 @@ tracing = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 lru = { workspace = true }
-lancedb = { workspace = true }
-arrow-array = { workspace = true }
-arrow-schema = { workspace = true }
-futures = { workspace = true }
 fs4 = { workspace = true }
+tantivy = "0.24"
+tantivy-jieba = "0.14"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::*;
-use tantivy::tokenizer::{LowerCaser, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tantivy_jieba::JiebaTokenizer;
 use tokio::sync::Mutex;
@@ -81,13 +80,10 @@ impl TantivyStore {
             Index::create_in_dir(tantivy_path, schema.clone()).map_err(tantivy_err)?
         };
 
-        // Register jieba tokenizer + LowerCaser for case-insensitive CJK search
-        let jieba_analyzer = TextAnalyzer::builder(JiebaTokenizer::new())
-            .filter(LowerCaser)
-            .build();
+        // Register jieba tokenizer for CJK support
         index
             .tokenizers()
-            .register(MEMORY_TOKENIZER, jieba_analyzer);
+            .register(MEMORY_TOKENIZER, JiebaTokenizer::new());
 
         let reader = index
             .reader_builder()
@@ -114,9 +110,10 @@ impl TantivyStore {
 
     /// Convert a MemoryEntry into a tantivy Document.
     fn entry_to_doc(&self, entry: &MemoryEntry) -> TantivyDocument {
+        let lowered_content = entry.content.to_lowercase();
         doc!(
             self.id_field => entry.id.as_str(),
-            self.content_field => entry.content.as_str(),
+            self.content_field => lowered_content.as_str(),
             self.category_field => entry.category.to_string(),
             self.confidence_field => entry.confidence,
             self.created_at_field => entry.created_at.timestamp_micros(),
@@ -185,9 +182,10 @@ impl TantivyStore {
         // Text search via QueryParser (uses jieba tokenizer on content field)
         if let Some(ref text) = query.text {
             if !text.is_empty() {
+                let lowered = text.to_lowercase();
                 let parser = QueryParser::for_index(&self.index, vec![self.content_field]);
                 let parsed = parser
-                    .parse_query(text)
+                    .parse_query(&lowered)
                     .map_err(|e| MemoryError::SearchEngine(format!("query parse error: {e}")))?;
                 clauses.push((Occur::Must, parsed));
             }

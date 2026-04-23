@@ -90,7 +90,9 @@ impl TantivyStore {
         let jieba_analyzer = TextAnalyzer::builder(JiebaTokenizer::new())
             .filter(LowerCaser)
             .build();
-        index.tokenizers().register(MEMORY_TOKENIZER, jieba_analyzer);
+        index
+            .tokenizers()
+            .register(MEMORY_TOKENIZER, jieba_analyzer);
 
         let reader = index
             .reader_builder()
@@ -190,8 +192,7 @@ impl TantivyStore {
         // Text search via QueryParser (uses jieba+LowerCaser tokenizer on content_search field)
         if let Some(ref text) = query.text {
             if !text.is_empty() {
-                let parser =
-                    QueryParser::for_index(&self.index, vec![self.content_search_field]);
+                let parser = QueryParser::for_index(&self.index, vec![self.content_search_field]);
                 let parsed = parser
                     .parse_query(text)
                     .map_err(|e| MemoryError::SearchEngine(format!("query parse error: {e}")))?;

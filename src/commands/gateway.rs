@@ -261,6 +261,7 @@ fn event_type_name(event: &LearningEvent) -> &'static str {
         LearningEvent::SkillCreated { .. } => "skill_created",
         LearningEvent::MemoryAccessed { .. } => "memory_accessed",
         LearningEvent::TaskReflection { .. } => "task_reflection",
+        LearningEvent::ReflectionFailed { .. } => "reflection_failed",
     }
 }
 
@@ -630,11 +631,10 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
     });
 
     // ── Log auto-cleanup ──────────────────────────────────────
-    {
-        let log_dir = config.daemon.log_dir.clone();
-        let retain_days = config.daemon.log_retain_days;
-        let _log_cleanup_handle = kestrel_daemon::logging::spawn_log_cleanup(log_dir, retain_days);
-    }
+    let _log_cleanup_handle = kestrel_daemon::logging::spawn_log_cleanup(
+        config.daemon.log_dir.clone(),
+        config.daemon.log_retain_days,
+    );
 
     // ── Learning event processor + persistent store ──────────
     let learning_config = LearningConfig::default();

@@ -2302,7 +2302,7 @@ mod tests {
         let commands = TelegramChannel::bot_commands().await;
         assert!(commands
             .iter()
-            .any(|command| command.command == "plan-release"));
+            .any(|command| command.command == "plan_release"));
 
         crate::commands::set_skill_registry(None);
     }

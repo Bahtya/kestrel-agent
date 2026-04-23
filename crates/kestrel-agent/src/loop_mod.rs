@@ -146,8 +146,16 @@ impl AgentLoop {
                     // Record activity for heartbeat tracking
                     *self.agent_activity.write() = Some(chrono::Local::now());
 
-                    if let Err(e) = self.process_message(msg).await {
-                        error!("Error processing message: {}", e);
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(90),
+                        self.process_message(msg),
+                    )
+                    .await;
+
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => error!("Error processing message: {}", e),
+                        Err(_) => error!("Message processing timed out after 90s"),
                     }
                 }
                 None => {
@@ -281,45 +289,51 @@ impl AgentLoop {
                 let session_key_for_runner = session_key.clone();
                 let trace_id_for_runner = msg.trace_id.clone();
 
-                let runner_with_events = AgentRunner::new(
+                let mut runner_with_events = AgentRunner::new(
                     self.config.clone(),
                     self.provider_registry.clone(),
                     self.tool_registry.clone(),
                 )
                 .with_session_key(&session_key_for_runner)
-                .with_trace_id(trace_id_for_runner.clone().unwrap_or_default())
-                .with_stream_tx(event_bus.subscribe_stream_tx())
-                .with_event_callback(Box::new(move |event: AgentEvent| {
-                    // Re-emit through bus
-                    match &event {
-                        AgentEvent::StreamingChunk {
-                            session_key,
-                            content,
-                            ..
-                        } => {
-                            event_bus.publish_stream_chunk(StreamChunk {
-                                session_key: session_key.clone(),
-                                content: content.clone(),
-                                done: false,
-                                trace_id: trace_id_for_runner.clone(),
-                            });
+                .with_trace_id(trace_id_for_runner.clone().unwrap_or_default());
+
+                if self.config.agent.streaming {
+                    runner_with_events =
+                        runner_with_events.with_stream_tx(event_bus.subscribe_stream_tx());
+                }
+
+                let runner_with_events =
+                    runner_with_events.with_event_callback(Box::new(move |event: AgentEvent| {
+                        // Re-emit through bus
+                        match &event {
+                            AgentEvent::StreamingChunk {
+                                session_key,
+                                content,
+                                ..
+                            } => {
+                                event_bus.publish_stream_chunk(StreamChunk {
+                                    session_key: session_key.clone(),
+                                    content: content.clone(),
+                                    done: false,
+                                    trace_id: trace_id_for_runner.clone(),
+                                });
+                            }
+                            AgentEvent::ToolCall {
+                                session_key,
+                                tool_name,
+                                iteration,
+                                ..
+                            } => {
+                                event_bus.emit_event(AgentEvent::ToolCall {
+                                    session_key: session_key.clone(),
+                                    tool_name: tool_name.clone(),
+                                    iteration: *iteration,
+                                    trace_id: trace_id_for_runner.clone(),
+                                });
+                            }
+                            _ => {}
                         }
-                        AgentEvent::ToolCall {
-                            session_key,
-                            tool_name,
-                            iteration,
-                            ..
-                        } => {
-                            event_bus.emit_event(AgentEvent::ToolCall {
-                                session_key: session_key.clone(),
-                                tool_name: tool_name.clone(),
-                                iteration: *iteration,
-                                trace_id: trace_id_for_runner.clone(),
-                            });
-                        }
-                        _ => {}
-                    }
-                }));
+                    }));
 
                 runner_with_events.run(system_prompt, messages).await
             };

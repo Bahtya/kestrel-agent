@@ -547,6 +547,18 @@ pub struct AgentDefaults {
     /// Tool execution timeout in seconds.
     #[serde(default = "default_tool_timeout")]
     pub tool_timeout: u64,
+
+    /// HTTP connect timeout in seconds for provider API calls.
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout: u64,
+
+    /// Timeout in seconds to wait for the first byte from a provider response.
+    #[serde(default = "default_first_byte_timeout")]
+    pub first_byte_timeout: u64,
+
+    /// Per-chunk idle timeout in seconds during SSE streaming.
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout: u64,
 }
 
 impl Default for AgentDefaults {
@@ -560,6 +572,9 @@ impl Default for AgentDefaults {
             system_prompt: None,
             streaming: true,
             tool_timeout: default_tool_timeout(),
+            connect_timeout: default_connect_timeout(),
+            first_byte_timeout: default_first_byte_timeout(),
+            idle_timeout: default_idle_timeout(),
         }
     }
 }
@@ -856,6 +871,18 @@ fn default_max_iterations() -> usize {
 
 fn default_tool_timeout() -> u64 {
     120
+}
+
+const fn default_connect_timeout() -> u64 {
+    10
+}
+
+const fn default_first_byte_timeout() -> u64 {
+    15
+}
+
+const fn default_idle_timeout() -> u64 {
+    30
 }
 
 fn default_dream_interval() -> u64 {

@@ -231,15 +231,49 @@ impl AgentRunner {
         use futures::StreamExt;
         use kestrel_core::{FunctionCall, ToolCall as CoreToolCall};
 
+        let send_start = std::time::Instant::now();
         let mut stream = provider.complete_stream(request).await?;
+
+        let mut first_byte_logged = false;
 
         let mut full_content = String::new();
         let mut usage: Option<Usage> = None;
         let mut tool_calls_map: std::collections::HashMap<usize, (String, String, String)> =
             std::collections::HashMap::new();
 
-        while let Some(chunk_result) = stream.next().await {
+        let first_chunk_timeout = std::time::Duration::from_secs(15);
+        let idle_timeout = std::time::Duration::from_secs(30);
+        let mut is_first = true;
+
+        loop {
+            let timeout = if is_first {
+                first_chunk_timeout
+            } else {
+                idle_timeout
+            };
+            let chunk_result = tokio::time::timeout(timeout, stream.next()).await;
+            is_first = false;
+
+            let chunk_result = match chunk_result {
+                Ok(Some(r)) => r,
+                Ok(None) => break,
+                Err(_) => {
+                    warn!("SSE stream idle timeout after {}s", timeout.as_secs());
+                    anyhow::bail!(
+                        "SSE stream timed out: no data received within {}s",
+                        timeout.as_secs()
+                    );
+                }
+            };
             let chunk = chunk_result?;
+
+            if !first_byte_logged {
+                debug!(
+                    elapsed_ms = send_start.elapsed().as_millis() as u64,
+                    "SSE first-byte received"
+                );
+                first_byte_logged = true;
+            }
 
             // Accumulate text content
             if let Some(delta) = &chunk.delta {
@@ -275,6 +309,11 @@ impl AgentRunner {
                 break;
             }
         }
+
+        debug!(
+            total_ms = send_start.elapsed().as_millis() as u64,
+            "SSE stream completed"
+        );
 
         // Emit final stream chunk
         self.emit_stream_chunk(String::new(), true);

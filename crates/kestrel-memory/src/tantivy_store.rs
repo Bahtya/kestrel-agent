@@ -689,7 +689,7 @@ mod tests {
 
         let results = store
             .search(
-                MemoryQuery::new()
+                &MemoryQuery::new()
                     .with_text("error")
                     .with_category(MemoryCategory::ErrorLesson),
             )

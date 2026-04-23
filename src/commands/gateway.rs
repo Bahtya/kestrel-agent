@@ -1149,8 +1149,7 @@ mod tests {
             },
         ];
 
-        execute_learning_actions(&actions, Some(&memory_store), &skill_registry)
-        .await;
+        execute_learning_actions(&actions, Some(&memory_store), &skill_registry).await;
 
         let skill = skill_registry.get("deploy").await.unwrap();
         assert!(skill.read().confidence() > 0.5);

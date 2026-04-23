@@ -27,6 +27,7 @@ const MEMORY_TOKENIZER: &str = "memory_tokenizer";
 mod field {
     pub const ID: &str = "id";
     pub const CONTENT: &str = "content";
+    pub const CONTENT_SEARCH: &str = "content_search";
     pub const CATEGORY: &str = "category";
     pub const CONFIDENCE: &str = "confidence";
     pub const CREATED_AT: &str = "created_at";
@@ -43,6 +44,7 @@ pub struct TantivyStore {
     // Pre-bound field handles
     id_field: Field,
     content_field: Field,
+    content_search_field: Field,
     category_field: Field,
     confidence_field: Field,
     created_at_field: Field,
@@ -56,6 +58,7 @@ impl TantivyStore {
         let schema = build_schema();
         let id_field = schema.get_field(field::ID).map_err(tantivy_err)?;
         let content_field = schema.get_field(field::CONTENT).map_err(tantivy_err)?;
+        let content_search_field = schema.get_field(field::CONTENT_SEARCH).map_err(tantivy_err)?;
         let category_field = schema.get_field(field::CATEGORY).map_err(tantivy_err)?;
         let confidence_field = schema.get_field(field::CONFIDENCE).map_err(tantivy_err)?;
         let created_at_field = schema.get_field(field::CREATED_AT).map_err(tantivy_err)?;
@@ -100,6 +103,7 @@ impl TantivyStore {
             max_entries: config.max_entries,
             id_field,
             content_field,
+            content_search_field,
             category_field,
             confidence_field,
             created_at_field,
@@ -113,7 +117,8 @@ impl TantivyStore {
         let lowered_content = entry.content.to_lowercase();
         doc!(
             self.id_field => entry.id.as_str(),
-            self.content_field => lowered_content.as_str(),
+            self.content_field => entry.content.as_str(),
+            self.content_search_field => lowered_content.as_str(),
             self.category_field => entry.category.to_string(),
             self.confidence_field => entry.confidence,
             self.created_at_field => entry.created_at.timestamp_micros(),
@@ -183,7 +188,8 @@ impl TantivyStore {
         if let Some(ref text) = query.text {
             if !text.is_empty() {
                 let lowered = text.to_lowercase();
-                let parser = QueryParser::for_index(&self.index, vec![self.content_field]);
+                let parser =
+                    QueryParser::for_index(&self.index, vec![self.content_search_field]);
                 let parsed = parser
                     .parse_query(&lowered)
                     .map_err(|e| MemoryError::SearchEngine(format!("query parse error: {e}")))?;
@@ -356,16 +362,20 @@ fn build_schema() -> Schema {
             .set_stored(),
     );
 
-    // content: jieba-tokenized for BM25, stored
+    // content: stored only (original case preserved for retrieval)
     builder.add_text_field(
         field::CONTENT,
-        TextOptions::default()
-            .set_indexing_options(
-                TextFieldIndexing::default()
-                    .set_tokenizer(MEMORY_TOKENIZER)
-                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-            )
-            .set_stored(),
+        TextOptions::default().set_stored(),
+    );
+
+    // content_search: jieba-tokenized for BM25 (lowercased), not stored
+    builder.add_text_field(
+        field::CONTENT_SEARCH,
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(MEMORY_TOKENIZER)
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        ),
     );
 
     // category: exact match, stored

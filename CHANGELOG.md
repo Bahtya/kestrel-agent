@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.2] - 2026-04-23
+## [0.2.4] - 2026-04-23
+
+### Added
+
+- Structured log fields, message audit trail, and user-facing error replies (#139+)
+- JSONL audit log for key daemon events (message processing, tool invocation, agent lifecycle)
+- Skill invocation logging with duration tracking
+- Log retention configuration (`log_retain_days`) and log format selection (`log_format`)
+- Automatic log cleanup on daemon startup
+
+## [0.2.3] - 2026-04-23
 
 ### Fixed
 
@@ -105,7 +115,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed cargo fmt after PR merges
 - Removed legacy memory.rs, unified on kestrel-memory crate
 
-[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Bahtya/kestrel-agent/releases/tag/v0.2.0

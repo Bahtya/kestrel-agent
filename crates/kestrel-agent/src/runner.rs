@@ -233,7 +233,6 @@ impl AgentRunner {
 
         let send_start = std::time::Instant::now();
         let mut stream = provider.complete_stream(request).await?;
-        let first_byte_deadline = std::time::Instant::now();
 
         let mut first_byte_logged = false;
 

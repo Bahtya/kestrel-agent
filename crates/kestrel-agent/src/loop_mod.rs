@@ -302,7 +302,7 @@ impl AgentLoop {
                 }
 
                 let runner_with_events = runner_with_events
-                .with_event_callback(Box::new(move |event: AgentEvent| {
+                    .with_event_callback(Box::new(move |event: AgentEvent| {
                     // Re-emit through bus
                     match &event {
                         AgentEvent::StreamingChunk {

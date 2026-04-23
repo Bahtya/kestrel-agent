@@ -46,9 +46,9 @@ impl HashEmbedding {
         Self { dimension }
     }
 
-    /// Create with the default dimension of 256.
+    /// Create with the default dimension matching [`MemoryConfig::embedding_dim`](crate::config::MemoryConfig::embedding_dim).
     pub fn default_dim() -> Self {
-        Self::new(256)
+        Self::new(1536)
     }
 
     /// Tokenize text into lowercase words.
@@ -201,6 +201,6 @@ mod tests {
     #[test]
     fn test_default_impl() {
         let default: HashEmbedding = HashEmbedding::default();
-        assert_eq!(default.dimension(), 256);
+        assert_eq!(default.dimension(), 1536);
     }
 }

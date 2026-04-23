@@ -278,7 +278,7 @@ impl MemoryStore for TantivyStore {
         let searcher = self.reader.searcher();
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(1))
+            .search(&query, &TopDocs::with_limit(1).order_by_score())
             .map_err(tantivy_err)?;
 
         if let Some((_score, doc_addr)) = top_docs.first() {
@@ -310,7 +310,7 @@ impl MemoryStore for TantivyStore {
         let limit = query.limit.max(1);
 
         let top_docs: Vec<(Score, tantivy::DocAddress)> = searcher
-            .search(&tantivy_query, &TopDocs::with_limit(limit))
+            .search(&tantivy_query, &TopDocs::with_limit(limit).order_by_score())
             .map_err(tantivy_err)?;
 
         let mut results = Vec::with_capacity(top_docs.len());

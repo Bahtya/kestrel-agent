@@ -7,15 +7,14 @@
 //! - Category and confidence filtering pushed down to the query engine
 
 use async_trait::async_trait;
-use std::path::Path;
+use std::ops::Bound;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::*;
 use tantivy::tokenizer::TextAnalyzer;
-use tantivy::{doc, DocAddress, Index, IndexWriter, ReloadPolicy, Score, TantivyDocument};
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Score, TantivyDocument};
 use tantivy_jieba::JiebaTokenizer;
 use tokio::sync::Mutex;
-use tokio::task;
 
 use crate::config::MemoryConfig;
 use crate::error::{MemoryError, Result};
@@ -23,7 +22,7 @@ use crate::security_scan::{scan_memory_entry, SecurityScanResult};
 use crate::store::MemoryStore;
 use crate::types::{MemoryCategory, MemoryEntry, MemoryQuery, ScoredEntry};
 
-const TOKENIZER_NAME: &str = "jieba";
+const MEMORY_TOKENIZER: &str = "memory_tokenizer";
 const WRITER_HEAP_BYTES: usize = 50_000_000;
 
 /// Schema field handles — computed once at construction.
@@ -43,17 +42,17 @@ fn build_schema() -> (Schema, Fields) {
     let text_opts = TextOptions::default()
         .set_indexing_options(
             TextFieldIndexing::default()
-                .set_tokenizer(TOKENIZER_NAME)
+                .set_tokenizer(MEMORY_TOKENIZER)
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         )
         .set_stored();
 
     let id = sb.add_text_field("id", STRING | STORED);
     let content = sb.add_text_field("content", text_opts);
-    let category = sb.add_text_field("category", STRING);
-    let confidence = sb.add_f64_field("confidence", STORED);
-    let created_at = sb.add_date_field("created_at", STORED);
-    let updated_at = sb.add_date_field("updated_at", STORED);
+    let category = sb.add_text_field("category", STRING | STORED);
+    let confidence = sb.add_f64_field("confidence", STORED | FAST);
+    let created_at = sb.add_i64_field("created_at", STORED);
+    let updated_at = sb.add_i64_field("updated_at", STORED);
     let access_count = sb.add_u64_field("access_count", STORED);
 
     let schema = sb.build();
@@ -69,9 +68,14 @@ fn build_schema() -> (Schema, Fields) {
     (schema, fields)
 }
 
+fn tantivy_err(e: tantivy::TantivyError) -> MemoryError {
+    MemoryError::SearchEngine(e.to_string())
+}
+
 /// Full-text search memory store backed by tantivy with jieba CJK tokenization.
 pub struct TantivyStore {
     index: Index,
+    reader: IndexReader,
     fields: Fields,
     writer: Mutex<IndexWriter>,
     max_entries: usize,
@@ -81,31 +85,37 @@ impl TantivyStore {
     /// Create or open a TantivyStore at the given index directory.
     pub async fn new(config: &MemoryConfig) -> Result<Self> {
         let (schema, fields) = build_schema();
-        let index_path = &config.tantivy_index_path;
+        let tantivy_path = &config.tantivy_index_path;
 
-        let index = if index_path.exists()
-            && index_path
-                .read_dir()
-                .map_or(false, |mut d| d.next().is_some())
+        tokio::fs::create_dir_all(tantivy_path).await?;
+
+        let index = if tantivy_path.exists()
+            && std::fs::read_dir(tantivy_path)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false)
         {
-            Index::open_in_dir(index_path)
-                .map_err(|e| MemoryError::SearchEngine(format!("open index: {e}")))?
+            Index::open_in_dir(tantivy_path).map_err(tantivy_err)?
         } else {
-            tokio::fs::create_dir_all(index_path).await?;
-            Index::create_in_dir(index_path, schema.clone())
-                .map_err(|e| MemoryError::SearchEngine(format!("create index: {e}")))?
+            let _ = std::fs::remove_dir_all(tantivy_path);
+            std::fs::create_dir_all(tantivy_path).map_err(MemoryError::Io)?;
+            Index::create_in_dir(tantivy_path, schema.clone()).map_err(tantivy_err)?
         };
 
         index
             .tokenizers()
-            .register(TOKENIZER_NAME, TextAnalyzer::from(JiebaTokenizer {}));
+            .register(MEMORY_TOKENIZER, TextAnalyzer::from(JiebaTokenizer::new()));
 
-        let writer = index
-            .writer(WRITER_HEAP_BYTES)
-            .map_err(|e| MemoryError::SearchEngine(format!("create writer: {e}")))?;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(tantivy_err)?;
+
+        let writer = index.writer(WRITER_HEAP_BYTES).map_err(tantivy_err)?;
 
         Ok(Self {
             index,
+            reader,
             fields,
             writer: Mutex::new(writer),
             max_entries: config.max_entries,
@@ -119,9 +129,9 @@ impl TantivyStore {
             f.content => entry.content.as_str(),
             f.category => entry.category.to_string().as_str(),
             f.confidence => entry.confidence,
-            f.created_at => tantivy::DateTime::from_timestamp_secs(entry.created_at.timestamp()),
-            f.updated_at => tantivy::DateTime::from_timestamp_secs(entry.updated_at.timestamp()),
-            f.access_count => entry.access_count as u64,
+            f.created_at => entry.created_at.timestamp_micros(),
+            f.updated_at => entry.updated_at.timestamp_micros(),
+            f.access_count => u64::from(entry.access_count),
         )
     }
 
@@ -146,54 +156,81 @@ impl TantivyStore {
             .get_first(f.confidence)
             .and_then(|v| v.as_f64())
             .ok_or_else(|| MemoryError::SearchEngine("missing confidence field".into()))?;
-        let created_ts = doc
+        let created_at_micros = doc
             .get_first(f.created_at)
-            .and_then(|v| v.as_date())
-            .map(|d| d.into_timestamp_secs())
+            .and_then(|v| v.as_i64())
             .ok_or_else(|| MemoryError::SearchEngine("missing created_at field".into()))?;
-        let updated_ts = doc
+        let updated_at_micros = doc
             .get_first(f.updated_at)
-            .and_then(|v| v.as_date())
-            .map(|d| d.into_timestamp_secs())
+            .and_then(|v| v.as_i64())
             .ok_or_else(|| MemoryError::SearchEngine("missing updated_at field".into()))?;
         let access_count = doc
             .get_first(f.access_count)
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+            .ok_or_else(|| MemoryError::SearchEngine("missing access_count field".into()))?
+            as u32;
 
         Ok(MemoryEntry {
             id,
             content,
             category,
             confidence,
-            created_at: chrono::DateTime::from_timestamp(created_ts, 0)
-                .unwrap_or_else(|| chrono::Utc::now()),
-            updated_at: chrono::DateTime::from_timestamp(updated_ts, 0)
-                .unwrap_or_else(|| chrono::Utc::now()),
+            created_at: chrono::DateTime::from_timestamp_micros(created_at_micros)
+                .ok_or_else(|| MemoryError::SearchEngine("invalid created_at".into()))?,
+            updated_at: chrono::DateTime::from_timestamp_micros(updated_at_micros)
+                .ok_or_else(|| MemoryError::SearchEngine("invalid updated_at".into()))?,
             access_count,
-            embedding: None,
         })
     }
 
-    async fn count_entries(&self) -> Result<u64> {
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e| MemoryError::SearchEngine(format!("reader: {e}")))?;
-        Ok(reader.searcher().num_docs())
+    fn build_query(&self, query: &MemoryQuery) -> Result<Box<dyn tantivy::query::Query>> {
+        let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+
+        if let Some(ref text) = query.text {
+            if !text.is_empty() {
+                let parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
+                let parsed = parser
+                    .parse_query(text)
+                    .map_err(|e| MemoryError::SearchEngine(format!("query parse error: {e}")))?;
+                clauses.push((Occur::Must, parsed));
+            }
+        }
+
+        if let Some(ref cat) = query.category {
+            let term = tantivy::Term::from_field_text(self.fields.category, &cat.to_string());
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+            ));
+        }
+
+        if let Some(min_conf) = query.min_confidence {
+            let range = RangeQuery::new(
+                Bound::Included(tantivy::Term::from_field_f64(
+                    self.fields.confidence,
+                    min_conf,
+                )),
+                Bound::Unbounded,
+            );
+            clauses.push((Occur::Must, Box::new(range)));
+        }
+
+        if clauses.is_empty() {
+            Ok(Box::new(tantivy::query::AllQuery))
+        } else if clauses.len() == 1 {
+            Ok(clauses.remove(0).1)
+        } else {
+            Ok(Box::new(BooleanQuery::new(clauses)))
+        }
     }
 
-    /// Delete a document by id. Returns true if a document was deleted.
-    async fn delete_by_id(&self, id: &str) -> Result<bool> {
+    async fn delete_by_id(&self, id: &str) -> Result<()> {
         let term = tantivy::Term::from_field_text(self.fields.id, id);
-        let writer = self.writer.lock().await;
-        let deleted = writer.delete_term(term);
-        writer
-            .commit()
-            .map_err(|e| MemoryError::SearchEngine(format!("commit delete: {e}")))?;
-        Ok(deleted > 0)
+        let mut writer = self.writer.lock().await;
+        writer.delete_term(term);
+        writer.commit().map_err(tantivy_err)?;
+        self.reader.reload().map_err(tantivy_err)?;
+        Ok(())
     }
 }
 
@@ -209,61 +246,56 @@ impl MemoryStore for TantivyStore {
             return Err(MemoryError::SecurityViolation(reason));
         }
 
-        self.delete_by_id(&entry.id).await?;
+        let mut writer = self.writer.lock().await;
 
-        let count = self.count_entries().await?;
-        if count >= self.max_entries as u64 {
+        // Delete existing entry with same id (upsert)
+        let term = tantivy::Term::from_field_text(self.fields.id, &entry.id);
+        writer.delete_term(term);
+
+        // Check capacity after deletion
+        let searcher = self.reader.searcher();
+        let num_docs = searcher.num_docs() as usize;
+        if num_docs >= self.max_entries {
             return Err(MemoryError::CapacityExceeded {
                 max: self.max_entries,
-                current: count as usize,
+                current: num_docs,
             });
         }
 
-        let tantivy_doc = self.entry_to_doc(&entry);
-        let writer = self.writer.lock().await;
         writer
-            .add_document(tantivy_doc)
-            .map_err(|e| MemoryError::SearchEngine(format!("add document: {e}")))?;
-        writer
-            .commit()
-            .map_err(|e| MemoryError::SearchEngine(format!("commit: {e}")))?;
+            .add_document(self.entry_to_doc(&entry))
+            .map_err(tantivy_err)?;
+        writer.commit().map_err(tantivy_err)?;
+        self.reader.reload().map_err(tantivy_err)?;
         Ok(())
     }
 
     async fn recall(&self, id: &str) -> Result<Option<MemoryEntry>> {
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e| MemoryError::SearchEngine(format!("reader: {e}")))?;
-        reader
-            .reload()
-            .map_err(|e| MemoryError::SearchEngine(format!("reload: {e}")))?;
+        self.reader.reload().map_err(tantivy_err)?;
 
-        let searcher = reader.searcher();
         let term = tantivy::Term::from_field_text(self.fields.id, id);
         let query = TermQuery::new(term, IndexRecordOption::Basic);
+        let searcher = self.reader.searcher();
 
-        let top_docs: Vec<(Score, DocAddress)> =
-            searcher.search(&query, &TopDocs::with_limit(1)).unwrap_or_default();
+        let top_docs = searcher
+            .search(&query, &TopDocs::with_limit(1))
+            .map_err(tantivy_err)?;
 
-        if let Some((_score, doc_addr)) = top_docs.into_iter().next() {
-            let doc: TantivyDocument = searcher
-                .doc(doc_addr)
-                .map_err(|e| MemoryError::SearchEngine(format!("retrieve doc: {e}")))?;
+        if let Some((_score, doc_addr)) = top_docs.first() {
+            let doc: TantivyDocument = searcher.doc(*doc_addr).map_err(tantivy_err)?;
             let mut entry = self.doc_to_entry(&doc)?;
             entry.touch();
+
             // Upsert with updated access_count
-            self.delete_by_id(&entry.id).await?;
-            let tantivy_doc = self.entry_to_doc(&entry);
-            let writer = self.writer.lock().await;
+            let mut writer = self.writer.lock().await;
+            let del_term = tantivy::Term::from_field_text(self.fields.id, id);
+            writer.delete_term(del_term);
             writer
-                .add_document(tantivy_doc)
-                .map_err(|e| MemoryError::SearchEngine(format!("add document: {e}")))?;
-            writer
-                .commit()
-                .map_err(|e| MemoryError::SearchEngine(format!("commit: {e}")))?;
+                .add_document(self.entry_to_doc(&entry))
+                .map_err(tantivy_err)?;
+            writer.commit().map_err(tantivy_err)?;
+            self.reader.reload().map_err(tantivy_err)?;
+
             return Ok(Some(entry));
         }
 
@@ -271,73 +303,19 @@ impl MemoryStore for TantivyStore {
     }
 
     async fn search(&self, query: &MemoryQuery) -> Result<Vec<ScoredEntry>> {
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e| MemoryError::SearchEngine(format!("reader: {e}")))?;
-        reader
-            .reload()
-            .map_err(|e| MemoryError::SearchEngine(format!("reload: {e}")))?;
+        self.reader.reload().map_err(tantivy_err)?;
 
-        let searcher = reader.searcher();
-
-        // Build a composite query: text search + category filter + confidence filter
-        let mut subqueries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
-
-        // Text search via BM25
-        if let Some(ref text) = query.text {
-            if !text.is_empty() {
-                let query_parser =
-                    QueryParser::for_index(&self.index, vec![self.fields.content]);
-                let parsed = query_parser
-                    .parse_query(text)
-                    .unwrap_or_else(|_| {
-                        // Fallback: treat as a single term query
-                        let term = tantivy::Term::from_field_text(self.fields.content, text);
-                        Box::new(TermQuery::new(term, IndexRecordOption::WithFreqsAndPositions))
-                    });
-                subqueries.push((Occur::Must, parsed));
-            }
-        }
-
-        // Category filter — exact match via term query
-        if let Some(ref cat) = query.category {
-            let term = tantivy::Term::from_field_text(self.fields.category, &cat.to_string());
-            subqueries.push((
-                Occur::Must,
-                Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
-            ));
-        }
-
-        // Confidence filter — range query
-        if let Some(min_conf) = query.min_confidence {
-            let range = Box::new(RangeQuery::new_f64_bounds(
-                self.fields.confidence,
-                Bound::Included(min_conf),
-                Bound::Unbounded,
-            ));
-            subqueries.push((Occur::Must, range));
-        }
-
-        let tantivy_query: Box<dyn tantivy::query::Query> = if subqueries.is_empty() {
-            // Match all documents
-            Box::new(tantivy::query::AllQuery)
-        } else {
-            Box::new(BooleanQuery::new(subqueries))
-        };
-
+        let searcher = self.reader.searcher();
+        let tantivy_query = self.build_query(query)?;
         let limit = query.limit.max(1);
-        let top_docs: Vec<(Score, DocAddress)> = searcher
+
+        let top_docs: Vec<(Score, tantivy::DocAddress)> = searcher
             .search(&tantivy_query, &TopDocs::with_limit(limit))
-            .map_err(|e| MemoryError::SearchEngine(format!("search: {e}")))?;
+            .map_err(tantivy_err)?;
 
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_addr) in top_docs {
-            let doc: TantivyDocument = searcher
-                .doc(doc_addr)
-                .map_err(|e| MemoryError::SearchEngine(format!("retrieve doc: {e}")))?;
+            let doc: TantivyDocument = searcher.doc(doc_addr).map_err(tantivy_err)?;
             let entry = self.doc_to_entry(&doc)?;
             results.push(ScoredEntry {
                 entry,
@@ -349,22 +327,18 @@ impl MemoryStore for TantivyStore {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        self.delete_by_id(id).await?;
-        Ok(())
+        self.delete_by_id(id).await
     }
 
     async fn len(&self) -> usize {
-        self.count_entries().await.unwrap_or(0) as usize
+        self.reader.searcher().num_docs() as usize
     }
 
     async fn clear(&self) -> Result<()> {
-        let writer = self.writer.lock().await;
-        writer
-            .delete_all_documents()
-            .map_err(|e| MemoryError::SearchEngine(format!("clear: {e}")))?;
-        writer
-            .commit()
-            .map_err(|e| MemoryError::SearchEngine(format!("commit clear: {e}")))?;
+        let mut writer = self.writer.lock().await;
+        writer.delete_all_documents().map_err(tantivy_err)?;
+        writer.commit().map_err(tantivy_err)?;
+        self.reader.reload().map_err(tantivy_err)?;
         Ok(())
     }
 }
@@ -414,7 +388,10 @@ mod tests {
     #[tokio::test]
     async fn test_recall_nonexistent() {
         let (store, _dir) = make_test_store().await;
-        let result = store.recall("no-such-id").await.unwrap();
+        let result = store
+            .recall("00000000-0000-0000-0000-000000000000")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -425,14 +402,8 @@ mod tests {
         let id = entry.id.clone();
 
         store.store(entry).await.unwrap();
-        assert_eq!(
-            store.recall(&id).await.unwrap().unwrap().access_count,
-            1
-        );
-        assert_eq!(
-            store.recall(&id).await.unwrap().unwrap().access_count,
-            2
-        );
+        assert_eq!(store.recall(&id).await.unwrap().unwrap().access_count, 1);
+        assert_eq!(store.recall(&id).await.unwrap().unwrap().access_count, 2);
     }
 
     #[tokio::test]
@@ -509,15 +480,11 @@ mod tests {
     async fn test_search_by_confidence() {
         let (store, _dir) = make_test_store().await;
         store
-            .store(
-                MemoryEntry::new("high conf", MemoryCategory::Fact).with_confidence(0.9),
-            )
+            .store(MemoryEntry::new("high conf", MemoryCategory::Fact).with_confidence(0.9))
             .await
             .unwrap();
         store
-            .store(
-                MemoryEntry::new("low conf", MemoryCategory::Fact).with_confidence(0.3),
-            )
+            .store(MemoryEntry::new("low conf", MemoryCategory::Fact).with_confidence(0.3))
             .await
             .unwrap();
 
@@ -558,9 +525,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Search with Chinese term — jieba should tokenize 编程语言
         let results = store
-            .search(&MemoryQuery::new().with_text("编程"))
+            .search(&MemoryQuery::new().with_text("编程语言"))
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -572,7 +538,7 @@ mod tests {
         let (store, _dir) = make_test_store().await;
         store
             .store(MemoryEntry::new(
-                "用 Rust 重写了搜索引擎模块",
+                "用 Rust 实现 WebAssembly 模块",
                 MemoryCategory::Fact,
             ))
             .await
@@ -585,7 +551,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         let results = store
-            .search(&MemoryQuery::new().with_text("搜索引擎"))
+            .search(&MemoryQuery::new().with_text("实现"))
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -672,6 +638,24 @@ mod tests {
             MemoryCategory::Fact,
         );
         assert!(store.store(entry).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_stores_no_corruption() {
+        use futures::future::join_all;
+
+        let (store, _dir) = make_test_store().await;
+
+        let futures: Vec<_> = (0..10)
+            .map(|i| store.store(MemoryEntry::new(format!("entry {i}"), MemoryCategory::Fact)))
+            .collect();
+
+        let results = join_all(futures).await;
+        for result in results {
+            assert!(result.is_ok());
+        }
+
+        assert_eq!(store.len().await, 10);
     }
 
     #[tokio::test]

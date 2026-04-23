@@ -468,12 +468,7 @@ impl MemoryStore for HotStore {
 }
 
 /// Compute a relevance score for an entry given a query.
-fn compute_score(entry: &MemoryEntry, query: &MemoryQuery) -> f64 {
-    if let Some(ref query_embedding) = query.embedding {
-        if let Some(ref entry_embedding) = entry.embedding {
-            return cosine_similarity(query_embedding, entry_embedding);
-        }
-    }
+fn compute_score(_entry: &MemoryEntry, _query: &MemoryQuery) -> f64 {
     1.0
 }
 
@@ -688,34 +683,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_with_embedding() {
+    async fn test_search_returns_all_without_filter() {
         let (store, _dir) = make_test_store().await;
         store
-            .store(
-                MemoryEntry::new("similar", MemoryCategory::Fact)
-                    .with_embedding(vec![1.0, 0.0, 0.0, 0.0]),
-            )
+            .store(MemoryEntry::new("first", MemoryCategory::Fact))
             .await
             .unwrap();
         store
-            .store(
-                MemoryEntry::new("different", MemoryCategory::Fact)
-                    .with_embedding(vec![0.0, 0.0, 0.0, 1.0]),
-            )
+            .store(MemoryEntry::new("second", MemoryCategory::Fact))
             .await
             .unwrap();
 
         let results = store
-            .search(
-                &MemoryQuery::new()
-                    .with_embedding(vec![1.0, 0.0, 0.0, 0.0])
-                    .with_limit(1),
-            )
+            .search(&MemoryQuery::new().with_limit(1))
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].entry.content.contains("similar"));
-        assert!(results[0].score > 0.99);
+        assert!(results[0].score > 0.0);
     }
 
     #[tokio::test]

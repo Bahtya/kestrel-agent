@@ -355,9 +355,7 @@ fn parse_category(s: &str) -> Result<MemoryCategory> {
         "error_lesson" => Ok(MemoryCategory::ErrorLesson),
         "workflow_pattern" => Ok(MemoryCategory::WorkflowPattern),
         "critical" => Ok(MemoryCategory::Critical),
-        _ => Err(MemoryError::SearchEngine(format!(
-            "unknown category: {s}"
-        ))),
+        _ => Err(MemoryError::SearchEngine(format!("unknown category: {s}"))),
     }
 }
 
@@ -439,7 +437,10 @@ mod tests {
     async fn test_search_by_text() {
         let (store, _dir) = make_test_store().await;
         store
-            .store(MemoryEntry::new("Rust programming language", MemoryCategory::Fact))
+            .store(MemoryEntry::new(
+                "Rust programming language",
+                MemoryCategory::Fact,
+            ))
             .await
             .unwrap();
         store
@@ -517,7 +518,10 @@ mod tests {
     async fn test_search_chinese_text() {
         let (store, _dir) = make_test_store().await;
         store
-            .store(MemoryEntry::new("用户喜欢使用 Rust 编程语言", MemoryCategory::Fact))
+            .store(MemoryEntry::new(
+                "用户喜欢使用 Rust 编程语言",
+                MemoryCategory::Fact,
+            ))
             .await
             .unwrap();
         store
@@ -627,7 +631,10 @@ mod tests {
         );
         let result = store.store(entry).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Security violation"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Security violation"));
     }
 
     #[tokio::test]
@@ -662,7 +669,10 @@ mod tests {
     async fn test_combined_text_and_category_search() {
         let (store, _dir) = make_test_store().await;
         store
-            .store(MemoryEntry::new("rust error in module", MemoryCategory::ErrorLesson))
+            .store(MemoryEntry::new(
+                "rust error in module",
+                MemoryCategory::ErrorLesson,
+            ))
             .await
             .unwrap();
         store
@@ -670,7 +680,10 @@ mod tests {
             .await
             .unwrap();
         store
-            .store(MemoryEntry::new("python error in script", MemoryCategory::ErrorLesson))
+            .store(MemoryEntry::new(
+                "python error in script",
+                MemoryCategory::ErrorLesson,
+            ))
             .await
             .unwrap();
 

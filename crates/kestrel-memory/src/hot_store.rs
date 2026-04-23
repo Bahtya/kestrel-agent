@@ -472,7 +472,6 @@ fn compute_score(_entry: &MemoryEntry, _query: &MemoryQuery) -> f64 {
     1.0
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -26,7 +26,9 @@ use kestrel_learning::processor::BasicEventProcessor;
 use kestrel_learning::prompt::PromptAssembler;
 use kestrel_learning::store::EventStore;
 use kestrel_learning::LearningEventHandler;
-use kestrel_memory::{HotStore, MemoryCategory, MemoryConfig, MemoryEntry, MemoryStore, TantivyStore};
+use kestrel_memory::{
+    HotStore, MemoryCategory, MemoryConfig, MemoryEntry, MemoryStore, TantivyStore,
+};
 use kestrel_providers::ProviderRegistry;
 use kestrel_session::SessionManager;
 use kestrel_skill::{SkillConfig, SkillLoader, SkillRegistry};

@@ -186,6 +186,15 @@ impl AgentLoop {
 
         async move {
             let session_key = msg.session_key();
+
+            // Audit log: message content at debug level for traceability
+            let content_preview = truncate_str(&msg.content, 100);
+            tracing::debug!(
+                content = %content_preview,
+                channel = %msg.channel,
+                "Incoming message"
+            );
+
             info!("Processing message");
 
             // Emit started event
@@ -283,6 +292,7 @@ impl AgentLoop {
 
             // Run agent with events wired through
             let messages = session.to_messages();
+            let run_start = std::time::Instant::now();
             let result = {
                 // Build a runner with event callback for this session
                 let event_bus = bus_for_stream.clone();
@@ -340,7 +350,13 @@ impl AgentLoop {
 
             match result {
                 Ok(result) => {
-                    // Add assistant response to session
+                    let duration_ms = run_start.elapsed().as_millis() as u64;
+                    info!(
+                        duration_ms = duration_ms,
+                        tool_calls = result.tool_calls_made,
+                        iterations = result.iterations_used,
+                        "Agent run completed"
+                    );
                     session.add_assistant_message(result.content.clone());
 
                     // Auto-extract structured notes from the response
@@ -446,7 +462,26 @@ impl AgentLoop {
                         .await;
                 }
                 Err(e) => {
-                    error!("Agent run error for session {}: {}", session_key, e);
+                    let error_msg = format!("处理消息时遇到问题: {e}，请稍后重试");
+                    error!(
+                        error = %e,
+                        "Agent run error for session {}, sending error reply",
+                        session_key
+                    );
+
+                    // Send error reply to the user instead of silently dropping
+                    let error_outbound = OutboundMessage {
+                        channel: msg.channel.clone(),
+                        chat_id: msg.chat_id.clone(),
+                        content: error_msg,
+                        reply_to: msg.message_id.clone(),
+                        trace_id: msg.trace_id.clone(),
+                        media: vec![],
+                        metadata: Default::default(),
+                    };
+                    if let Err(send_err) = self.bus.publish_outbound(error_outbound).await {
+                        error!("Failed to send error reply: {}", send_err);
+                    }
 
                     // Emit ToolFailed learning event
                     if let Some(ref bus) = self.learning_bus {

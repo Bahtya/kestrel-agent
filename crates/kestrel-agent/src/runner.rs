@@ -106,6 +106,12 @@ impl AgentRunner {
             .get_provider(model)
             .with_context(|| format!("No provider available for model: {}", model))?;
 
+        info!(
+            llm_model = %model,
+            llm_provider = %provider.name(),
+            "Starting agent run"
+        );
+
         // Build initial messages with system prompt
         let mut conversation = vec![Message {
             role: MessageRole::System,
@@ -162,9 +168,11 @@ impl AgentRunner {
                 _ => {
                     let content = response.content.unwrap_or_default();
                     info!(
-                        "Agent completed in {} iterations, {} tool calls",
-                        iteration + 1,
-                        tool_calls_made
+                        llm_model = %model,
+                        iterations = iteration + 1,
+                        tool_calls = tool_calls_made,
+                        tokens_used = ?total_usage.total_tokens,
+                        "Agent run completed"
                     );
                     return Ok(RunResult {
                         content,
@@ -197,8 +205,18 @@ impl AgentRunner {
             conversation.push(assistant_msg);
 
             // Execute tool calls concurrently
+            let tool_start = std::time::Instant::now();
             let results = self.execute_tools(&tool_calls).await;
+            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
             tool_calls_made += tool_calls.len();
+
+            for tc in &tool_calls {
+                debug!(
+                    tool_name = %tc.function.name,
+                    duration_ms = tool_duration_ms,
+                    "Tool call completed"
+                );
+            }
 
             // Add tool results to conversation
             for (tool_call, result) in tool_calls.iter().zip(results) {

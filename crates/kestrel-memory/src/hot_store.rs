@@ -472,33 +472,6 @@ fn compute_score(_entry: &MemoryEntry, _query: &MemoryQuery) -> f64 {
     1.0
 }
 
-/// Compute cosine similarity between two vectors.
-///
-/// Returns 0.0 if vectors have different lengths or are empty.
-pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f64 = a
-        .iter()
-        .zip(b.iter())
-        .map(|(x, y)| (f64::from(*x)) * (f64::from(*y)))
-        .sum();
-    let norm_a: f64 = a
-        .iter()
-        .map(|x| (f64::from(*x)).powi(2))
-        .sum::<f64>()
-        .sqrt();
-    let norm_b: f64 = b
-        .iter()
-        .map(|x| (f64::from(*x)).powi(2))
-        .sum::<f64>()
-        .sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a * norm_b)
-}
 
 #[cfg(test)]
 mod tests {
@@ -1023,39 +996,6 @@ mod tests {
             large < small.saturating_mul(8),
             "expected near-constant eviction cost, small={small}ns large={large}ns"
         );
-    }
-
-    #[test]
-    fn test_cosine_similarity_identical() {
-        let v = vec![1.0_f32, 0.0, 0.0];
-        let sim = cosine_similarity(&v, &v);
-        assert!((sim - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_orthogonal() {
-        let a = vec![1.0_f32, 0.0];
-        let b = vec![0.0_f32, 1.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!(sim.abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_opposite() {
-        let a = vec![1.0_f32, 0.0];
-        let b = vec![-1.0_f32, 0.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!((sim - (-1.0)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_empty() {
-        assert_eq!(cosine_similarity(&[], &[]), 0.0);
-    }
-
-    #[test]
-    fn test_cosine_similarity_different_lengths() {
-        assert_eq!(cosine_similarity(&[1.0_f32], &[1.0, 2.0]), 0.0);
     }
 
     // -- Security scanning tests -------------------------------------------

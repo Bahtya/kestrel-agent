@@ -446,14 +446,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recall_increments_access_count() {
+    async fn test_recall_does_not_mutate() {
         let (store, _dir) = make_test_store().await;
         let entry = MemoryEntry::new("count me", MemoryCategory::Fact);
         let id = entry.id.clone();
 
         store.store(entry).await.unwrap();
-        assert_eq!(store.recall(&id).await.unwrap().unwrap().access_count, 1);
-        assert_eq!(store.recall(&id).await.unwrap().unwrap().access_count, 2);
+        let recalled = store.recall(&id).await.unwrap().unwrap();
+        // recall() is a pure read — access_count stays at 0 (initial value)
+        assert_eq!(recalled.access_count, 0);
+        let recalled_again = store.recall(&id).await.unwrap().unwrap();
+        assert_eq!(recalled_again.access_count, 0);
     }
 
     #[tokio::test]

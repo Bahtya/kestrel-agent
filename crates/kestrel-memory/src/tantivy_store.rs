@@ -11,7 +11,7 @@ use std::ops::Bound;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::*;
-use tantivy::tokenizer::TextAnalyzer;
+use tantivy::tokenizer::{LowerCaser, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Score, TantivyDocument};
 use tantivy_jieba::JiebaTokenizer;
 use tokio::sync::Mutex;
@@ -101,9 +101,10 @@ impl TantivyStore {
             Index::create_in_dir(tantivy_path, schema.clone()).map_err(tantivy_err)?
         };
 
-        index
-            .tokenizers()
-            .register(MEMORY_TOKENIZER, TextAnalyzer::from(JiebaTokenizer::new()));
+        let jieba_analyzer = TextAnalyzer::builder(JiebaTokenizer::new())
+            .filter(LowerCaser)
+            .build();
+        index.tokenizers().register(MEMORY_TOKENIZER, jieba_analyzer);
 
         let reader = index
             .reader_builder()
@@ -248,18 +249,29 @@ impl MemoryStore for TantivyStore {
 
         let mut writer = self.writer.lock().await;
 
-        // Delete existing entry with same id (upsert)
-        let term = tantivy::Term::from_field_text(self.fields.id, &entry.id);
-        writer.delete_term(term);
-
-        // Check capacity after deletion
+        // Check if entry with same id already exists (upsert)
+        let existing_term = tantivy::Term::from_field_text(self.fields.id, &entry.id);
         let searcher = self.reader.searcher();
-        let num_docs = searcher.num_docs() as usize;
-        if num_docs >= self.max_entries {
-            return Err(MemoryError::CapacityExceeded {
-                max: self.max_entries,
-                current: num_docs,
-            });
+        let exists = searcher
+            .search(
+                &TermQuery::new(existing_term.clone(), IndexRecordOption::Basic),
+                &TopDocs::with_limit(1).order_by_score(),
+            )
+            .map(|docs| !docs.is_empty())
+            .unwrap_or(false);
+
+        // Delete existing entry with same id
+        writer.delete_term(existing_term);
+
+        // Check capacity (skip if overwriting existing entry)
+        if !exists {
+            let num_docs = searcher.num_docs() as usize;
+            if num_docs >= self.max_entries {
+                return Err(MemoryError::CapacityExceeded {
+                    max: self.max_entries,
+                    current: num_docs,
+                });
+            }
         }
 
         writer
@@ -695,7 +707,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].entry.content.contains("module"));
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.entry.category == MemoryCategory::ErrorLesson));
+        assert!(results
+            .iter()
+            .any(|r| r.entry.content.contains("module")));
     }
 }

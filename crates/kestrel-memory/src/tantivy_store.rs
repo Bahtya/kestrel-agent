@@ -28,7 +28,6 @@ const MEMORY_TOKENIZER: &str = "memory_tokenizer";
 mod field {
     pub const ID: &str = "id";
     pub const CONTENT: &str = "content";
-    pub const CONTENT_SEARCH: &str = "content_search";
     pub const CATEGORY: &str = "category";
     pub const CONFIDENCE: &str = "confidence";
     pub const CREATED_AT: &str = "created_at";
@@ -45,7 +44,6 @@ pub struct TantivyStore {
     // Pre-bound field handles
     id_field: Field,
     content_field: Field,
-    content_search_field: Field,
     category_field: Field,
     confidence_field: Field,
     created_at_field: Field,
@@ -59,9 +57,6 @@ impl TantivyStore {
         let schema = build_schema();
         let id_field = schema.get_field(field::ID).map_err(tantivy_err)?;
         let content_field = schema.get_field(field::CONTENT).map_err(tantivy_err)?;
-        let content_search_field = schema
-            .get_field(field::CONTENT_SEARCH)
-            .map_err(tantivy_err)?;
         let category_field = schema.get_field(field::CATEGORY).map_err(tantivy_err)?;
         let confidence_field = schema.get_field(field::CONFIDENCE).map_err(tantivy_err)?;
         let created_at_field = schema.get_field(field::CREATED_AT).map_err(tantivy_err)?;
@@ -109,7 +104,6 @@ impl TantivyStore {
             max_entries: config.max_entries,
             id_field,
             content_field,
-            content_search_field,
             category_field,
             confidence_field,
             created_at_field,
@@ -123,7 +117,6 @@ impl TantivyStore {
         doc!(
             self.id_field => entry.id.as_str(),
             self.content_field => entry.content.as_str(),
-            self.content_search_field => entry.content.as_str(),
             self.category_field => entry.category.to_string(),
             self.confidence_field => entry.confidence,
             self.created_at_field => entry.created_at.timestamp_micros(),
@@ -189,10 +182,11 @@ impl TantivyStore {
     fn build_query(&self, query: &MemoryQuery) -> Result<Box<dyn tantivy::query::Query>> {
         let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
 
-        // Text search via QueryParser (uses jieba+LowerCaser tokenizer on content_search field)
+        // Text search via QueryParser (uses jieba+LowerCaser tokenizer on content field)
         if let Some(ref text) = query.text {
             if !text.is_empty() {
-                let parser = QueryParser::for_index(&self.index, vec![self.content_search_field]);
+                let parser =
+                    QueryParser::for_index(&self.index, vec![self.content_field]);
                 let parsed = parser
                     .parse_query(text)
                     .map_err(|e| MemoryError::SearchEngine(format!("query parse error: {e}")))?;
@@ -299,19 +293,7 @@ impl MemoryStore for TantivyStore {
 
         if let Some((_score, doc_address)) = top_docs.first() {
             let doc: TantivyDocument = searcher.doc(*doc_address).map_err(tantivy_err)?;
-            let mut entry = self.doc_to_entry(&doc)?;
-            entry.touch();
-
-            // Update access count in index
-            let mut writer = self.writer.lock().await;
-            let del_term = tantivy::Term::from_field_text(self.id_field, id);
-            writer.delete_term(del_term);
-            writer
-                .add_document(self.entry_to_doc(&entry))
-                .map_err(tantivy_err)?;
-            writer.commit().map_err(tantivy_err)?;
-            self.reader.reload().map_err(tantivy_err)?;
-
+            let entry = self.doc_to_entry(&doc)?;
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -375,17 +357,16 @@ fn build_schema() -> Schema {
             .set_stored(),
     );
 
-    // content: stored only (original case preserved for retrieval)
-    builder.add_text_field(field::CONTENT, TextOptions::default().set_stored());
-
-    // content_search: jieba-tokenized for BM25 (lowercased), not stored
+    // content: jieba+LowerCaser tokenized for BM25, stored for retrieval
     builder.add_text_field(
-        field::CONTENT_SEARCH,
-        TextOptions::default().set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer(MEMORY_TOKENIZER)
-                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-        ),
+        field::CONTENT,
+        TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer(MEMORY_TOKENIZER)
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            )
+            .set_stored(),
     );
 
     // category: exact match, stored

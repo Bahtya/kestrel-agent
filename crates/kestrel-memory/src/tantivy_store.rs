@@ -58,7 +58,8 @@ impl TantivyStore {
         let schema = build_schema();
         let id_field = schema.get_field(field::ID).map_err(tantivy_err)?;
         let content_field = schema.get_field(field::CONTENT).map_err(tantivy_err)?;
-        let content_search_field = schema.get_field(field::CONTENT_SEARCH).map_err(tantivy_err)?;
+        let content_search_field =
+            schema.get_field(field::CONTENT_SEARCH).map_err(tantivy_err)?;
         let category_field = schema.get_field(field::CATEGORY).map_err(tantivy_err)?;
         let confidence_field = schema.get_field(field::CONFIDENCE).map_err(tantivy_err)?;
         let created_at_field = schema.get_field(field::CREATED_AT).map_err(tantivy_err)?;
@@ -362,10 +363,7 @@ fn build_schema() -> Schema {
     );
 
     // content: stored only (original case preserved for retrieval)
-    builder.add_text_field(
-        field::CONTENT,
-        TextOptions::default().set_stored(),
-    );
+    builder.add_text_field(field::CONTENT, TextOptions::default().set_stored());
 
     // content_search: jieba-tokenized for BM25 (lowercased), not stored
     builder.add_text_field(

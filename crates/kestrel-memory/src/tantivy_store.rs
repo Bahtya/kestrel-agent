@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::*;
+use tantivy::tokenizer::{LowerCaser, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tantivy_jieba::JiebaTokenizer;
 use tokio::sync::Mutex;
@@ -80,10 +81,13 @@ impl TantivyStore {
             Index::create_in_dir(tantivy_path, schema.clone()).map_err(tantivy_err)?
         };
 
-        // Register jieba tokenizer for CJK support
+        // Register jieba tokenizer + LowerCaser for case-insensitive CJK search
+        let jieba_analyzer = TextAnalyzer::builder(JiebaTokenizer::new())
+            .filter(LowerCaser)
+            .build();
         index
             .tokenizers()
-            .register(MEMORY_TOKENIZER, JiebaTokenizer::new());
+            .register(MEMORY_TOKENIZER, jieba_analyzer);
 
         let reader = index
             .reader_builder()

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-04-24
+
+### Fixed
+
+- VERSION constant now uses `env!("CARGO_PKG_VERSION")` (#149, #150)
+- Heartbeat test data no longer leaks into production state file (#147, #151)
+- Telegram bot command names use underscores instead of hyphens (#145, #152)
+- Timeout messages now send reply instead of silently dropping (#146, #153)
+- Reflection retry with exponential backoff after failure (#148, #154)
+- Removed duplicate `AuditCallback` and `AuditLogEntry` definitions (CI hotfix)
+
 ## [0.2.4] - 2026-04-23
 
 ### Added

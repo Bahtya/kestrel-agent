@@ -126,30 +126,30 @@ fn is_reserved_command(command: &str) -> bool {
 
 fn normalize_skill_command_key(name: &str) -> String {
     let mut normalized = String::with_capacity(name.len());
-    let mut last_was_dash = false;
+    let mut last_was_sep = false;
 
     for ch in name.chars().flat_map(char::to_lowercase) {
         let mapped = match ch {
             'a'..='z' | '0'..='9' => Some(ch),
-            '-' | '_' | ' ' => Some('-'),
+            '-' | '_' | ' ' => Some('_'),
             _ => None,
         };
 
         match mapped {
-            Some('-') if !last_was_dash && !normalized.is_empty() => {
-                normalized.push('-');
-                last_was_dash = true;
+            Some('_') if !last_was_sep && !normalized.is_empty() => {
+                normalized.push('_');
+                last_was_sep = true;
             }
-            Some('-') => {}
+            Some('_') => {}
             Some(value) => {
                 normalized.push(value);
-                last_was_dash = false;
+                last_was_sep = false;
             }
             None => {}
         }
     }
 
-    normalized.trim_matches('-').to_string()
+    normalized.trim_matches('_').to_string()
 }
 
 async fn resolve_skill_command(
@@ -1987,7 +1987,7 @@ providers:
                 .unwrap(),
         );
 
-        assert!(rewritten.contains("The user explicitly invoked the /plan-release skill"));
+        assert!(rewritten.contains("The user explicitly invoked the /plan_release skill"));
         assert!(rewritten.contains("Skill name: plan-release"));
         assert!(rewritten.contains("Instructions for plan-release"));
         assert!(rewritten.contains("prepare the rollback checklist"));
@@ -2025,7 +2025,7 @@ providers:
         let commands = dynamic_skill_commands().await;
         assert!(commands
             .iter()
-            .any(|(command, _)| command == "release-plan"));
+            .any(|(command, _)| command == "release_plan"));
         assert!(!commands.iter().any(|(command, _)| command == "skill"));
     }
 

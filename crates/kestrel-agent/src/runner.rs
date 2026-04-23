@@ -238,7 +238,27 @@ impl AgentRunner {
         let mut tool_calls_map: std::collections::HashMap<usize, (String, String, String)> =
             std::collections::HashMap::new();
 
-        while let Some(chunk_result) = stream.next().await {
+        let first_chunk_timeout = std::time::Duration::from_secs(15);
+        let idle_timeout = std::time::Duration::from_secs(30);
+        let mut is_first = true;
+
+        loop {
+            let timeout = if is_first { first_chunk_timeout } else { idle_timeout };
+            let chunk_result = tokio::time::timeout(timeout, stream.next()).await;
+            is_first = false;
+
+            let chunk_result = match chunk_result {
+                Ok(Some(r)) => r,
+                Ok(None) => break,
+                Err(_) => {
+                    warn!("SSE stream idle timeout after {}s", timeout.as_secs());
+                    anyhow::bail!(
+                        "SSE stream timed out: no data received within {}s",
+                        timeout.as_secs()
+                    );
+                }
+            };
+            let chunk = chunk_result?;
             let chunk = chunk_result?;
 
             // Accumulate text content

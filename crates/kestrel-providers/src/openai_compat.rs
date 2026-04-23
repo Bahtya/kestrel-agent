@@ -146,6 +146,9 @@ impl OpenAiCompatProvider {
     }
 
     /// Parse SSE lines from byte stream and yield CompletionChunks.
+    ///
+    /// Each byte chunk read is guarded by an idle timeout (30s). If no data
+    /// arrives within the timeout, an error is sent and parsing stops.
     fn parse_sse_stream(
         byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     ) -> BoxStream {
@@ -157,7 +160,26 @@ impl OpenAiCompatProvider {
             let mut buffer = String::new();
             let mut tc_acc: HashMap<usize, (String, String, String)> = HashMap::new();
 
-            while let Some(chunk_result) = stream.next().await {
+            loop {
+                let chunk_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    stream.next(),
+                )
+                .await;
+
+                let chunk_result = match chunk_result {
+                    Ok(Some(r)) => r,
+                    Ok(None) => return,
+                    Err(_) => {
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(
+                                "SSE byte stream idle timeout after 30s"
+                            )))
+                            .await;
+                        return;
+                    }
+                };
+
                 let bytes = match chunk_result {
                     Ok(b) => b,
                     Err(e) => {

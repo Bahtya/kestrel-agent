@@ -188,8 +188,7 @@ impl TantivyStore {
         if let Some(ref text) = query.text {
             if !text.is_empty() {
                 let lowered = text.to_lowercase();
-                let parser =
-                    QueryParser::for_index(&self.index, vec![self.content_search_field]);
+                let parser = QueryParser::for_index(&self.index, vec![self.content_search_field]);
                 let parsed = parser
                     .parse_query(&lowered)
                     .map_err(|e| MemoryError::SearchEngine(format!("query parse error: {e}")))?;

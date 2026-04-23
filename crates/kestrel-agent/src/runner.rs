@@ -231,7 +231,11 @@ impl AgentRunner {
         use futures::StreamExt;
         use kestrel_core::{FunctionCall, ToolCall as CoreToolCall};
 
+        let send_start = std::time::Instant::now();
         let mut stream = provider.complete_stream(request).await?;
+        let first_byte_deadline = std::time::Instant::now();
+
+        let mut first_byte_logged = false;
 
         let mut full_content = String::new();
         let mut usage: Option<Usage> = None;
@@ -259,7 +263,14 @@ impl AgentRunner {
                 }
             };
             let chunk = chunk_result?;
-            let chunk = chunk_result?;
+
+            if !first_byte_logged {
+                debug!(
+                    elapsed_ms = send_start.elapsed().as_millis() as u64,
+                    "SSE first-byte received"
+                );
+                first_byte_logged = true;
+            }
 
             // Accumulate text content
             if let Some(delta) = &chunk.delta {
@@ -295,6 +306,11 @@ impl AgentRunner {
                 break;
             }
         }
+
+        debug!(
+            total_ms = send_start.elapsed().as_millis() as u64,
+            "SSE stream completed"
+        );
 
         // Emit final stream chunk
         self.emit_stream_chunk(String::new(), true);

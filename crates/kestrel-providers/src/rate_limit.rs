@@ -5,7 +5,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::time::Instant;
 use tracing::trace;
 
 /// Trait for rate-limiting provider API calls.
@@ -207,9 +206,12 @@ impl RateLimiter for UnlimitedLimiter {
     }
 }
 
-/// Get current time as milliseconds since an arbitrary epoch (uses Instant).
+/// Get current time as milliseconds since UNIX epoch.
 fn epoch_millis() -> u64 {
-    Instant::now().elapsed().as_millis() as u64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]

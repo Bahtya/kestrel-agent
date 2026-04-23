@@ -9,6 +9,7 @@ use anyhow::Result;
 use kestrel_config::schema::Config;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
 /// Model keyword to provider name mapping.
@@ -38,6 +39,8 @@ const MODEL_KEYWORD_MAP: &[(&str, &str)] = &[
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
     default_provider: Option<String>,
+    /// Semaphore limiting concurrent in-flight provider requests.
+    concurrency_limit: Arc<Semaphore>,
 }
 
 impl ProviderRegistry {
@@ -46,7 +49,27 @@ impl ProviderRegistry {
         Self {
             providers: HashMap::new(),
             default_provider: None,
+            concurrency_limit: Arc::new(Semaphore::new(4)),
         }
+    }
+
+    /// Create a registry with a custom concurrency limit for in-flight requests.
+    pub fn with_concurrency_limit(limit: usize) -> Self {
+        Self {
+            providers: HashMap::new(),
+            default_provider: None,
+            concurrency_limit: Arc::new(Semaphore::new(limit)),
+        }
+    }
+
+    /// Acquire a permit from the concurrency semaphore.
+    /// Returns a permit that releases on drop.
+    pub async fn acquire_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.concurrency_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("concurrency semaphore should not be closed")
     }
 
     /// Build the registry from a Config.

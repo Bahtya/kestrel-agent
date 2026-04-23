@@ -149,18 +149,26 @@ impl OpenAiCompatProvider {
     ///
     /// Each byte chunk read is guarded by an idle timeout (30s). If no data
     /// arrives within the timeout, an error is sent and parsing stops.
+    /// The optional cancellation token allows callers to abort the parse early.
     fn parse_sse_stream(
         byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+        cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> BoxStream {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<CompletionChunk>>(32);
 
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             use futures::StreamExt;
             let mut stream = byte_stream.boxed();
             let mut buffer = String::new();
             let mut tc_acc: HashMap<usize, (String, String, String)> = HashMap::new();
 
             loop {
+                if let Some(ref ct) = cancel {
+                    if ct.is_cancelled() {
+                        return;
+                    }
+                }
+
                 let chunk_result = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     stream.next(),
@@ -492,7 +500,7 @@ impl LlmProvider for OpenAiCompatProvider {
                     anyhow::bail!("API error ({}): {}", status, text);
                 }
 
-                Ok(Self::parse_sse_stream(resp.bytes_stream()))
+                Ok(Self::parse_sse_stream(resp.bytes_stream(), None))
             }
         })
         .await

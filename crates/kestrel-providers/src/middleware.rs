@@ -244,8 +244,10 @@ impl LlmProvider for ProviderMiddleware {
         );
 
         // 3. Retry with exponential backoff + circuit breaker recording
-        // Note: we only retry the initial HTTP connection/stream-open.
-        // Once the stream is established, retries are not applicable.
+        // Only record failures on the initial HTTP connection/stream-open.
+        // Stream success is deferred — the stream may still fail after being
+        // established, so we don't call record_success() until the stream is
+        // actually consumed (handled by per-chunk timeouts in the caller).
         let inner = self.inner.clone();
         let retry_config = self.config.retry.clone();
         let cb = self.config.circuit_breaker.clone();
@@ -256,11 +258,7 @@ impl LlmProvider for ProviderMiddleware {
             async move {
                 let result = inner.complete_stream(req).await;
                 match &result {
-                    Ok(_) => {
-                        if let Some(ref cb) = cb {
-                            cb.record_success();
-                        }
-                    }
+                    Ok(_) => {}
                     Err(_) => {
                         if let Some(ref cb) = cb {
                             cb.record_failure();

@@ -22,7 +22,7 @@ futures = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 uuid = { workspace = true }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 tungstenite = "0.26"
 
 [dev-dependencies]

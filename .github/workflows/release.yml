@@ -69,13 +69,25 @@ jobs:
           # zig natively supports cross-compiling to musl targets, no external toolchain needed
           curl -sL "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz" | sudo tar xJ -C /opt
           sudo ln -sf /opt/zig-linux-x86_64-0.13.0/zig /usr/local/bin/zig
-          # Wrapper scripts for cc crate (zstd-sys, etc.)
-          echo '#!/bin/sh' > /usr/local/bin/aarch64-zig-cc
-          echo 'exec /opt/zig-linux-x86_64-0.13.0/zig cc -target aarch64-linux-musl "$@"' >> /usr/local/bin/aarch64-zig-cc
+          # Wrapper: cc crate passes --target=aarch64-unknown-linux-musl but zig expects aarch64-linux-musl
+          cat > /usr/local/bin/aarch64-zig-cc << 'WRAPPER'
+          #!/bin/sh
+          # Normalize target triple: aarch64-unknown-linux-musl -> aarch64-linux-musl
+          ARGS=""
+          for arg in "$@"; do
+            case "$arg" in
+              *unknown-linux-musl)
+                clean=$(echo "$arg" | sed 's/-unknown//')
+                ARGS="$ARGS $clean"
+                ;;
+              *)
+                ARGS="$ARGS $arg"
+                ;;
+            esac
+          done
+          exec /opt/zig-linux-x86_64-0.13.0/zig cc $ARGS
+          WRAPPER
           chmod +x /usr/local/bin/aarch64-zig-cc
-          echo '#!/bin/sh' > /usr/local/bin/aarch64-zig-ar
-          echo 'exec /opt/zig-linux-x86_64-0.13.0/zig ar "$@"' >> /usr/local/bin/aarch64-zig-ar
-          chmod +x /usr/local/bin/aarch64-zig-ar
           mkdir -p ~/.cargo
           echo '[target.aarch64-unknown-linux-musl]' >> ~/.cargo/config.toml
           echo 'linker = "aarch64-zig-cc"' >> ~/.cargo/config.toml
@@ -96,9 +108,8 @@ jobs:
           # Rust target-feature flags do not reach that C build, so disable AVX512 here
           # for the macOS Intel target to avoid missing AVX512 symbols at link time.
           CFLAGS_x86_64_apple_darwin: ${{ matrix.target == 'x86_64-apple-darwin' && '-march=haswell' || '' }}
-          # zig cross-compiler for musl targets (cc crate needs these env vars)
+          # zig cross-compiler for musl targets (cc crate needs CC env var)
           CC_aarch64_unknown_linux_musl: ${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64-zig-cc' || '' }}
-          AR_aarch64_unknown_linux_musl: ${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64-zig-ar' || '' }}
 
       - name: Package binary
         run: |

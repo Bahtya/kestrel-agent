@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn test_agent_max_tokens_boundary() {
-        let cases: &[(usize, bool, bool)] = &[
+        let cases: &[(u32, bool, bool)] = &[
             // (value, has_error, has_warning)
             (0, true, false),
             (200_000, false, true),

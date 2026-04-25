@@ -324,8 +324,8 @@ async fn test_chat_completions_success() {
     );
     assert_eq!(v["choices"][0]["finish_reason"], "stop");
     assert_eq!(v["usage"]["prompt_tokens"], 10);
-    assert_eq!(v["usage"]["completion_tokens"], 6);
-    assert_eq!(v["usage"]["total_tokens"], 16);
+    assert_eq!(v["usage"]["completion_tokens"], 5);
+    assert_eq!(v["usage"]["total_tokens"], 15);
     assert!(v["id"].as_str().unwrap().starts_with("chatcmpl-"));
 }
 

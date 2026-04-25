@@ -190,10 +190,15 @@ impl LlmProvider for MockProvider {
             ));
         }
 
+        let success_index = if fail_until > 0 {
+            n.saturating_sub(fail_until) as usize
+        } else {
+            n as usize
+        };
         let resp = self
             .state
             .responses
-            .get(n as usize)
+            .get(success_index)
             .cloned()
             .unwrap_or(CompletionResponse {
                 content: Some("default mock response".to_string()),

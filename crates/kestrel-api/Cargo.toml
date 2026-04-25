@@ -30,3 +30,4 @@ parking_lot = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 http-body-util = "0.1"
+kestrel-test-utils = { path = "../kestrel-test-utils" }

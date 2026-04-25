@@ -24,3 +24,4 @@ parking_lot = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 futures = { workspace = true }
+kestrel-test-utils = { path = "../kestrel-test-utils" }

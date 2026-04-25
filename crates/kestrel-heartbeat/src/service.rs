@@ -529,33 +529,11 @@ mod tests {
         HeartbeatService::with_data_dir(config, dir.to_path_buf())
     }
 
-    struct MockCheck {
-        name: String,
-        healthy: bool,
-    }
+    use kestrel_test_utils::MockCheck;
 
-    #[async_trait::async_trait]
-    impl HealthCheck for MockCheck {
-        fn component_name(&self) -> &str {
-            &self.name
-        }
-        async fn report_health(&self) -> HealthCheckResult {
-            HealthCheckResult {
-                component: self.name.clone(),
-                status: if self.healthy {
-                    CheckStatus::Healthy
-                } else {
-                    CheckStatus::Unhealthy
-                },
-                message: if self.healthy {
-                    "ok".to_string()
-                } else {
-                    "failing".to_string()
-                },
-                timestamp: Local::now(),
-            }
-        }
-    }
+    // Macro to reduce boilerplate: MockCheck::new("name", bool)
+    // Tests below use `MockCheck { name, healthy }` struct literal syntax, but
+    // since MockCheck is now external with private fields, we use the constructor.
 
     /// Wrapper that allows toggling health via interior mutability.
     struct ToggleCheck {
@@ -665,10 +643,7 @@ mod tests {
     fn test_register_check() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp_a".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp_a", true)));
         assert_eq!(svc.registered_checks(), vec!["comp_a"]);
     }
 
@@ -676,14 +651,8 @@ mod tests {
     fn test_register_multiple() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "a".to_string(),
-            healthy: true,
-        }));
-        svc.register_check(Arc::new(MockCheck {
-            name: "b".to_string(),
-            healthy: false,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("a", true)));
+        svc.register_check(Arc::new(MockCheck::new("b", false)));
         let checks = svc.registered_checks();
         assert_eq!(checks.len(), 2);
         assert!(checks.contains(&"a".to_string()));
@@ -694,10 +663,7 @@ mod tests {
     fn test_deregister_check() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "x".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("x", true)));
         assert_eq!(svc.registered_checks().len(), 1);
         svc.deregister_check("x");
         assert!(svc.registered_checks().is_empty());
@@ -709,10 +675,7 @@ mod tests {
     async fn test_run_checks_healthy() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
         let snapshot = svc.run_checks().await.unwrap();
         assert!(snapshot.healthy);
         assert_eq!(snapshot.checks.len(), 1);
@@ -723,10 +686,7 @@ mod tests {
     async fn test_run_checks_unhealthy() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: false,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", false)));
         let snapshot = svc.run_checks().await.unwrap();
         assert!(!snapshot.healthy);
         assert_eq!(snapshot.failed_count(), 1);
@@ -745,14 +705,8 @@ mod tests {
     async fn test_run_checks_mixed() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "healthy_comp".to_string(),
-            healthy: true,
-        }));
-        svc.register_check(Arc::new(MockCheck {
-            name: "broken_comp".to_string(),
-            healthy: false,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("healthy_comp", true)));
+        svc.register_check(Arc::new(MockCheck::new("broken_comp", false)));
         let snapshot = svc.run_checks().await.unwrap();
         assert!(!snapshot.healthy);
         assert_eq!(snapshot.checks.len(), 2);
@@ -775,10 +729,7 @@ mod tests {
     async fn test_consecutive_failures_tracked() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: false,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", false)));
 
         // Run 2 checks
         svc.run_checks().await.unwrap();
@@ -882,10 +833,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path()).with_failures_before_restart(2);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: false,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", false)));
 
         // Trigger restart
         svc.run_checks().await.unwrap();
@@ -910,10 +858,7 @@ mod tests {
         let mut svc = make_service(dir.path());
         svc.set_bus(bus);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         svc.run_checks().await.unwrap();
 
@@ -935,10 +880,7 @@ mod tests {
         let mut svc = make_service(dir.path()).with_failures_before_restart(2);
         svc.set_bus(bus);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: false,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", false)));
 
         svc.run_checks().await.unwrap();
         svc.run_checks().await.unwrap();
@@ -966,10 +908,7 @@ mod tests {
         let mut svc = make_service(dir.path());
         svc.set_bus(bus);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         svc.run_checks().await.unwrap();
 
@@ -1013,10 +952,7 @@ mod tests {
 
         {
             let svc = make_service(dir.path());
-            svc.register_check(Arc::new(MockCheck {
-                name: "comp".to_string(),
-                healthy: true,
-            }));
+            svc.register_check(Arc::new(MockCheck::new("comp", true)));
             svc.run_checks().await.unwrap();
         }
 
@@ -1034,10 +970,7 @@ mod tests {
 
         {
             let svc = make_service(dir.path());
-            svc.register_check(Arc::new(MockCheck {
-                name: "comp".to_string(),
-                healthy: false,
-            }));
+            svc.register_check(Arc::new(MockCheck::new("comp", false)));
             svc.run_checks().await.unwrap();
         }
 
@@ -1068,10 +1001,7 @@ mod tests {
         let initial = svc.state();
         assert_eq!(initial.total_checks, 0);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
         svc.run_checks().await.unwrap();
         let after = svc.state();
         assert_eq!(after.total_checks, 1);
@@ -1084,10 +1014,7 @@ mod tests {
     async fn test_multiple_check_cycles() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         for _ in 0..5 {
             svc.run_checks().await.unwrap();
@@ -1187,10 +1114,7 @@ mod tests {
         let mut svc = make_service(dir.path());
         svc.set_bus(bus);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         svc.run_checks().await.unwrap();
 
@@ -1210,10 +1134,7 @@ mod tests {
         let mut svc = make_service(dir.path());
         svc.set_bus(bus);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         // Two checks, both healthy
         svc.run_checks().await.unwrap();
@@ -1287,10 +1208,7 @@ mod tests {
         let mut svc = make_service(dir.path());
         svc.set_bus(bus);
 
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         svc.run_checks().await.unwrap();
         svc.run_checks().await.unwrap();
@@ -1357,14 +1275,8 @@ mod tests {
     async fn test_generate_full_report_healthy() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp_a".to_string(),
-            healthy: true,
-        }));
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp_b".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp_a", true)));
+        svc.register_check(Arc::new(MockCheck::new("comp_b", true)));
 
         let report = svc.generate_full_report().await.unwrap();
         assert_eq!(report.overall_status, "healthy");
@@ -1378,14 +1290,8 @@ mod tests {
     async fn test_generate_full_report_unhealthy() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "healthy_comp".to_string(),
-            healthy: true,
-        }));
-        svc.register_check(Arc::new(MockCheck {
-            name: "broken_comp".to_string(),
-            healthy: false,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("healthy_comp", true)));
+        svc.register_check(Arc::new(MockCheck::new("broken_comp", false)));
 
         let report = svc.generate_full_report().await.unwrap();
         assert_eq!(report.overall_status, "unhealthy");
@@ -1404,10 +1310,7 @@ mod tests {
     async fn test_cached_full_report_after_checks() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         svc.run_checks().await.unwrap();
         let report = svc.cached_full_report();
@@ -1419,10 +1322,7 @@ mod tests {
     async fn test_full_report_tracks_state() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
-        svc.register_check(Arc::new(MockCheck {
-            name: "comp".to_string(),
-            healthy: true,
-        }));
+        svc.register_check(Arc::new(MockCheck::new("comp", true)));
 
         // Run checks twice
         svc.run_checks().await.unwrap();
@@ -1440,7 +1340,7 @@ mod tests {
         sessions.get_or_create("session-1", None);
 
         let mut providers = ProviderRegistry::new();
-        providers.register("mock", MockProvider);
+        providers.register("mock", SharedMockProvider::simple("ok"));
         providers.set_default("mock");
 
         let tools = kestrel_tools::ToolRegistry::new();
@@ -1460,48 +1360,5 @@ mod tests {
         assert_eq!(attached_sessions.session_count(), 1);
     }
 
-    struct MockProvider;
-
-    #[async_trait::async_trait]
-    impl kestrel_providers::LlmProvider for MockProvider {
-        fn name(&self) -> &str {
-            "mock"
-        }
-
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-
-        async fn complete(
-            &self,
-            _request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::CompletionResponse> {
-            Ok(kestrel_providers::CompletionResponse {
-                content: Some("ok".to_string()),
-                tool_calls: None,
-                usage: None,
-                finish_reason: Some("stop".to_string()),
-            })
-        }
-
-        async fn complete_stream(
-            &self,
-            request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::base::BoxStream> {
-            use kestrel_providers::base::CompletionChunk;
-
-            let response = self.complete(request).await?;
-            let chunk = CompletionChunk {
-                delta: response.content,
-                tool_call_deltas: None,
-                usage: response.usage,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
+    use kestrel_test_utils::MockProvider as SharedMockProvider;
 }

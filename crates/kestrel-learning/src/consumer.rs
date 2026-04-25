@@ -147,70 +147,8 @@ fn action_type_name(action: &LearningAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kestrel_memory::error::Result as MemoryResult;
     use kestrel_skill::{manifest::SkillManifestBuilder, CompiledSkill, Skill};
-    use parking_lot::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// Thread-safe mock that records `store()` calls.
-    #[derive(Debug, Default)]
-    struct MockMemoryStore {
-        entries: Mutex<Vec<MemoryEntry>>,
-        fail_store: AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl MemoryStore for MockMemoryStore {
-        async fn store(&self, entry: MemoryEntry) -> MemoryResult<()> {
-            if self.fail_store.load(Ordering::Relaxed) {
-                return Err(kestrel_memory::MemoryError::Config(
-                    "injected store failure".into(),
-                ));
-            }
-
-            self.entries.lock().push(entry);
-            Ok(())
-        }
-
-        async fn recall(&self, id: &str) -> MemoryResult<Option<MemoryEntry>> {
-            Ok(self
-                .entries
-                .lock()
-                .iter()
-                .find(|entry| entry.id == id)
-                .cloned())
-        }
-
-        async fn search(
-            &self,
-            _query: &kestrel_memory::MemoryQuery,
-        ) -> MemoryResult<Vec<kestrel_memory::ScoredEntry>> {
-            Ok(vec![])
-        }
-
-        async fn delete(&self, _id: &str) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn len(&self) -> usize {
-            self.entries.lock().len()
-        }
-
-        async fn clear(&self) -> MemoryResult<()> {
-            self.entries.lock().clear();
-            Ok(())
-        }
-    }
-
-    impl MockMemoryStore {
-        fn set_fail_store(&self, fail_store: bool) {
-            self.fail_store.store(fail_store, Ordering::Relaxed);
-        }
-
-        fn entries(&self) -> Vec<MemoryEntry> {
-            self.entries.lock().clone()
-        }
-    }
+    use kestrel_test_utils::MockMemoryStore;
 
     fn make_skill(name: &str, trigger: &str) -> CompiledSkill {
         CompiledSkill::new(
@@ -259,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_actions_continue_after_memory_store_failure() {
         let mock_store = Arc::new(MockMemoryStore::default());
-        mock_store.set_fail_store(true);
+        mock_store.fail_store(true);
 
         let registry = Arc::new(SkillRegistry::new());
         registry

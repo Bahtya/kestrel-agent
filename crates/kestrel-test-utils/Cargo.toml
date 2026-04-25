@@ -1,0 +1,18 @@
+[package]
+name = "kestrel-test-utils"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Shared test utilities and mock implementations for kestrel crates"
+
+[dependencies]
+kestrel-core = { path = "../kestrel-core" }
+kestrel-providers = { path = "../kestrel-providers" }
+kestrel-memory = { path = "../kestrel-memory" }
+kestrel-heartbeat = { path = "../kestrel-heartbeat" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }

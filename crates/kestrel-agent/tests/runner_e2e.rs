@@ -12,68 +12,10 @@ use kestrel_core::{FunctionCall, Message, MessageRole, ToolCall, Usage};
 use kestrel_providers::base::{
     BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
 };
+use kestrel_test_utils::MockProvider;
 use kestrel_tools::ToolRegistry;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
-// ---------------------------------------------------------------------------
-// Mock provider that returns canned responses
-// ---------------------------------------------------------------------------
-
-struct MockProvider {
-    responses: Vec<CompletionResponse>,
-    call_count: AtomicUsize,
-}
-
-impl MockProvider {
-    fn new(responses: Vec<CompletionResponse>) -> Self {
-        Self {
-            responses,
-            call_count: AtomicUsize::new(0),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for MockProvider {
-    fn name(&self) -> &str {
-        "mock"
-    }
-
-    fn default_model(&self) -> &str {
-        "mock-model"
-    }
-
-    async fn complete(&self, _request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
-        let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
-        let resp = self
-            .responses
-            .get(idx)
-            .cloned()
-            .unwrap_or(CompletionResponse {
-                content: Some("default mock response".to_string()),
-                tool_calls: None,
-                usage: None,
-                finish_reason: None,
-            });
-        Ok(resp)
-    }
-
-    async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<BoxStream> {
-        let resp = self.complete(request).await?;
-        let chunk = CompletionChunk {
-            delta: resp.content,
-            tool_call_deltas: None,
-            usage: resp.usage,
-            done: true,
-        };
-        Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-    }
-
-    fn supports_model(&self, _model: &str) -> bool {
-        true
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,7 +35,7 @@ fn make_tools() -> ToolRegistry {
 
 fn make_providers(responses: Vec<CompletionResponse>) -> kestrel_providers::ProviderRegistry {
     let mut registry = kestrel_providers::ProviderRegistry::new();
-    registry.register("mock", MockProvider::new(responses));
+    registry.register("mock", MockProvider::from_responses(responses));
     registry.set_default("mock");
     registry
 }

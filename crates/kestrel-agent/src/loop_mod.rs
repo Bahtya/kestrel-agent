@@ -1291,6 +1291,7 @@ mod tests {
     use kestrel_core::{MessageType, Platform};
     use kestrel_providers::base::{BoxStream, CompletionChunk};
     use kestrel_providers::{CompletionRequest, CompletionResponse, LlmProvider};
+    use kestrel_test_utils::MockProvider as SharedMockProvider;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU32;
 
@@ -1310,123 +1311,6 @@ mod tests {
         )
     }
 
-    struct MockProvider {
-        response: String,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for MockProvider {
-        fn name(&self) -> &str {
-            "mock"
-        }
-
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> anyhow::Result<CompletionResponse> {
-            Ok(CompletionResponse {
-                content: Some(self.response.clone()),
-                tool_calls: None,
-                usage: None,
-                finish_reason: Some("stop".to_string()),
-            })
-        }
-
-        async fn complete_stream(&self, _request: CompletionRequest) -> anyhow::Result<BoxStream> {
-            Ok(Box::pin(stream::iter(vec![Ok(CompletionChunk {
-                delta: Some(self.response.clone()),
-                tool_call_deltas: None,
-                usage: None,
-                done: true,
-            })])))
-        }
-
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
-
-    /// Provider that fails the first N calls then succeeds with `response`.
-    struct FailingMockProvider {
-        fail_count: Arc<AtomicU32>,
-        response: String,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for FailingMockProvider {
-        fn name(&self) -> &str {
-            "failing-mock"
-        }
-
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> anyhow::Result<CompletionResponse> {
-            let remaining = self.fail_count.load(std::sync::atomic::Ordering::SeqCst);
-            if remaining > 0 {
-                self.fail_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                return Err(anyhow::anyhow!("transient provider error"));
-            }
-            Ok(CompletionResponse {
-                content: Some(self.response.clone()),
-                tool_calls: None,
-                usage: None,
-                finish_reason: Some("stop".to_string()),
-            })
-        }
-
-        async fn complete_stream(&self, _request: CompletionRequest) -> anyhow::Result<BoxStream> {
-            Ok(Box::pin(stream::iter(vec![Ok(CompletionChunk {
-                delta: Some(self.response.clone()),
-                tool_call_deltas: None,
-                usage: None,
-                done: true,
-            })])))
-        }
-
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
-
-    /// Provider that always fails.
-    struct AlwaysFailingProvider;
-
-    #[async_trait::async_trait]
-    impl LlmProvider for AlwaysFailingProvider {
-        fn name(&self) -> &str {
-            "always-failing"
-        }
-
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> anyhow::Result<CompletionResponse> {
-            Err(anyhow::anyhow!("provider permanently unavailable"))
-        }
-
-        async fn complete_stream(&self, _request: CompletionRequest) -> anyhow::Result<BoxStream> {
-            Err(anyhow::anyhow!("provider permanently unavailable"))
-        }
-
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
-
     fn default_consecutive_failures() -> Arc<AtomicU32> {
         Arc::new(AtomicU32::new(0))
     }
@@ -1441,9 +1325,7 @@ mod tests {
         let mut provider_registry = ProviderRegistry::new();
         provider_registry.register(
             "mock",
-            MockProvider {
-                response: response.to_string(),
-            },
+            SharedMockProvider::simple(response.to_string().trim_matches('"')),
         );
         provider_registry.set_default("mock");
 
@@ -2726,13 +2608,9 @@ mod tests {
         config.agent.model = "mock-model".to_string();
 
         let mut provider_registry = ProviderRegistry::new();
-        let fail_count = Arc::new(AtomicU32::new(1));
         provider_registry.register(
             "failing-mock",
-            FailingMockProvider {
-                fail_count: fail_count.clone(),
-                response: "Retry worked well.".to_string(),
-            },
+            SharedMockProvider::simple("Retry worked well.").with_fail_n(1),
         );
         provider_registry.set_default("failing-mock");
 
@@ -2772,7 +2650,7 @@ mod tests {
         config.agent.model = "mock-model".to_string();
 
         let mut provider_registry = ProviderRegistry::new();
-        provider_registry.register("always-failing", AlwaysFailingProvider);
+        provider_registry.register("always-failing", SharedMockProvider::always_fail("provider permanently unavailable"));
         provider_registry.set_default("always-failing");
 
         let failures = default_consecutive_failures();
@@ -2827,13 +2705,9 @@ mod tests {
         config.agent.model = "mock-model".to_string();
 
         let mut provider_registry = ProviderRegistry::new();
-        let fail_count = Arc::new(AtomicU32::new(1));
         provider_registry.register(
             "failing-mock",
-            FailingMockProvider {
-                fail_count,
-                response: "Success after retry.".to_string(),
-            },
+            SharedMockProvider::simple("Success after retry.").with_fail_n(1),
         );
         provider_registry.set_default("failing-mock");
 

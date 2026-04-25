@@ -15,4 +15,5 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 parking_lot = { workspace = true }

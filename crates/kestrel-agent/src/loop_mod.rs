@@ -1287,10 +1287,7 @@ impl HeartbeatHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use kestrel_core::{MessageType, Platform};
-    use kestrel_providers::base::{BoxStream, CompletionChunk};
-    use kestrel_providers::{CompletionRequest, CompletionResponse, LlmProvider};
     use kestrel_test_utils::MockProvider as SharedMockProvider;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU32;
@@ -2650,7 +2647,10 @@ mod tests {
         config.agent.model = "mock-model".to_string();
 
         let mut provider_registry = ProviderRegistry::new();
-        provider_registry.register("always-failing", SharedMockProvider::always_fail("provider permanently unavailable"));
+        provider_registry.register(
+            "always-failing",
+            SharedMockProvider::always_fail("provider permanently unavailable"),
+        );
         provider_registry.set_default("always-failing");
 
         let failures = default_consecutive_failures();

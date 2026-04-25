@@ -1040,28 +1040,12 @@ async fn run_single_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kestrel_providers::base::{
-        BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
-    };
     use kestrel_test_utils::MockProvider as SharedMockProvider;
     use kestrel_tools::trait_def::SpawnStatus;
     use std::sync::atomic::{AtomicU32, Ordering};
-            let chunk = CompletionChunk {
-                delta: resp.content,
-                tool_call_deltas: None,
-                usage: resp.usage,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
 
     /// Build a test SubAgentManager with a mock provider.
-    fn make_manager_with_mock(provider: MockProvider) -> SubAgentManager {
+    fn make_manager_with_mock(provider: SharedMockProvider) -> SubAgentManager {
         let mut config = Config::default();
         config.agent.model = "mock-model".to_string();
         config.agent.max_iterations = 5;
@@ -1081,7 +1065,10 @@ mod tests {
         config.agent.model = "mock-model".to_string();
         config.agent.max_iterations = 5;
         let mut reg = ProviderRegistry::new();
-        reg.register("mock-delayed", SharedMockProvider::simple(text).with_delay(delay));
+        reg.register(
+            "mock-delayed",
+            SharedMockProvider::simple(text).with_delay(delay),
+        );
         reg.set_default("mock-delayed");
         SubAgentManager::new(
             Arc::new(config),
@@ -1232,7 +1219,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_with_context() {
-        let mgr = Arc::new(make_manager_with_mock(SharedMockProvider::simple("context ok")));
+        let mgr = Arc::new(make_manager_with_mock(SharedMockProvider::simple(
+            "context ok",
+        )));
         let handle = mgr
             .spawn_single(
                 "ctx-task",

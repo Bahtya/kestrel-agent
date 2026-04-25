@@ -69,12 +69,7 @@ impl MemoryStore for MockMemoryStore {
     }
 
     async fn recall(&self, id: &str) -> MemoryResult<Option<MemoryEntry>> {
-        Ok(self
-            .entries
-            .lock()
-            .iter()
-            .find(|e| e.id == id)
-            .cloned())
+        Ok(self.entries.lock().iter().find(|e| e.id == id).cloned())
     }
 
     async fn search(&self, query: &MemoryQuery) -> MemoryResult<Vec<ScoredEntry>> {

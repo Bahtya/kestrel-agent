@@ -489,14 +489,8 @@ mod tests {
     #[tokio::test]
     async fn test_provider_check_unhealthy_all_fail() {
         let mut registry = ProviderRegistry::new();
-        registry.register(
-            "fail_a",
-            MockProvider::always_fail("connection refused"),
-        );
-        registry.register(
-            "fail_b",
-            MockProvider::always_fail("auth error"),
-        );
+        registry.register("fail_a", MockProvider::always_fail("connection refused"));
+        registry.register("fail_b", MockProvider::always_fail("auth error"));
         let check = ProviderHealthCheck::new(Arc::new(registry));
         let result = check.report_health().await;
         assert_eq!(result.status, CheckStatus::Unhealthy);
@@ -508,10 +502,7 @@ mod tests {
     async fn test_provider_check_degraded_mixed() {
         let mut registry = ProviderRegistry::new();
         registry.register("healthy", MockProvider::simple("ok"));
-        registry.register(
-            "failing",
-            MockProvider::always_fail("timeout"),
-        );
+        registry.register("failing", MockProvider::always_fail("timeout"));
         let check = ProviderHealthCheck::new(Arc::new(registry));
         let result = check.report_health().await;
         assert_eq!(result.status, CheckStatus::Degraded);
@@ -521,7 +512,10 @@ mod tests {
     #[tokio::test]
     async fn test_provider_check_timeout() {
         let mut registry = ProviderRegistry::new();
-        registry.register("slow", MockProvider::simple("ok").with_delay(Duration::from_secs(60)));
+        registry.register(
+            "slow",
+            MockProvider::simple("ok").with_delay(Duration::from_secs(60)),
+        );
         let check =
             ProviderHealthCheck::new(Arc::new(registry)).with_timeout(Duration::from_millis(50));
         let result = check.report_health().await;

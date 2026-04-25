@@ -1783,7 +1783,10 @@ mod tests {
                 value
             );
             assert_eq!(
-                report.warnings().iter().any(|w| w.path == "agent.max_tokens"),
+                report
+                    .warnings()
+                    .iter()
+                    .any(|w| w.path == "agent.max_tokens"),
                 has_warning,
                 "max_tokens={}: warning expectation failed",
                 value
@@ -1806,13 +1809,19 @@ mod tests {
             config.agent.max_iterations = value;
             let report = validate(&config);
             assert_eq!(
-                report.errors().iter().any(|e| e.path == "agent.max_iterations"),
+                report
+                    .errors()
+                    .iter()
+                    .any(|e| e.path == "agent.max_iterations"),
                 has_error,
                 "max_iterations={}: error expectation failed",
                 value
             );
             assert_eq!(
-                report.warnings().iter().any(|w| w.path == "agent.max_iterations"),
+                report
+                    .warnings()
+                    .iter()
+                    .any(|w| w.path == "agent.max_iterations"),
                 has_warning,
                 "max_iterations={}: warning expectation failed",
                 value
@@ -2480,17 +2489,29 @@ mod tests {
             match expected_warn {
                 Some(warn_substr) => {
                     assert!(
-                        report.warnings().iter().any(|w| w.path == "channels.email.port" && w.message.contains(warn_substr)),
+                        report
+                            .warnings()
+                            .iter()
+                            .any(|w| w.path == "channels.email.port"
+                                && w.message.contains(warn_substr)),
                         "port={}: expected warning containing {:?}",
-                        port, warn_substr
+                        port,
+                        warn_substr
                     );
                 }
                 None => {
                     assert!(
-                        report.warnings().iter().all(|w| w.path != "channels.email.port"),
+                        report
+                            .warnings()
+                            .iter()
+                            .all(|w| w.path != "channels.email.port"),
                         "port={}: expected no port warning, got: {:?}",
                         port,
-                        report.warnings().iter().filter(|w| w.path == "channels.email.port").collect::<Vec<_>>()
+                        report
+                            .warnings()
+                            .iter()
+                            .filter(|w| w.path == "channels.email.port")
+                            .collect::<Vec<_>>()
                     );
                 }
             }
@@ -3290,8 +3311,12 @@ channels:
             ("socks5h://proxy.example.com:1080", true, None),
             ("https://proxy.example.com:8443", true, None),
             ("socks5://user:pass@proxy.example.com:1080", true, None),
-            ("", true, None),   // empty string = no proxy
-            ("ftp://proxy.example.com:21", false, Some("Unsupported proxy scheme")),
+            ("", true, None), // empty string = no proxy
+            (
+                "ftp://proxy.example.com:21",
+                false,
+                Some("Unsupported proxy scheme"),
+            ),
         ];
         for &(proxy, expected_valid, expected_err) in cases {
             let mut config = make_valid_config();
@@ -3301,13 +3326,20 @@ channels:
                 allowed_users: vec![],
                 admin_users: vec![],
                 streaming: false,
-                proxy: if proxy.is_empty() { Some(String::new()) } else { Some(proxy.to_string()) },
+                proxy: if proxy.is_empty() {
+                    Some(String::new())
+                } else {
+                    Some(proxy.to_string())
+                },
             });
             let report = validate(&config);
             assert_eq!(
-                report.is_valid(), expected_valid,
+                report.is_valid(),
+                expected_valid,
                 "proxy={:?}: expected valid={}, got {}",
-                proxy, expected_valid, report
+                proxy,
+                expected_valid,
+                report
             );
             if let (false, Some(err_sub)) = (expected_valid, expected_err) {
                 assert!(

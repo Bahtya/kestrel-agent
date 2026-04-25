@@ -27,7 +27,9 @@
 use async_trait::async_trait;
 use futures::stream;
 use kestrel_core::Usage;
-use kestrel_providers::base::{BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider};
+use kestrel_providers::base::{
+    BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
+};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,21 +134,24 @@ impl MockProvider {
 
     /// Configure the provider to fail the first `n` calls, then succeed.
     pub fn with_fail_n(mut self, n: u32) -> Self {
-        let state = Arc::get_mut(&mut self.state).expect("with_fail_n called on shared MockProvider");
+        let state =
+            Arc::get_mut(&mut self.state).expect("with_fail_n called on shared MockProvider");
         state.fail_until.store(n, Ordering::SeqCst);
         self
     }
 
     /// Add an artificial delay to every completion call.
     pub fn with_delay(mut self, delay: Duration) -> Self {
-        let state = Arc::get_mut(&mut self.state).expect("with_delay called on shared MockProvider");
+        let state =
+            Arc::get_mut(&mut self.state).expect("with_delay called on shared MockProvider");
         state.delay = Some(delay);
         self
     }
 
     /// Configure a custom failure message.
     pub fn with_fail_message(mut self, msg: &str) -> Self {
-        let state = Arc::get_mut(&mut self.state).expect("with_fail_message called on shared MockProvider");
+        let state =
+            Arc::get_mut(&mut self.state).expect("with_fail_message called on shared MockProvider");
         state.fail_message = msg.to_string();
         self
     }
@@ -185,12 +190,17 @@ impl LlmProvider for MockProvider {
             ));
         }
 
-        let resp = self.state.responses.get(n as usize).cloned().unwrap_or(CompletionResponse {
-            content: Some("default mock response".to_string()),
-            tool_calls: None,
-            usage: None,
-            finish_reason: None,
-        });
+        let resp = self
+            .state
+            .responses
+            .get(n as usize)
+            .cloned()
+            .unwrap_or(CompletionResponse {
+                content: Some("default mock response".to_string()),
+                tool_calls: None,
+                usage: None,
+                finish_reason: None,
+            });
         Ok(resp)
     }
 

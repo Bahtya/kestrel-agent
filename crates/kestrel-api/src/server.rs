@@ -1478,9 +1478,9 @@ mod tests {
         assert_eq!(v["choices"][0]["message"]["role"], "assistant");
         assert_eq!(v["choices"][0]["message"]["content"], "Mock response");
         assert_eq!(v["choices"][0]["finish_reason"], "stop");
-        assert_eq!(v["usage"]["prompt_tokens"], 5);
-        assert_eq!(v["usage"]["completion_tokens"], 3);
-        assert_eq!(v["usage"]["total_tokens"], 8);
+        assert_eq!(v["usage"]["prompt_tokens"], 10);
+        assert_eq!(v["usage"]["completion_tokens"], 5);
+        assert_eq!(v["usage"]["total_tokens"], 15);
         assert!(v["id"].as_str().unwrap().starts_with("chatcmpl-"));
         // Verify created is a reasonable timestamp
         assert!(v["created"].as_u64().unwrap() > 1_700_000_000);

@@ -1040,6 +1040,10 @@ async fn run_single_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kestrel_core::Usage;
+    use kestrel_providers::base::{
+        BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
+    };
     use kestrel_test_utils::MockProvider as SharedMockProvider;
     use kestrel_tools::trait_def::SpawnStatus;
     use std::sync::atomic::{AtomicU32, Ordering};

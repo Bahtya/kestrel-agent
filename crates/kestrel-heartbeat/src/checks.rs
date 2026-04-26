@@ -400,126 +400,7 @@ mod tests {
     use super::*;
     use crate::types::HealthCheck;
     use kestrel_memory::TantivyStore;
-
-    // ─── ProviderHealthCheck tests ────────────────────────────────
-
-    /// Mock provider that succeeds on completion.
-    struct MockHealthyProvider;
-
-    #[async_trait::async_trait]
-    impl kestrel_providers::LlmProvider for MockHealthyProvider {
-        fn name(&self) -> &str {
-            "mock_healthy"
-        }
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-        async fn complete(
-            &self,
-            _request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::CompletionResponse> {
-            Ok(kestrel_providers::CompletionResponse {
-                content: Some("ok".to_string()),
-                tool_calls: None,
-                usage: None,
-                finish_reason: None,
-            })
-        }
-        async fn complete_stream(
-            &self,
-            request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::base::BoxStream> {
-            let resp = self.complete(request).await?;
-            let chunk = kestrel_providers::base::CompletionChunk {
-                delta: resp.content,
-                tool_call_deltas: None,
-                usage: None,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
-
-    /// Mock provider that always fails.
-    struct MockFailingProvider {
-        error_msg: String,
-    }
-
-    #[async_trait::async_trait]
-    impl kestrel_providers::LlmProvider for MockFailingProvider {
-        fn name(&self) -> &str {
-            "mock_failing"
-        }
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-        async fn complete(
-            &self,
-            _request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::CompletionResponse> {
-            Err(anyhow::anyhow!("{}", self.error_msg))
-        }
-        async fn complete_stream(
-            &self,
-            request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::base::BoxStream> {
-            let resp = self.complete(request).await?;
-            let chunk = kestrel_providers::base::CompletionChunk {
-                delta: resp.content,
-                tool_call_deltas: None,
-                usage: None,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
-
-    /// Mock provider that never responds (simulates timeout).
-    struct MockSlowProvider;
-
-    #[async_trait::async_trait]
-    impl kestrel_providers::LlmProvider for MockSlowProvider {
-        fn name(&self) -> &str {
-            "mock_slow"
-        }
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-        async fn complete(
-            &self,
-            _request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::CompletionResponse> {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            Ok(kestrel_providers::CompletionResponse {
-                content: Some("ok".to_string()),
-                tool_calls: None,
-                usage: None,
-                finish_reason: None,
-            })
-        }
-        async fn complete_stream(
-            &self,
-            request: kestrel_providers::CompletionRequest,
-        ) -> anyhow::Result<kestrel_providers::base::BoxStream> {
-            let resp = self.complete(request).await?;
-            let chunk = kestrel_providers::base::CompletionChunk {
-                delta: resp.content,
-                tool_call_deltas: None,
-                usage: None,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
+    use kestrel_test_utils::MockProvider;
 
     #[tokio::test]
     async fn test_provider_check_skipped_when_empty() {
@@ -533,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn test_provider_check_healthy() {
         let mut registry = ProviderRegistry::new();
-        registry.register("mock", MockHealthyProvider);
+        registry.register("mock", MockProvider::simple("ok"));
         let check = ProviderHealthCheck::new(Arc::new(registry));
         let result = check.report_health().await;
         assert_eq!(result.status, CheckStatus::Healthy);
@@ -608,18 +489,8 @@ mod tests {
     #[tokio::test]
     async fn test_provider_check_unhealthy_all_fail() {
         let mut registry = ProviderRegistry::new();
-        registry.register(
-            "fail_a",
-            MockFailingProvider {
-                error_msg: "connection refused".to_string(),
-            },
-        );
-        registry.register(
-            "fail_b",
-            MockFailingProvider {
-                error_msg: "auth error".to_string(),
-            },
-        );
+        registry.register("fail_a", MockProvider::always_fail("connection refused"));
+        registry.register("fail_b", MockProvider::always_fail("auth error"));
         let check = ProviderHealthCheck::new(Arc::new(registry));
         let result = check.report_health().await;
         assert_eq!(result.status, CheckStatus::Unhealthy);
@@ -630,13 +501,8 @@ mod tests {
     #[tokio::test]
     async fn test_provider_check_degraded_mixed() {
         let mut registry = ProviderRegistry::new();
-        registry.register("healthy", MockHealthyProvider);
-        registry.register(
-            "failing",
-            MockFailingProvider {
-                error_msg: "timeout".to_string(),
-            },
-        );
+        registry.register("healthy", MockProvider::simple("ok"));
+        registry.register("failing", MockProvider::always_fail("timeout"));
         let check = ProviderHealthCheck::new(Arc::new(registry));
         let result = check.report_health().await;
         assert_eq!(result.status, CheckStatus::Degraded);
@@ -646,7 +512,10 @@ mod tests {
     #[tokio::test]
     async fn test_provider_check_timeout() {
         let mut registry = ProviderRegistry::new();
-        registry.register("slow", MockSlowProvider);
+        registry.register(
+            "slow",
+            MockProvider::simple("ok").with_delay(Duration::from_secs(60)),
+        );
         let check =
             ProviderHealthCheck::new(Arc::new(registry)).with_timeout(Duration::from_millis(50));
         let result = check.report_health().await;
@@ -799,7 +668,7 @@ mod tests {
 
         // Register all four checks
         let mut provider_reg = ProviderRegistry::new();
-        provider_reg.register("mock", MockHealthyProvider);
+        provider_reg.register("mock", MockProvider::simple("ok"));
         svc.register_check(Arc::new(ProviderHealthCheck::new(Arc::new(provider_reg))));
 
         let bus = MessageBus::new();

@@ -21,3 +21,4 @@ dirs = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 toml = "0.8"
+kestrel-test-utils = { path = "../kestrel-test-utils" }

@@ -928,49 +928,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
-    use kestrel_core::Usage;
-    use kestrel_providers::base::{
-        BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
-    };
+    use kestrel_test_utils::MockProvider;
     use tower::ServiceExt;
-
-    /// Mock provider for testing.
-    struct MockProvider;
-
-    #[async_trait::async_trait]
-    impl LlmProvider for MockProvider {
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-        async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
-            Ok(CompletionResponse {
-                content: Some("Mock response".to_string()),
-                tool_calls: None,
-                usage: Some(Usage {
-                    prompt_tokens: Some(5),
-                    completion_tokens: Some(3),
-                    total_tokens: Some(8),
-                }),
-                finish_reason: Some("stop".to_string()),
-            })
-        }
-        async fn complete_stream(&self, req: CompletionRequest) -> anyhow::Result<BoxStream> {
-            let resp = self.complete(req).await?;
-            let chunk = CompletionChunk {
-                delta: resp.content,
-                tool_call_deltas: None,
-                usage: resp.usage,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
 
     fn test_state() -> AppState {
         let config = Config::default();
@@ -996,7 +955,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
         let mut reg = ProviderRegistry::new();
-        reg.register("mock", MockProvider);
+        reg.register("mock", MockProvider::simple("Mock response"));
         reg.set_default("mock");
         AppState {
             config: Arc::new(config),
@@ -1450,7 +1409,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
         let mut reg = ProviderRegistry::new();
-        reg.register("mock", MockProvider);
+        reg.register("mock", MockProvider::simple("Mock response"));
         // Intentionally do NOT call set_default — no fallback for unknown models
         let state = AppState {
             config: Arc::new(config),
@@ -1519,9 +1478,9 @@ mod tests {
         assert_eq!(v["choices"][0]["message"]["role"], "assistant");
         assert_eq!(v["choices"][0]["message"]["content"], "Mock response");
         assert_eq!(v["choices"][0]["finish_reason"], "stop");
-        assert_eq!(v["usage"]["prompt_tokens"], 5);
-        assert_eq!(v["usage"]["completion_tokens"], 3);
-        assert_eq!(v["usage"]["total_tokens"], 8);
+        assert_eq!(v["usage"]["prompt_tokens"], 10);
+        assert_eq!(v["usage"]["completion_tokens"], 5);
+        assert_eq!(v["usage"]["total_tokens"], 15);
         assert!(v["id"].as_str().unwrap().starts_with("chatcmpl-"));
         // Verify created is a reasonable timestamp
         assert!(v["created"].as_u64().unwrap() > 1_700_000_000);

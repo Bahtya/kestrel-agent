@@ -1040,149 +1040,16 @@ async fn run_single_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use kestrel_core::Usage;
     use kestrel_providers::base::{
         BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
     };
+    use kestrel_test_utils::MockProvider as SharedMockProvider;
     use kestrel_tools::trait_def::SpawnStatus;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// Mock provider that returns deterministic responses.
-    struct MockProvider {
-        responses: Vec<CompletionResponse>,
-        call_count: Arc<AtomicU32>,
-    }
-
-    impl MockProvider {
-        fn simple(text: &str) -> Self {
-            Self {
-                responses: vec![CompletionResponse {
-                    content: Some(text.to_string()),
-                    tool_calls: None,
-                    usage: Some(Usage {
-                        prompt_tokens: Some(10),
-                        completion_tokens: Some(5),
-                        total_tokens: Some(15),
-                    }),
-                    finish_reason: Some("stop".to_string()),
-                }],
-                call_count: Arc::new(AtomicU32::new(0)),
-            }
-        }
-
-        /// Create a provider that returns different text per call.
-        fn multi(responses: Vec<&str>) -> Self {
-            Self {
-                responses: responses
-                    .into_iter()
-                    .map(|text| CompletionResponse {
-                        content: Some(text.to_string()),
-                        tool_calls: None,
-                        usage: Some(Usage {
-                            prompt_tokens: Some(10),
-                            completion_tokens: Some(5),
-                            total_tokens: Some(15),
-                        }),
-                        finish_reason: Some("stop".to_string()),
-                    })
-                    .collect(),
-                call_count: Arc::new(AtomicU32::new(0)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for MockProvider {
-        fn name(&self) -> &str {
-            "mock"
-        }
-
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
-            let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
-            self.responses
-                .get(idx)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("MockProvider: no response for call {}", idx))
-        }
-
-        async fn complete_stream(&self, req: CompletionRequest) -> Result<BoxStream> {
-            let resp = self.complete(req).await?;
-            let chunk = CompletionChunk {
-                delta: resp.content,
-                tool_call_deltas: None,
-                usage: resp.usage,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
-
-    /// Mock provider that introduces a delay before responding.
-    struct DelayedProvider {
-        text: String,
-        delay: Duration,
-    }
-
-    impl DelayedProvider {
-        fn new(text: &str, delay: Duration) -> Self {
-            Self {
-                text: text.to_string(),
-                delay,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for DelayedProvider {
-        fn name(&self) -> &str {
-            "mock-delayed"
-        }
-
-        fn default_model(&self) -> &str {
-            "mock-model"
-        }
-
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
-            tokio::time::sleep(self.delay).await;
-            Ok(CompletionResponse {
-                content: Some(self.text.clone()),
-                tool_calls: None,
-                usage: Some(Usage {
-                    prompt_tokens: Some(10),
-                    completion_tokens: Some(5),
-                    total_tokens: Some(15),
-                }),
-                finish_reason: Some("stop".to_string()),
-            })
-        }
-
-        async fn complete_stream(&self, req: CompletionRequest) -> Result<BoxStream> {
-            let resp = self.complete(req).await?;
-            let chunk = CompletionChunk {
-                delta: resp.content,
-                tool_call_deltas: None,
-                usage: resp.usage,
-                done: true,
-            };
-            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-        }
-
-        fn supports_model(&self, _model: &str) -> bool {
-            true
-        }
-    }
-
     /// Build a test SubAgentManager with a mock provider.
-    fn make_manager_with_mock(provider: MockProvider) -> SubAgentManager {
+    fn make_manager_with_mock(provider: SharedMockProvider) -> SubAgentManager {
         let mut config = Config::default();
         config.agent.model = "mock-model".to_string();
         config.agent.max_iterations = 5;
@@ -1202,7 +1069,10 @@ mod tests {
         config.agent.model = "mock-model".to_string();
         config.agent.max_iterations = 5;
         let mut reg = ProviderRegistry::new();
-        reg.register("mock-delayed", DelayedProvider::new(text, delay));
+        reg.register(
+            "mock-delayed",
+            SharedMockProvider::simple(text).with_delay(delay),
+        );
         reg.set_default("mock-delayed");
         SubAgentManager::new(
             Arc::new(config),
@@ -1215,14 +1085,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_subagent_manager_new() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let tasks = mgr.list_tasks().await;
         assert!(tasks.is_empty());
     }
 
     #[tokio::test]
     async fn test_subagent_manager_spawn_and_complete() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let id = mgr.spawn("test_task", "a test").await;
         let status = mgr.get_status(&id).await.unwrap();
         assert_eq!(status, TaskStatus::Pending);
@@ -1234,7 +1104,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subagent_manager_fail() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let id = mgr.spawn("test_task", "a test").await;
         mgr.fail(&id, "error occurred".to_string()).await;
         let status = mgr.get_status(&id).await.unwrap();
@@ -1243,7 +1113,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subagent_manager_list_tasks() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         mgr.spawn("task1", "first").await;
         mgr.spawn("task2", "second").await;
         mgr.spawn("task3", "third").await;
@@ -1253,7 +1123,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subagent_manager_get_status_nonexistent() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let status = mgr.get_status("nonexistent-id").await;
         assert!(status.is_none());
     }
@@ -1262,7 +1132,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawner_spawn_and_status() {
-        let mgr = make_manager_with_mock(MockProvider::simple("result"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("result"));
         let id = SubAgentSpawner::spawn(&mgr, "worker", "do work", None)
             .await
             .unwrap();
@@ -1275,7 +1145,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawner_list() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let _id1 = SubAgentSpawner::spawn(&mgr, "a", "task a", None)
             .await
             .unwrap();
@@ -1289,13 +1159,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawner_cancel_nonexistent() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         assert!(!SubAgentSpawner::cancel(&mgr, "no-such-id").await);
     }
 
     #[tokio::test]
     async fn test_spawner_status_nonexistent() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         assert!(SubAgentSpawner::status(&mgr, "nope").await.is_none());
     }
 
@@ -1330,7 +1200,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_completed() {
-        let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("done")));
+        let mgr = Arc::new(make_manager_with_mock(SharedMockProvider::simple("done")));
         let handle = mgr
             .spawn_single("fast-task", "quick work", None, None)
             .await
@@ -1353,7 +1223,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_with_context() {
-        let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("context ok")));
+        let mgr = Arc::new(make_manager_with_mock(SharedMockProvider::simple(
+            "context ok",
+        )));
         let handle = mgr
             .spawn_single(
                 "ctx-task",
@@ -1373,7 +1245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_spawn_3_tasks() {
-        let mgr = make_manager_with_mock(MockProvider::multi(vec![
+        let mgr = make_manager_with_mock(SharedMockProvider::multi(vec![
             "Result Alpha",
             "Result Beta",
             "Result Gamma",
@@ -1434,7 +1306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_spawn_with_context() {
-        let mgr = make_manager_with_mock(MockProvider::simple("Context received"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("Context received"));
 
         let tasks = vec![SubAgentTask {
             id: "ctx-task".into(),
@@ -1487,7 +1359,7 @@ mod tests {
     #[tokio::test]
     async fn test_parallel_spawn_max_concurrent() {
         // 5 tasks with max_concurrent=2 — should still complete all
-        let mgr = make_manager_with_mock(MockProvider::multi(vec![
+        let mgr = make_manager_with_mock(SharedMockProvider::multi(vec![
             "done-1", "done-2", "done-3", "done-4", "done-5",
         ]));
 
@@ -1673,7 +1545,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_spawn_empty_tasks() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
 
         let config = ParallelSpawnConfig::default();
         let summary = mgr.spawn_parallel(vec![], &config).await.unwrap();
@@ -1685,7 +1557,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_spawn_auto_ids() {
-        let mgr = make_manager_with_mock(MockProvider::multi(vec!["a", "b"]));
+        let mgr = make_manager_with_mock(SharedMockProvider::multi(vec!["a", "b"]));
 
         let tasks = vec![
             SubAgentTask {
@@ -1714,7 +1586,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_structured_notes() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
 
         let tasks = vec![SubAgentTask {
             id: "note-task".into(),
@@ -1734,7 +1606,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_denied_tools_filter() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
 
         let config = ParallelSpawnConfig {
             denied_tools: vec!["dangerous_tool".to_string()],
@@ -1840,7 +1712,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminate_all_skips_completed() {
-        let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("fast")));
+        let mgr = Arc::new(make_manager_with_mock(SharedMockProvider::simple("fast")));
 
         // Spawn a fast task and wait for it
         let _h = mgr.spawn_single("fast", "p", None, None).await.unwrap();
@@ -1859,7 +1731,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_completed() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
 
         let id1 = mgr.spawn("t1", "d1").await;
         let id2 = mgr.spawn("t2", "d2").await;
@@ -1876,7 +1748,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_completed_all_terminal() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
 
         let id1 = mgr.spawn("t1", "d1").await;
         let id2 = mgr.spawn("t2", "d2").await;
@@ -1890,7 +1762,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_active_count() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
 
         assert_eq!(mgr.active_count().await, 0);
 
@@ -1910,7 +1782,7 @@ mod tests {
         let mut reg = ProviderRegistry::new();
         reg.register(
             "mock",
-            DelayedProvider::new("result", Duration::from_secs(10)),
+            SharedMockProvider::simple("result").with_delay(Duration::from_secs(10)),
         );
         reg.set_default("mock");
 
@@ -1957,7 +1829,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_already_completed() {
-        let mgr = Arc::new(make_manager_with_mock(MockProvider::simple("fast")));
+        let mgr = Arc::new(make_manager_with_mock(SharedMockProvider::simple("fast")));
         let handle = mgr.spawn_single("fast", "p", None, None).await.unwrap();
 
         // Wait for completion
@@ -1968,7 +1840,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_unknown_task() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let status = mgr.wait_for("nonexistent", Duration::from_millis(50)).await;
         assert!(status.is_none());
     }
@@ -1977,7 +1849,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_to_task() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let id = mgr.spawn("worker", "test").await;
 
         let sent = mgr
@@ -1989,14 +1861,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_to_unknown_task() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let sent = mgr.send_message("no-such-id", "parent", "msg".into()).await;
         assert!(!sent);
     }
 
     #[tokio::test]
     async fn test_send_message_to_terminal_task() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let id = mgr.spawn("worker", "test").await;
         mgr.complete(&id, "done".into()).await;
 
@@ -2006,7 +1878,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_messages() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let id = mgr.spawn("worker", "test").await;
 
         mgr.send_message(&id, "parent", "msg1".into()).await;
@@ -2028,14 +1900,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_messages_unknown_task() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
         let msgs = mgr.drain_messages("no-such-id").await;
         assert!(msgs.is_empty());
     }
 
     #[tokio::test]
     async fn test_broadcast_message() {
-        let mgr = make_manager_with_mock(MockProvider::simple("ok"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("ok"));
 
         let id1 = mgr.spawn("worker1", "test").await;
         let id2 = mgr.spawn("worker2", "test").await;
@@ -2094,7 +1966,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_with_custom_timeout() {
-        let mgr = make_manager_with_mock(MockProvider::simple("hello"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("hello"));
         let arc = Arc::new(mgr);
 
         // Use spawn_with_timeout via the SubAgentSpawner trait
@@ -2114,7 +1986,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_with_default_timeout() {
-        let mgr = make_manager_with_mock(MockProvider::simple("hello"));
+        let mgr = make_manager_with_mock(SharedMockProvider::simple("hello"));
         let arc = Arc::new(mgr);
 
         let spawner: Arc<dyn SubAgentSpawner> = arc.clone();

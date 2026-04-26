@@ -9,53 +9,12 @@ use http_body_util::BodyExt;
 use kestrel_api::ApiServer;
 use kestrel_bus::MessageBus;
 use kestrel_config::Config;
-use kestrel_core::Usage;
 use kestrel_heartbeat::{BusHealthCheck, HeartbeatService, ProviderHealthCheck};
-use kestrel_providers::base::{
-    BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider,
-};
 use kestrel_providers::ProviderRegistry;
 use kestrel_session::SessionManager;
+use kestrel_test_utils::MockProvider;
 use kestrel_tools::ToolRegistry;
 use tower::ServiceExt;
-
-/// Mock provider for integration tests.
-struct MockProvider;
-
-#[async_trait::async_trait]
-impl LlmProvider for MockProvider {
-    fn name(&self) -> &str {
-        "mock"
-    }
-    fn default_model(&self) -> &str {
-        "mock-model"
-    }
-    async fn complete(&self, _req: CompletionRequest) -> anyhow::Result<CompletionResponse> {
-        Ok(CompletionResponse {
-            content: Some("Mock integration response".to_string()),
-            tool_calls: None,
-            usage: Some(Usage {
-                prompt_tokens: Some(10),
-                completion_tokens: Some(6),
-                total_tokens: Some(16),
-            }),
-            finish_reason: Some("stop".to_string()),
-        })
-    }
-    async fn complete_stream(&self, req: CompletionRequest) -> anyhow::Result<BoxStream> {
-        let resp = self.complete(req).await?;
-        let chunk = CompletionChunk {
-            delta: resp.content,
-            tool_call_deltas: None,
-            usage: resp.usage,
-            done: true,
-        };
-        Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
-    }
-    fn supports_model(&self, _model: &str) -> bool {
-        true
-    }
-}
 
 fn make_app() -> axum::Router {
     let config = Config::default();
@@ -77,7 +36,7 @@ fn make_app_with_provider() -> axum::Router {
     let tmp = tempfile::tempdir().unwrap();
     let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
     let mut reg = ProviderRegistry::new();
-    reg.register("mock", MockProvider);
+    reg.register("mock", MockProvider::simple("Mock integration response"));
     reg.set_default("mock");
     let tools = ToolRegistry::new();
 
@@ -113,7 +72,7 @@ async fn test_health_check_with_heartbeat_wiring() {
     let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
 
     let mut providers = ProviderRegistry::new();
-    providers.register("mock", MockProvider);
+    providers.register("mock", MockProvider::simple("ok"));
     providers.set_default("mock");
 
     let tools = ToolRegistry::new();
@@ -365,8 +324,8 @@ async fn test_chat_completions_success() {
     );
     assert_eq!(v["choices"][0]["finish_reason"], "stop");
     assert_eq!(v["usage"]["prompt_tokens"], 10);
-    assert_eq!(v["usage"]["completion_tokens"], 6);
-    assert_eq!(v["usage"]["total_tokens"], 16);
+    assert_eq!(v["usage"]["completion_tokens"], 5);
+    assert_eq!(v["usage"]["total_tokens"], 15);
     assert!(v["id"].as_str().unwrap().starts_with("chatcmpl-"));
 }
 

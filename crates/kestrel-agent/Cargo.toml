@@ -33,3 +33,4 @@ uuid = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 filetime = "0.2"
+kestrel-test-utils = { path = "../kestrel-test-utils" }

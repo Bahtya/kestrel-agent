@@ -17,6 +17,7 @@ members = [
     "crates/kestrel-memory",
     "crates/kestrel-skill",
     "crates/kestrel-learning",
+    "crates/kestrel-test-utils",
 ]
 
 [workspace.package]
@@ -128,3 +129,4 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
+kestrel-test-utils = { path = "crates/kestrel-test-utils" }

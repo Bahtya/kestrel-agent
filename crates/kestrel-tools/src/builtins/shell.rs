@@ -197,35 +197,34 @@ where
 
 fn build_command(command: &str, dangerous: bool, max_memory_kib: u64) -> Command {
     let shell = kestrel_config::platform::get_shell_path();
-    let mut cmd = Command::new(&shell);
-    cmd.kill_on_drop(true);
-    if dangerous {
-        cmd.arg("-c").arg(command);
+    let mut cmd = if dangerous || kestrel_config::platform::is_android() {
+        // No ulimit wrapper — safe to use user's preferred shell
+        let mut c = Command::new(&shell);
+        c.arg("-c").arg(command);
+        c
     } else {
         #[cfg(unix)]
         {
-            // ulimit -v may not be supported or behave differently on
-            // Android/Termux (Bionic libc lacks RLIMIT_AS in some versions).
-            if kestrel_config::platform::is_android() {
-                cmd.arg("-c").arg(command);
-            } else {
-                // The ulimit wrapper MUST use a POSIX shell ($1/$2 syntax is
-                // POSIX-only). The inner exec also uses POSIX sh to guarantee
-                // correct argument handling regardless of the user's $SHELL.
-                let posix_sh = kestrel_config::platform::get_posix_sh();
-                cmd.arg("-c")
-                    .arg(format!("ulimit -v \"$1\"; exec {posix_sh} -c \"$2\""))
-                    .arg("sh")
-                    .arg(max_memory_kib.to_string())
-                    .arg(command);
-            }
+            // ulimit wrapper uses POSIX syntax ($1/$2) — the outer process
+            // MUST be a POSIX shell, even if user's $SHELL is fish/nushell.
+            let posix_sh = kestrel_config::platform::get_posix_sh();
+            let mut c = Command::new(&posix_sh);
+            c.arg("-c")
+                .arg(format!("ulimit -v \"$1\"; exec {posix_sh} -c \"$2\""))
+                .arg("sh")
+                .arg(max_memory_kib.to_string())
+                .arg(command);
+            c
         }
         #[cfg(not(unix))]
         {
             let _ = max_memory_kib;
-            cmd.arg("-c").arg(command);
+            let mut c = Command::new(&shell);
+            c.arg("-c").arg(command);
+            c
         }
-    }
+    };
+    cmd.kill_on_drop(true);
     cmd
 }
 

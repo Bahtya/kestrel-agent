@@ -789,7 +789,12 @@ fn default_daemon_pid_file() -> String {
 }
 
 fn default_daemon_log_dir() -> String {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let fallback = if crate::platform::is_termux() {
+        std::path::PathBuf::from(crate::platform::TERMUX_HOME_FALLBACK)
+    } else {
+        std::path::PathBuf::from("/tmp")
+    };
+    let home = dirs::home_dir().unwrap_or(fallback);
     home.join(".kestrel")
         .join("logs")
         .to_string_lossy()

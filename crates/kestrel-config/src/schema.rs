@@ -776,38 +776,30 @@ pub struct DaemonConfig {
 }
 
 fn default_daemon_pid_file() -> String {
-    if crate::platform::is_termux() {
-        // Termux: use home directory since /tmp may not exist or be writable
-        let home = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/data/data/com.termux/files/home"));
-        home.join(".kestrel")
-            .join("kestrel.pid")
-            .to_string_lossy()
-            .to_string()
+    let fallback = if crate::platform::is_termux() {
+        std::path::PathBuf::from(crate::platform::TERMUX_HOME_FALLBACK)
     } else {
-        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-        home.join(".kestrel")
-            .join("kestrel.pid")
-            .to_str()
-            .unwrap_or("/tmp/kestrel.pid")
-            .to_string()
-    }
+        std::path::PathBuf::from("/tmp")
+    };
+    let home = dirs::home_dir().unwrap_or(fallback);
+    home.join(".kestrel")
+        .join("kestrel.pid")
+        .to_string_lossy()
+        .to_string()
 }
 
 fn default_daemon_log_dir() -> String {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
     home.join(".kestrel")
         .join("logs")
-        .to_str()
-        .unwrap_or("/tmp/kestrel-logs")
+        .to_string_lossy()
         .to_string()
 }
 
 fn default_daemon_working_directory() -> String {
     if crate::platform::is_termux() {
-        // Termux: root filesystem not writable, use home directory
         dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/data/data/com.termux/files/home"))
+            .unwrap_or_else(|| std::path::PathBuf::from(crate::platform::TERMUX_HOME_FALLBACK))
             .to_string_lossy()
             .to_string()
     } else {

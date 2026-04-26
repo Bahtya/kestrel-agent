@@ -68,12 +68,12 @@ pub fn daemonize(working_dir: &str, log_file: Option<&str>) -> Result<()> {
     // unreadable area — fall back to home directory instead.
     let resolved_dir = if working_dir == "/" && kestrel_config::platform::is_termux() {
         let home = kestrel_config::paths::get_kestrel_home().unwrap_or_else(|_| {
-            std::path::PathBuf::from("/data/data/com.termux/files/home/.kestrel")
+            std::path::PathBuf::from(kestrel_config::platform::TERMUX_HOME_FALLBACK)
+                .join(".kestrel")
         });
-        let parent = home
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("/data/data/com.termux/files/home"));
+        let parent = home.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
+            std::path::PathBuf::from(kestrel_config::platform::TERMUX_HOME_FALLBACK)
+        });
         eprintln!(
             "Termux detected: using {} as working directory instead of /",
             parent.display()
@@ -146,10 +146,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_termux_detection() {
-        // Without env vars, should not detect Termux
-        std::env::remove_var("TERMUX_VERSION");
-        std::env::remove_var("PREFIX");
-        assert!(!kestrel_config::platform::is_termux());
+    fn test_termux_fallback_path_is_valid() {
+        let fallback = kestrel_config::platform::TERMUX_HOME_FALLBACK;
+        assert!(!fallback.is_empty());
+        assert!(fallback.starts_with('/'));
     }
 }

@@ -209,8 +209,12 @@ fn build_command(command: &str, dangerous: bool, max_memory_kib: u64) -> Command
             if kestrel_config::platform::is_android() {
                 cmd.arg("-c").arg(command);
             } else {
+                // The ulimit wrapper MUST use a POSIX shell ($1/$2 syntax is
+                // POSIX-only). The inner exec also uses POSIX sh to guarantee
+                // correct argument handling regardless of the user's $SHELL.
+                let posix_sh = kestrel_config::platform::get_posix_sh();
                 cmd.arg("-c")
-                    .arg(format!("ulimit -v \"$1\"; exec {} -c \"$2\"", shell))
+                    .arg(format!("ulimit -v \"$1\"; exec {posix_sh} -c \"$2\""))
                     .arg("sh")
                     .arg(max_memory_kib.to_string())
                     .arg(command);

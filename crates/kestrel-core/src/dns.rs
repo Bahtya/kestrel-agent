@@ -17,6 +17,12 @@ pub struct DnsResolver {
     inner: Arc<TokioResolver>,
 }
 
+impl Default for DnsResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DnsResolver {
     pub fn new() -> Self {
         let resolver = TokioResolver::builder_tokio()
@@ -50,6 +56,6 @@ impl Resolve for DnsResolver {
 }
 
 /// Build a shared DNS resolver suitable for injection into reqwest clients.
-pub fn build_dns_resolver() -> Arc<dyn Resolve> {
+pub fn build_dns_resolver() -> Arc<DnsResolver> {
     Arc::new(DnsResolver::new())
 }

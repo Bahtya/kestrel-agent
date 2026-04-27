@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use kestrel_bus::events::StreamChunk;
+use kestrel_bus::events::{AgentEvent, StreamChunk};
 use kestrel_config::schema::StreamingConfig;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
@@ -41,6 +41,7 @@ pub struct StreamConsumer {
     session_key: String,
     cfg: StreamingConfig,
     stream_rx: broadcast::Receiver<StreamChunk>,
+    event_rx: broadcast::Receiver<AgentEvent>,
     accumulated: String,
     message_id: Option<String>,
     last_sent_text: String,
@@ -60,6 +61,7 @@ impl StreamConsumer {
         session_key: String,
         cfg: StreamingConfig,
         stream_rx: broadcast::Receiver<StreamChunk>,
+        event_rx: broadcast::Receiver<AgentEvent>,
     ) -> Self {
         let current_edit_interval = cfg.edit_interval;
         Self {
@@ -68,6 +70,7 @@ impl StreamConsumer {
             session_key,
             cfg,
             stream_rx,
+            event_rx,
             accumulated: String::new(),
             message_id: None,
             last_sent_text: String::new(),
@@ -122,8 +125,26 @@ impl StreamConsumer {
                 self.flush_think_buffer();
             }
 
+            // Check for tool call events (segment break)
+            let mut tool_break = false;
+            let mut tool_name_opt = None;
+            loop {
+                match self.event_rx.try_recv() {
+                    Ok(AgentEvent::ToolCall {
+                        session_key,
+                        tool_name,
+                        ..
+                    }) if session_key == self.session_key => {
+                        tool_break = true;
+                        tool_name_opt = Some(tool_name);
+                    }
+                    _ => break,
+                }
+            }
+
             let elapsed = self.last_edit_time.elapsed().as_secs_f64();
             let should_edit = got_done
+                || tool_break
                 || (elapsed >= self.current_edit_interval && !self.accumulated.is_empty())
                 || self.accumulated.len() >= self.cfg.buffer_threshold;
 
@@ -145,12 +166,28 @@ impl StreamConsumer {
                 }
 
                 let mut display_text = self.accumulated.clone();
-                if !got_done {
+                if !got_done && !tool_break {
                     display_text.push_str(&self.cfg.cursor);
                 }
 
-                self.send_or_edit(&display_text, got_done).await;
+                self.send_or_edit(&display_text, got_done || tool_break)
+                    .await;
                 self.last_edit_time = std::time::Instant::now();
+            }
+
+            // Handle tool break: send tool progress message, reset for next segment
+            if tool_break {
+                if let Some(tn) = tool_name_opt {
+                    let reply_to = self.message_id.as_deref();
+                    let tool_msg = format!("Using `{}`...", tn);
+                    let _ = self
+                        .channel
+                        .send_message(&self.chat_id, &tool_msg, reply_to)
+                        .await;
+                }
+                self.accumulated.clear();
+                self.last_sent_text.clear();
+                self.message_id = None;
             }
 
             if got_done {

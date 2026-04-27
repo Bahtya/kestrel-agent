@@ -138,6 +138,24 @@ impl StreamConsumer {
                         tool_break = true;
                         tool_name_opt = Some(tool_name);
                     }
+                    Ok(AgentEvent::ToolResult {
+                        session_key,
+                        tool_name,
+                        duration_ms,
+                        ..
+                    }) if session_key == self.session_key => {
+                        let duration_str = if duration_ms >= 1000 {
+                            format!("{:.1}s", duration_ms as f64 / 1000.0)
+                        } else {
+                            format!("{}ms", duration_ms)
+                        };
+                        let reply_to = self.message_id.as_deref();
+                        let done_msg = format!("\u{2705} `{}` done ({})", tool_name, duration_str);
+                        let _ = self
+                            .channel
+                            .send_message(&self.chat_id, &done_msg, reply_to)
+                            .await;
+                    }
                     _ => break,
                 }
             }

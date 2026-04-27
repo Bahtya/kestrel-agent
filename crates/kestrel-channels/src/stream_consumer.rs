@@ -252,16 +252,16 @@ impl StreamConsumer {
                         self.edit_supported = false;
                     }
                     self.last_sent_text = text.to_string();
-                    return true;
+                    true
                 }
                 Ok(_) => {
                     self.edit_supported = false;
-                    return false;
+                    false
                 }
                 Err(e) => {
                     warn!("Stream send error: {e}");
                     self.edit_supported = false;
-                    return false;
+                    false
                 }
             }
         }
@@ -319,7 +319,7 @@ impl StreamConsumer {
     }
 }
 
-fn find_earliest_tag<'a>(text: &str, tags: &[&'a str]) -> (usize, usize) {
+fn find_earliest_tag(text: &str, tags: &[&str]) -> (usize, usize) {
     let mut best_idx = usize::MAX;
     let mut best_len = 0;
     for tag in tags {

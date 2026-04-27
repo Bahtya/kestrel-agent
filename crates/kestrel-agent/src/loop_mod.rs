@@ -179,6 +179,34 @@ impl AgentLoop {
             None
         };
 
+        // Spawn background interrupt listener that cancels sessions via
+        // InterruptRequested bus events. This bypasses the sequential mpsc
+        // bottleneck so /stop works even while an agent run is in progress.
+        let interrupt_active = self.active_sessions.clone();
+        let interrupt_bus = self.bus.clone();
+        let interrupt_running = self.running.clone();
+        let interrupt_pending = self.pending_messages.clone();
+        tokio::spawn(async move {
+            let mut event_rx = interrupt_bus.subscribe_events();
+            while *interrupt_running.read().await {
+                match event_rx.recv().await {
+                    Ok(AgentEvent::InterruptRequested { session_key }) => {
+                        if let Some((_, token)) = interrupt_active.remove(&session_key) {
+                            info!("Interrupt requested for session {}", session_key);
+                            token.cancel();
+                            // Clear any queued pending message for this session
+                            interrupt_pending.remove(&session_key);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Interrupt listener lagged by {n} events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         let inbound_rx = self.bus.consume_inbound().await;
         let mut inbound_rx = match inbound_rx {
             Some(rx) => rx,
@@ -261,43 +289,30 @@ impl AgentLoop {
         async move {
             let session_key = msg.session_key();
 
-            // Handle /stop command: cancel active agent run
+            // Handle /stop command: cancel active agent run.
+            // The Telegram poll loop already emitted InterruptRequested on the
+            // bus event channel (bypassing the mpsc bottleneck), but we also
+            // try to cancel here for non-Telegram channels or edge cases.
             let content_trimmed = msg.content.trim().to_lowercase();
             if content_trimmed == "/stop" {
-                if self.cancel_session(&session_key) {
-                    let reply = OutboundMessage {
-                        channel: msg.channel.clone(),
-                        chat_id: msg.chat_id.clone(),
-                        content: "Stopped.".to_string(),
-                        reply_to: msg.message_id.clone(),
-                        trace_id: msg.trace_id.clone(),
-                        media: vec![],
-                        metadata: Default::default(),
-                    };
-                    if let Err(e) = self.bus.publish_outbound(reply).await {
-                        error!("Failed to send /stop reply: {e}");
-                    }
+                self.cancel_session(&session_key);
 
-                    // Drain any pending message
-                    if let Some((_, pending)) = self.pending_messages.remove(&session_key) {
-                        let _ = self.process_message(pending).await;
-                    }
-                    return Ok(());
-                } else {
-                    let reply = OutboundMessage {
-                        channel: msg.channel.clone(),
-                        chat_id: msg.chat_id.clone(),
-                        content: "Nothing to stop.".to_string(),
-                        reply_to: msg.message_id.clone(),
-                        trace_id: msg.trace_id.clone(),
-                        media: vec![],
-                        metadata: Default::default(),
-                    };
-                    if let Err(e) = self.bus.publish_outbound(reply).await {
-                        error!("Failed to send /stop reply: {e}");
-                    }
-                    return Ok(());
+                let reply = OutboundMessage {
+                    channel: msg.channel.clone(),
+                    chat_id: msg.chat_id.clone(),
+                    content: "Stopped.".to_string(),
+                    reply_to: msg.message_id.clone(),
+                    trace_id: msg.trace_id.clone(),
+                    media: vec![],
+                    metadata: Default::default(),
+                };
+                if let Err(e) = self.bus.publish_outbound(reply).await {
+                    error!("Failed to send /stop reply: {e}");
                 }
+
+                // Clear any pending message for this session
+                self.pending_messages.remove(&session_key);
+                return Ok(());
             }
 
             // If session is busy, queue the message
@@ -441,7 +456,7 @@ impl AgentLoop {
 
             // Optionally spawn a StreamConsumer for Telegram streaming display
             let stream_consumer_handle = if channel_streaming && use_streaming {
-                self.spawn_stream_consumer(&msg.chat_id)
+                self.spawn_stream_consumer(&session_key, &msg.chat_id)
             } else {
                 None
             };
@@ -517,9 +532,6 @@ impl AgentLoop {
 
                 runner_with_events.run(system_prompt, messages).await
             };
-
-            // Clean up active session
-            self.active_sessions.remove(&session_key);
 
             // Wait for stream consumer to finish and get the delivered message id
             let stream_delivered_msg_id = if let Some(handle) = stream_consumer_handle {
@@ -752,9 +764,14 @@ impl AgentLoop {
                 }
             }
 
-            // Drain pending messages for this session
-            if let Some((_, pending)) = self.pending_messages.remove(&session_key) {
-                let _ = self.process_message(pending).await;
+            // Drain pending message BEFORE removing active session.
+            // This prevents a race where a new inbound message arrives between
+            // remove() and the pending drain — it would see no active session
+            // and start a concurrent process_message.
+            let pending = self.pending_messages.remove(&session_key);
+            self.active_sessions.remove(&session_key);
+            if let Some((_, pending_msg)) = pending {
+                let _ = self.process_message(pending_msg).await;
             }
 
             Ok(())
@@ -897,13 +914,20 @@ impl AgentLoop {
     /// Returns a JoinHandle that resolves to (final_text, message_id) when done.
     fn spawn_stream_consumer(
         &self,
+        session_key: &str,
         chat_id: &str,
     ) -> Option<tokio::task::JoinHandle<(String, Option<String>)>> {
         let channel = self.telegram_channel.clone()?;
         let stream_rx = self.bus.subscribe_stream();
         let cfg = StreamingConfig::default();
 
-        let consumer = StreamConsumer::new(channel, chat_id.to_string(), cfg, stream_rx);
+        let consumer = StreamConsumer::new(
+            channel,
+            chat_id.to_string(),
+            session_key.to_string(),
+            cfg,
+            stream_rx,
+        );
         let handle = tokio::spawn(async move { consumer.run().await });
 
         Some(handle)

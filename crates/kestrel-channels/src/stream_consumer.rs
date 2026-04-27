@@ -38,6 +38,7 @@ const CLOSE_THINK_TAGS: &[&str] = &[
 pub struct StreamConsumer {
     channel: Arc<dyn BaseChannel>,
     chat_id: String,
+    session_key: String,
     cfg: StreamingConfig,
     stream_rx: broadcast::Receiver<StreamChunk>,
     accumulated: String,
@@ -56,6 +57,7 @@ impl StreamConsumer {
     pub fn new(
         channel: Arc<dyn BaseChannel>,
         chat_id: String,
+        session_key: String,
         cfg: StreamingConfig,
         stream_rx: broadcast::Receiver<StreamChunk>,
     ) -> Self {
@@ -63,6 +65,7 @@ impl StreamConsumer {
         Self {
             channel,
             chat_id,
+            session_key,
             cfg,
             stream_rx,
             accumulated: String::new(),
@@ -88,11 +91,15 @@ impl StreamConsumer {
             .max(500);
 
         loop {
-            // Drain all available chunks
+            // Drain all available chunks, filtering by session_key
             let mut got_done = false;
             loop {
                 match self.stream_rx.try_recv() {
                     Ok(chunk) => {
+                        // Drop chunks from other sessions
+                        if chunk.session_key != self.session_key {
+                            continue;
+                        }
                         if chunk.done {
                             got_done = true;
                         } else {
@@ -157,14 +164,6 @@ impl StreamConsumer {
             let interval = std::time::Duration::from_millis(50);
             tokio::time::sleep(interval).await;
         }
-    }
-
-    /// Handle a segment break: finalize the current message and reset state
-    /// so the next chunk creates a fresh message.
-    pub fn reset_segment(&mut self) {
-        self.message_id = None;
-        self.accumulated = String::new();
-        self.last_sent_text = String::new();
     }
 
     /// Get the current accumulated text.

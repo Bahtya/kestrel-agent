@@ -80,8 +80,10 @@ impl StreamConsumer {
             )
             .await;
 
-        if initial_result.success {
-            message_id = initial_result.message_id;
+        if let Ok(r) = initial_result {
+            if r.success {
+                message_id = r.message_id;
+            }
         }
 
         loop {

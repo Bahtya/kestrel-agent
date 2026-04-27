@@ -771,7 +771,7 @@ impl AgentLoop {
             let pending = self.pending_messages.remove(&session_key);
             self.active_sessions.remove(&session_key);
             if let Some((_, pending_msg)) = pending {
-                let _ = self.process_message(pending_msg).await;
+                let _ = Box::pin(self.process_message(pending_msg)).await;
             }
 
             Ok(())

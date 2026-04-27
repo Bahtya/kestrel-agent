@@ -155,6 +155,11 @@ pub enum AgentEvent {
         trace_id: Option<String>,
     },
 
+    /// External interrupt request (e.g. /stop from Telegram).
+    /// Emitted directly on the bus event channel to bypass the mpsc inbound
+    /// bottleneck, allowing cancellation even while an agent run is in progress.
+    InterruptRequested { session_key: String },
+
     /// A cron job fired.
     CronFired {
         job_id: String,

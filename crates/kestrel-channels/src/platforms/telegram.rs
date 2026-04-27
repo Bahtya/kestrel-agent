@@ -1754,6 +1754,7 @@ impl BaseChannel for TelegramChannel {
             let running = self.running.clone();
             let router = self.router.clone();
             let proxy_config = self.proxy_config.clone();
+            let event_tx = self.event_tx.clone();
 
             tokio::spawn(async move {
                 Self::poll_loop(
@@ -1763,7 +1764,7 @@ impl BaseChannel for TelegramChannel {
                     running,
                     router,
                     proxy_config,
-                    self.event_tx.clone(),
+                    event_tx,
                 )
                 .await;
             });
@@ -2062,7 +2063,7 @@ impl BaseChannel for TelegramChannel {
             Err(_) => return Ok(false),
         };
 
-        #[derive(Debug, Deserialize)]
+        #[derive(Debug, Default, Deserialize)]
         struct TgBoolResult {
             #[allow(dead_code)]
             ok: bool,

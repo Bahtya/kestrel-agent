@@ -130,10 +130,8 @@ impl StreamConsumer {
             if should_edit && !self.accumulated.is_empty() {
                 // Handle oversized messages: split into chunks
                 while self.accumulated.len() > safe_limit && self.edit_supported {
-                    let split_at = self
-                        .accumulated
-                        .rfind('\n', safe_limit)
-                        .unwrap_or(safe_limit);
+                    let limit = safe_limit.min(self.accumulated.len());
+                    let split_at = self.accumulated[..limit].rfind('\n').unwrap_or(limit);
                     let chunk = self.accumulated[..split_at].to_string();
                     let ok = self.send_or_edit(&chunk, false).await;
                     if !ok {
@@ -365,7 +363,8 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut remaining = text;
     while remaining.len() > limit {
-        let split_at = remaining.rfind('\n', limit).unwrap_or(limit);
+        let cap = limit.min(remaining.len());
+        let split_at = remaining[..cap].rfind('\n').unwrap_or(cap);
         chunks.push(remaining[..split_at].to_string());
         remaining = remaining[split_at..].trim_start_matches('\n');
     }

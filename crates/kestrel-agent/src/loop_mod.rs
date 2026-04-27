@@ -221,6 +221,29 @@ impl AgentLoop {
                     // Record activity for heartbeat tracking
                     *self.agent_activity.write() = Some(chrono::Local::now());
 
+                    // Pre-process /stop: cancel active agent run without
+                    // queuing behind the current process_message call.
+                    let content_trimmed = msg.content.trim().to_lowercase();
+                    if content_trimmed == "/stop" {
+                        let session_key = msg.session_key();
+                        self.cancel_session(&session_key);
+                        self.pending_messages.remove(&session_key);
+
+                        let reply = OutboundMessage {
+                            channel: msg.channel.clone(),
+                            chat_id: msg.chat_id.clone(),
+                            content: "Stopped.".to_string(),
+                            reply_to: msg.message_id.clone(),
+                            trace_id: msg.trace_id.clone(),
+                            media: vec![],
+                            metadata: Default::default(),
+                        };
+                        if let Err(e) = self.bus.publish_outbound(reply).await {
+                            error!("Failed to send /stop reply: {e}");
+                        }
+                        continue;
+                    }
+
                     // Extract fields before msg is moved into process_message,
                     // so the timeout branch can still build a reply.
                     let timeout_channel = msg.channel.clone();
@@ -288,32 +311,6 @@ impl AgentLoop {
 
         async move {
             let session_key = msg.session_key();
-
-            // Handle /stop command: cancel active agent run.
-            // The Telegram poll loop already emitted InterruptRequested on the
-            // bus event channel (bypassing the mpsc bottleneck), but we also
-            // try to cancel here for non-Telegram channels or edge cases.
-            let content_trimmed = msg.content.trim().to_lowercase();
-            if content_trimmed == "/stop" {
-                self.cancel_session(&session_key);
-
-                let reply = OutboundMessage {
-                    channel: msg.channel.clone(),
-                    chat_id: msg.chat_id.clone(),
-                    content: "Stopped.".to_string(),
-                    reply_to: msg.message_id.clone(),
-                    trace_id: msg.trace_id.clone(),
-                    media: vec![],
-                    metadata: Default::default(),
-                };
-                if let Err(e) = self.bus.publish_outbound(reply).await {
-                    error!("Failed to send /stop reply: {e}");
-                }
-
-                // Clear any pending message for this session
-                self.pending_messages.remove(&session_key);
-                return Ok(());
-            }
 
             // If session is busy, queue the message
             if self.is_session_active(&session_key) {
@@ -469,8 +466,6 @@ impl AgentLoop {
                 let event_bus = bus_for_stream.clone();
                 let session_key_for_runner = session_key.clone();
                 let trace_id_for_runner = msg.trace_id.clone();
-                let channel_for_tool_display = self.telegram_channel.clone();
-                let chat_id_for_tool = msg.chat_id.clone();
 
                 let mut runner_with_events = AgentRunner::new(
                     self.config.clone(),
@@ -514,17 +509,6 @@ impl AgentLoop {
                                     iteration: *iteration,
                                     trace_id: trace_id_for_runner.clone(),
                                 });
-
-                                // Send tool progress message to Telegram
-                                if let Some(ref channel) = channel_for_tool_display {
-                                    let ch = channel.clone();
-                                    let cid = chat_id_for_tool.clone();
-                                    let progress =
-                                        format!("Using `{}` tool...", tool_name);
-                                    tokio::spawn(async move {
-                                        let _ = ch.send_message(&cid, &progress, None).await;
-                                    });
-                                }
                             }
                             _ => {}
                         }
@@ -919,6 +903,7 @@ impl AgentLoop {
     ) -> Option<tokio::task::JoinHandle<(String, Option<String>)>> {
         let channel = self.telegram_channel.clone()?;
         let stream_rx = self.bus.subscribe_stream();
+        let event_rx = self.bus.subscribe_events();
         let cfg = StreamingConfig::default();
 
         let consumer = StreamConsumer::new(
@@ -927,6 +912,7 @@ impl AgentLoop {
             session_key.to_string(),
             cfg,
             stream_rx,
+            event_rx,
         );
         let handle = tokio::spawn(async move { consumer.run().await });
 

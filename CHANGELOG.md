@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-27
+
+### Added
+
+- Telegram streaming via progressive `editMessageText` with configurable interval and rate limiting (#172)
+- Tool-call progress display (`Using \`shell\` tool...`) between stream segments (#172)
+- `/stop` command to cancel in-progress agent runs with session locking and pending message queue (#172)
+- New message during busy agent automatically interrupts the current run (#172)
+- `CancellationToken` support in `AgentRunner` for graceful abort between iterations (#172)
+- `StreamingConfig` with configurable edit interval, buffer threshold, and cursor (#172)
+- `StreamConsumer` component with rate-limiting, think-block filtering, and flood control adaptive backoff (#172)
+- `edit_message`/`delete_message` defaults on `BaseChannel` trait (#172)
+
+### Changed
+
+- Extended channel trait to support message editing for streaming updates (#172)
+
 ## [0.4.0] - 2026-04-27
 
 ### Added
@@ -158,7 +175,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed cargo fmt after PR merges
 - Removed legacy memory.rs, unified on kestrel-memory crate
 
-[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Bahtya/kestrel-agent/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Bahtya/kestrel-agent/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Bahtya/kestrel-agent/compare/v0.3.3...v0.4.0
 [0.3.0]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/Bahtya/kestrel-agent/compare/v0.2.4...v0.2.5

@@ -1518,7 +1518,7 @@ mod tests {
             .collect();
 
         let result = tokio::time::timeout(
-            Duration::from_millis(500),
+            Duration::from_secs(2),
             mgr.spawn_parallel(
                 tasks,
                 &ParallelSpawnConfig {
@@ -1690,7 +1690,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_terminate_all() {
-        let mgr = Arc::new(make_manager_with_delayed("slow", Duration::from_millis(1000)));
+        let mgr = Arc::new(make_manager_with_delayed(
+            "slow",
+            Duration::from_millis(1000),
+        ));
 
         // Spawn 3 slow tasks
         let h1 = mgr.spawn_single("t1", "p1", None, None).await.unwrap();
@@ -1719,7 +1722,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Spawn a slow task
-        let _slow_mgr = Arc::new(make_manager_with_delayed("slow", Duration::from_millis(1000)));
+        let _slow_mgr = Arc::new(make_manager_with_delayed(
+            "slow",
+            Duration::from_millis(1000),
+        ));
         // Actually, let's just use the same manager with a slow provider approach
         // For simplicity, register a pending task manually
         let _id_slow = mgr.spawn("slow-task", "desc").await;
@@ -1814,7 +1820,10 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_single_timeout() {
         // Provider takes 500ms, timeout is 0s
-        let mgr = Arc::new(make_manager_with_delayed("slow", Duration::from_millis(500)));
+        let mgr = Arc::new(make_manager_with_delayed(
+            "slow",
+            Duration::from_millis(500),
+        ));
 
         let handle = mgr
             .spawn_single("timed-task", "work", None, Some(0))

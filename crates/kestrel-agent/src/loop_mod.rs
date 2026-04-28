@@ -1745,10 +1745,11 @@ mod tests {
 
         al.process_message(msg).await.unwrap();
 
-        let outbound = tokio::time::timeout(std::time::Duration::from_millis(500), outbound_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let outbound =
+            tokio::time::timeout(std::time::Duration::from_millis(500), outbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
 
         assert_eq!(outbound.chat_id, "chat-1");
         assert_eq!(outbound.reply_to.as_deref(), Some("msg-1"));

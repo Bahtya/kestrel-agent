@@ -271,40 +271,32 @@ impl ChannelManager {
                         duration_ms,
                         trace_id,
                     } => {
-                        let should_send =
-                            match self.last_progress_at.get(session_key) {
-                                Some(instant) => {
-                                    instant.elapsed()
-                                        >= std::time::Duration::from_secs(10)
-                                }
-                                None => true,
-                            };
+                        let should_send = match self.last_progress_at.get(session_key) {
+                            Some(instant) => {
+                                instant.elapsed() >= std::time::Duration::from_secs(10)
+                            }
+                            None => true,
+                        };
                         if !should_send {
                             continue;
                         }
 
-                        let (platform, chat_id) =
-                            match parse_session_key(session_key) {
-                                Some(p) => p,
-                                None => continue,
-                            };
+                        let (platform, chat_id) = match parse_session_key(session_key) {
+                            Some(p) => p,
+                            None => continue,
+                        };
 
-                        let channel =
-                            match self.running_channels.get(platform) {
-                                Some(c) => c.clone(),
-                                None => continue,
-                            };
+                        let channel = match self.running_channels.get(platform) {
+                            Some(c) => c.clone(),
+                            None => continue,
+                        };
 
                         let chat_id_owned = chat_id.to_string();
                         let sk = session_key.clone();
                         let trace_id_owned = trace_id.clone();
                         let tool = tool_name.clone();
                         let dur = *duration_ms;
-                        let progress_text = format!(
-                            "✓ {} ({:.1}s)",
-                            tool,
-                            dur as f64 / 1000.0
-                        );
+                        let progress_text = format!("✓ {} ({:.1}s)", tool, dur as f64 / 1000.0);
 
                         tokio::spawn(async move {
                             let ch = channel.lock().await;
@@ -318,8 +310,7 @@ impl ChannelManager {
                                 .await;
                         });
 
-                        self.last_progress_at
-                            .insert(sk, std::time::Instant::now());
+                        self.last_progress_at.insert(sk, std::time::Instant::now());
                     }
                     _ => {}
                 },

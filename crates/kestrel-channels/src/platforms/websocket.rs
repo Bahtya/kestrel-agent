@@ -38,6 +38,11 @@
 //! {"type": "error", "id": "uuid", "code": "auth_required", "content": "..."}
 //! ```
 //!
+//! **Typing (sent before each agent response):**
+//! ```json
+//! {"type": "typing", "trace_id": "..."}
+//! ```
+//!
 //! ## Authentication
 //!
 //! When `auth.required = true`, clients must authenticate via one of:
@@ -79,11 +84,11 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8090";
 
 /// WebSocket message envelope — structured bidirectional protocol.
 ///
-/// Supports message, streaming, ping/pong, welcome, error, and auth types.
+/// Supports message, streaming, ping/pong, welcome, error, typing, and auth types.
 /// Optional fields are omitted from serialization when `None`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WsEnvelope {
-    /// Message type: message, streaming, tool_call, tool_result, error, pong, welcome, auth.
+    /// Message type: message, streaming, tool_call, tool_result, error, pong, welcome, typing, auth.
     #[serde(rename = "type")]
     pub msg_type: String,
     /// Unique message ID (UUID).
@@ -316,6 +321,24 @@ impl WebSocketChannel {
     /// Number of currently connected clients.
     pub fn client_count(&self) -> usize {
         self.clients.len()
+    }
+
+    /// Send a text reply envelope to a WebSocket client.
+    fn send_ws_reply(
+        clients: &Arc<DashMap<String, mpsc::UnboundedSender<String>>>,
+        client_id: &str,
+        text: &str,
+        reply_to: Option<&str>,
+        trace_id: &str,
+    ) {
+        let mut env = WsEnvelope::message(text);
+        env.reply_to = reply_to.map(|r| r.to_string());
+        env.trace_id = Some(trace_id.to_string());
+        if let Ok(json) = env.to_json() {
+            if let Some(client_tx) = clients.get(client_id) {
+                let _ = client_tx.send(json);
+            }
+        }
     }
 
     /// Extract a token from the WebSocket request's query string.
@@ -624,7 +647,73 @@ impl WebSocketChannel {
                 continue;
             }
 
-            let message_type = if content_text.starts_with('/') {
+            // Generate or adopt trace_id for full-chain tracing.
+            let trace_id = envelope_trace_id.unwrap_or_else(|| {
+                format!(
+                    "kst_ws_{}_{}",
+                    &client_id[..8.min(client_id.len())],
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                )
+            });
+
+            // --- Local command interception ---
+            let mut forward_content = content_text.clone();
+            let mut handled = false;
+
+            if content_text.starts_with('/') {
+                let session_key = format!("websocket:{}", client_id);
+
+                // /reset: needs session key.
+                if crate::commands::matches_command(&content_text, "reset") {
+                    let response = crate::commands::handle_reset(&session_key);
+                    Self::send_ws_reply(
+                        &clients,
+                        &client_id,
+                        &response,
+                        envelope_msg_id.as_deref(),
+                        &trace_id,
+                    );
+                    handled = true;
+                }
+                // /settings: text-based interaction for WebSocket (no inline keyboard).
+                else if crate::commands::matches_command(&content_text, "settings") {
+                    let response = crate::commands::handle_ws_settings(&content_text);
+                    Self::send_ws_reply(
+                        &clients,
+                        &client_id,
+                        &response,
+                        envelope_msg_id.as_deref(),
+                        &trace_id,
+                    );
+                    handled = true;
+                }
+                // General command dispatch.
+                else if let Some(dispatch) =
+                    crate::commands::try_handle_command(&content_text).await
+                {
+                    match dispatch {
+                        crate::commands::CommandDispatch::Respond(response) => {
+                            Self::send_ws_reply(
+                                &clients,
+                                &client_id,
+                                &response.text,
+                                envelope_msg_id.as_deref(),
+                                &trace_id,
+                            );
+                            handled = true;
+                        }
+                        crate::commands::CommandDispatch::Rewrite(rewritten) => {
+                            forward_content = rewritten;
+                        }
+                    }
+                }
+            }
+
+            if handled {
+                continue;
+            }
+
+            let message_type = if forward_content.starts_with('/') {
                 MessageType::Command
             } else {
                 MessageType::Text
@@ -647,20 +736,11 @@ impl WebSocketChannel {
             }
             metadata.insert("ws_client_id".to_string(), serde_json::json!(client_id));
 
-            // Generate or adopt trace_id for full-chain tracing.
-            let trace_id = envelope_trace_id.unwrap_or_else(|| {
-                format!(
-                    "kst_ws_{}_{}",
-                    &client_id[..8.min(client_id.len())],
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                )
-            });
-
             let inbound = InboundMessage {
                 channel: Platform::WebSocket,
                 sender_id: client_id.clone(),
                 chat_id: client_id.clone(),
-                content: content_text,
+                content: forward_content,
                 media: vec![],
                 metadata,
                 source: Some(source),
@@ -1800,5 +1880,146 @@ mod tests {
             trace_id: None,
         });
         let _ = handle.await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Command interception tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_command_help_intercepted_locally() {
+        let (mut channel, addr, mut rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        // Send /help — should be intercepted locally.
+        let envelope = WsEnvelope::message("/help");
+        ws.send(WsMessage::Text(envelope.to_json().unwrap().into()))
+            .await
+            .unwrap();
+
+        // Should receive a reply with help text.
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "message");
+        let content = parsed["content"].as_str().unwrap();
+        assert!(content.contains("/help"));
+        assert!(content.contains("/status"));
+
+        // No message should be forwarded to the bus.
+        let bus_result = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await;
+        assert!(bus_result.is_err(), "command should not reach the bus");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_command_status_intercepted_locally() {
+        let (mut channel, addr, _rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        let envelope = WsEnvelope::message("/status");
+        ws.send(WsMessage::Text(envelope.to_json().unwrap().into()))
+            .await
+            .unwrap();
+
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "message");
+        let content = parsed["content"].as_str().unwrap();
+        assert!(content.contains("Agent:"));
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_command_settings_intercepted_locally() {
+        let (mut channel, addr, _rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        let envelope = WsEnvelope::message("/settings");
+        ws.send(WsMessage::Text(envelope.to_json().unwrap().into()))
+            .await
+            .unwrap();
+
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["type"], "message");
+        let content = parsed["content"].as_str().unwrap();
+        assert!(content.contains("Settings"));
+        assert!(content.contains("Model:"));
+        // Should NOT mention inline keyboard actions.
+        assert!(!content.contains("Tap a button"));
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_command_reply_includes_trace_id() {
+        let (mut channel, addr, _rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        let mut envelope = WsEnvelope::message("/help");
+        envelope.trace_id = Some("test-trace-123".to_string());
+        ws.send(WsMessage::Text(envelope.to_json().unwrap().into()))
+            .await
+            .unwrap();
+
+        let parsed = drain_next_text(&mut ws).await;
+        assert_eq!(parsed["trace_id"], "test-trace-123");
+
+        channel.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_normal_message_forwarded_to_bus() {
+        let (mut channel, addr, mut rx) = setup_server().await;
+        channel.connect().await.unwrap();
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _welcome = drain_next_text(&mut ws).await;
+
+        // Non-command message should reach the bus.
+        let envelope = WsEnvelope::message("hello agent");
+        ws.send(WsMessage::Text(envelope.to_json().unwrap().into()))
+            .await
+            .unwrap();
+
+        let inbound = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbound.content, "hello agent");
+
+        channel.disconnect().await.unwrap();
     }
 }

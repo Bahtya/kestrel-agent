@@ -16,7 +16,7 @@ use parking_lot::RwLock;
 use crate::platforms::telegram::{InlineKeyboardBuilder, InlineKeyboardMarkup};
 
 /// Model names available for cycling via /settings.
-const MODEL_CYCLE: &[&str] = &["gpt-4o", "claude-sonnet-4-6", "deepseek-chat"];
+const MODEL_CYCLE: &[&str] = &["gpt-4o", "claude-sonnet-4-6", "deepseek-chat", "deepseek/deepseek-v4-flash"];
 
 static SKILL_REGISTRY: LazyLock<RwLock<Option<Arc<SkillRegistry>>>> =
     LazyLock::new(|| RwLock::new(None));

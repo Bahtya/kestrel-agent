@@ -22,6 +22,7 @@ const MODEL_KEYWORD_MAP: &[(&str, &str)] = &[
     ("o3", "openai"),
     ("o4", "openai"),
     ("chatgpt", "openai"),
+    ("deepseek-v4", "openrouter"),
     ("deepseek", "deepseek"),
     ("gemini", "gemini"),
     ("groq", "groq"),

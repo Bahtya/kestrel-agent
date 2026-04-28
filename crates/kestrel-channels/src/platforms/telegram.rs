@@ -3925,8 +3925,9 @@ mod tests {
         TelegramChannel::register_default_handlers(&mut router, &session_keys);
         assert!(router.has_handler("menu"));
         assert!(router.has_handler("settings"));
+        assert!(router.has_handler("settings_view"));
         assert!(router.has_handler("history"));
-        assert_eq!(router.handler_count(), 3);
+        assert_eq!(router.handler_count(), 4);
     }
 
     #[test]
@@ -3936,7 +3937,7 @@ mod tests {
         TelegramChannel::register_default_handlers(&mut router, &session_keys);
         TelegramChannel::register_default_handlers(&mut router, &session_keys);
         // Should not double-register.
-        assert_eq!(router.handler_count(), 3);
+        assert_eq!(router.handler_count(), 4);
     }
 
     #[tokio::test]
@@ -3952,7 +3953,7 @@ mod tests {
             message_id: "1".into(),
             sender_id: "1".into(),
             callback_query_id: "cb_settings".into(),
-            action: CallbackAction::parse("settings:page:0").unwrap(),
+            action: CallbackAction::parse("settings_view:page:0").unwrap(),
         };
 
         let resp = router.dispatch(ctx).await.unwrap();

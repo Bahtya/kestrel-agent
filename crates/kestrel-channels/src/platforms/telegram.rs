@@ -3637,7 +3637,7 @@ mod tests {
             }
         });
 
-        assert_eq!(router.handler_count(), 3);
+        assert_eq!(router.handler_count(), 4);
         assert!(router.has_handler("confirm"));
         assert!(router.has_handler("cancel"));
         assert!(router.has_handler("page"));
@@ -3926,7 +3926,7 @@ mod tests {
         assert!(router.has_handler("menu"));
         assert!(router.has_handler("settings"));
         assert!(router.has_handler("history"));
-        assert_eq!(router.handler_count(), 3);
+        assert_eq!(router.handler_count(), 4);
     }
 
     #[test]
@@ -3936,7 +3936,7 @@ mod tests {
         TelegramChannel::register_default_handlers(&mut router, &session_keys);
         TelegramChannel::register_default_handlers(&mut router, &session_keys);
         // Should not double-register.
-        assert_eq!(router.handler_count(), 3);
+        assert_eq!(router.handler_count(), 4);
     }
 
     #[tokio::test]

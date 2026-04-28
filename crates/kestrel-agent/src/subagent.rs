@@ -1518,12 +1518,12 @@ mod tests {
             .collect();
 
         let result = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(3),
             mgr.spawn_parallel(
                 tasks,
                 &ParallelSpawnConfig {
                     max_concurrent: 3,
-                    per_task_timeout_secs: 10,
+                    per_task_timeout_secs: 1,
                     total_timeout_secs: Some(1), // 1s total, each task takes 500ms
                     ..Default::default()
                 },

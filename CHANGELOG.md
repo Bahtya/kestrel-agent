@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.5.4] - 2026-04-29
+
+### New Features
+- Real-time tool call streaming with icon + argument preview (#207)
+
 ## [v0.5.3] - 2026-04-29
 
 ### Bug Fixes

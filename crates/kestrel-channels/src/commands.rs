@@ -664,7 +664,13 @@ pub async fn handle_ws_settings(text: &str) -> String {
             ws_settings_models_list(rest).await
         }
         "streaming" => ws_settings_streaming_toggle(),
-        _ => "Usage:\n/settings model [next|<name>]\n/settings models [refresh]\n/settings streaming".to_string(),
+        "gateway" => ws_settings_gateway(),
+        "timeout" => {
+            let rest = parts.next().unwrap_or("").trim();
+            ws_settings_models_list(rest).await
+        }
+        "retry" => ws_settings_retry(),
+        _ => "Usage:\n/settings model [next|<name>]\n/settings models [refresh]\n/settings streaming\n/settings gateway\n/settings timeout [key secs]\n/settings retry".to_string(),
     }
 }
 
@@ -2537,5 +2543,65 @@ agent:
         let _dir = with_empty_home();
         let result = handle_ws_settings("/settings models").await;
         assert!(result.contains("No models discovered"));
+    }
+
+    #[test]
+    fn test_ws_settings_gateway_shows_config() {
+        let yaml = r#"
+api:
+  host: "0.0.0.0"
+  port: 9090
+channels:
+  websocket:
+    enabled: true
+    listen_addr: "0.0.0.0:9091"
+"#;
+        let _dir = with_temp_config(yaml);
+        let result = ws_settings_gateway();
+        assert!(result.contains("Gateway settings"));
+        assert!(result.contains("API host: 0.0.0.0"));
+        assert!(result.contains("API port: 9090"));
+        assert!(result.contains("0.0.0.0:9091"));
+    }
+
+    #[test]
+    fn test_ws_settings_timeout_shows_all() {
+        let _dir = with_empty_home();
+        let result = ws_settings_timeout("");
+        assert!(result.contains("Timeout settings"));
+        assert!(result.contains("tool_timeout:"));
+        assert!(result.contains("connect_timeout:"));
+        assert!(result.contains("idle_timeout:"));
+        assert!(result.contains("message_timeout:"));
+    }
+
+    #[test]
+    fn test_ws_settings_timeout_set_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "agent:\n  model: gpt-4o\n  tool_timeout: 120\n").unwrap();
+        let result = ws_settings_timeout("tool_timeout 300");
+        assert!(result.contains("tool_timeout: 120s → 300s"));
+    }
+
+    #[test]
+    fn test_ws_settings_timeout_invalid_key() {
+        let result = ws_settings_timeout("bogus 99");
+        assert!(result.contains("Unknown timeout key"));
+    }
+
+    #[test]
+    fn test_ws_settings_timeout_invalid_value() {
+        let result = ws_settings_timeout("tool_timeout abc");
+        assert!(result.contains("Invalid value"));
+    }
+
+    #[test]
+    fn test_ws_settings_retry_shows_defaults() {
+        let result = ws_settings_retry();
+        assert!(result.contains("Retry policy"));
+        assert!(result.contains("max_retries: 3"));
+        assert!(result.contains("jitter: true"));
     }
 }

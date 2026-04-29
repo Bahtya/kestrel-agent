@@ -151,15 +151,19 @@ impl AgentRunner {
     /// Run the agent loop with a system prompt and message history.
     /// Uses streaming if a stream_tx is configured.
     pub async fn run(&self, system_prompt: String, messages: Vec<Message>) -> Result<RunResult> {
-        let model = &self.config.agent.model;
+        let config_model = &self.config.agent.model;
         let max_iterations = self.config.agent.max_iterations;
         let temperature = self.config.agent.temperature;
         let max_tokens = self.config.agent.max_tokens;
 
         let provider = self
             .providers
-            .get_provider(model)
-            .with_context(|| format!("No provider available for model: {}", model))?;
+            .get_provider(config_model)
+            .with_context(|| format!("No provider available for model: {}", config_model))?;
+
+        // Strip the provider prefix so the API receives a clean model name.
+        // e.g. "opencode-go/kimi-k2.6" → "kimi-k2.6"
+        let model = self.providers.strip_provider_prefix(config_model);
 
         info!(
             llm_model = %model,

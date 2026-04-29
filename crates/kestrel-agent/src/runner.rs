@@ -18,8 +18,8 @@ use tracing::{debug, info, warn};
 /// Map a tool name to its display icon.
 fn tool_icon(name: &str) -> &'static str {
     match name {
-        "exec" | "shell" => "\u{1f4bb}",        // 💻 terminal
-        "write_file" => "\u{270d}\u{fe0f}",     // ✍️ write
+        "exec" | "shell" => "\u{1f4bb}",         // 💻 terminal
+        "write_file" => "\u{270d}\u{fe0f}",      // ✍️ write
         "read_file" => "\u{1f4d6}",              // 📖 read
         "edit_file" => "\u{270f}\u{fe0f}",       // ✏️ edit
         "list_dir" => "\u{1f4c2}",               // 📂 directory

@@ -252,6 +252,39 @@ impl ProviderRegistry {
         self.default_provider.as_deref()
     }
 
+    /// Strip the provider prefix from a qualified model name.
+    ///
+    /// If `model` contains a `/` and the part before it matches a known provider
+    /// (either by keyword or exact name), returns the part after the `/`.
+    /// Otherwise returns `model` unchanged.
+    ///
+    /// Examples:
+    /// - `"opencode-go/kimi-k2.6"` → `"kimi-k2.6"` (matches "opencode-go" keyword)
+    /// - `"opencode_go/glm-5.1"` → `"glm-5.1"` (matches "opencode_go" keyword)
+    /// - `"claude-sonnet-4-6"` → `"claude-sonnet-4-6"` (no slash, unchanged)
+    /// - `"deepseek/deepseek-v4-flash"` → `"deepseek-v4-flash"` (matches "deepseek" keyword)
+    pub fn strip_provider_prefix(&self, model: &str) -> String {
+        let Some((prefix, rest)) = model.split_once('/') else {
+            return model.to_string();
+        };
+        if rest.is_empty() {
+            return model.to_string();
+        }
+        let lower_prefix = prefix.to_lowercase();
+        for (keyword, provider_name) in MODEL_KEYWORD_MAP {
+            if (lower_prefix == *keyword || lower_prefix == *provider_name)
+                && self.providers.contains_key(*provider_name)
+            {
+                return rest.to_string();
+            }
+        }
+        // Also check if prefix is an exact provider name (handles custom providers).
+        if self.providers.contains_key(prefix) {
+            return rest.to_string();
+        }
+        model.to_string()
+    }
+
     /// Get a provider for a given model.
     pub fn get_provider(&self, model: &str) -> Option<Arc<dyn LlmProvider>> {
         if let Some(name) = self.resolve_provider_name(model) {
@@ -371,5 +404,78 @@ mod tests {
         let reg = ProviderRegistry::default();
         assert!(reg.provider_names().is_empty());
         assert!(reg.default_provider.is_none());
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_with_keyword() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("opencode_go", MockProvider::new("opencode_go", "glm"));
+
+        // "opencode-go/kimi-k2.6" → "kimi-k2.6"
+        assert_eq!(
+            reg.strip_provider_prefix("opencode-go/kimi-k2.6"),
+            "kimi-k2.6"
+        );
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_with_provider_name() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("opencode_go", MockProvider::new("opencode_go", "glm"));
+
+        // "opencode_go/glm-5.1" → "glm-5.1"
+        assert_eq!(reg.strip_provider_prefix("opencode_go/glm-5.1"), "glm-5.1");
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_no_slash() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("openai", MockProvider::new("openai", "gpt"));
+
+        // No slash → unchanged
+        assert_eq!(reg.strip_provider_prefix("gpt-4o"), "gpt-4o");
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_unknown_prefix() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("openai", MockProvider::new("openai", "gpt"));
+
+        // Unknown prefix with slash → unchanged
+        assert_eq!(reg.strip_provider_prefix("unknown/model"), "unknown/model");
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_deepseek() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("deepseek", MockProvider::new("deepseek", "deepseek"));
+        reg.register("openrouter", MockProvider::new("openrouter", "deepseek"));
+
+        // "deepseek/deepseek-v4-flash" → "deepseek-v4-flash"
+        assert_eq!(
+            reg.strip_provider_prefix("deepseek/deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_empty_after_slash() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("opencode_go", MockProvider::new("opencode_go", "glm"));
+
+        // Empty after slash → unchanged
+        assert_eq!(reg.strip_provider_prefix("opencode-go/"), "opencode-go/");
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_custom_provider() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("my_custom", MockProvider::new("my_custom", "test"));
+
+        // Custom provider by exact name match
+        assert_eq!(
+            reg.strip_provider_prefix("my_custom/mymodel-v1"),
+            "mymodel-v1"
+        );
     }
 }

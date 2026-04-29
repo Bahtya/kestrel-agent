@@ -40,13 +40,17 @@ fn configured_skill_registry() -> Option<Arc<SkillRegistry>> {
 }
 
 /// Get or initialize the shared model catalog.
-async fn get_model_catalog() -> &'static ModelCatalog {
+pub async fn get_model_catalog_static() -> &'static ModelCatalog {
     MODEL_CATALOG
         .get_or_init(|| async {
             let config = load_config(None).unwrap_or_default();
             kestrel_providers::build_catalog(&config)
         })
         .await
+}
+
+async fn get_model_catalog() -> &'static ModelCatalog {
+    get_model_catalog_static().await
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +143,15 @@ fn command_name(text: &str) -> Option<&str> {
 fn is_reserved_command(command: &str) -> bool {
     matches!(
         command.to_ascii_lowercase().as_str(),
-        "help" | "status" | "validate" | "skill" | "settings" | "history" | "reset" | "menu"
+        "help"
+            | "status"
+            | "validate"
+            | "skill"
+            | "settings"
+            | "history"
+            | "reset"
+            | "menu"
+            | "models"
     )
 }
 
@@ -253,6 +265,10 @@ pub async fn try_handle_command(text: &str) -> Option<CommandDispatch> {
         Some(CommandDispatch::Respond(handle_settings()))
     } else if matches_command(text, "history") {
         Some(CommandDispatch::Respond(handle_history_page(0)))
+    } else if matches_command(text, "models") {
+        Some(CommandDispatch::Respond(
+            handle_models_provider_list().await,
+        ))
     } else if matches_command(text, "skill") {
         Some(CommandDispatch::Respond(handle_skill_command(text).await))
     } else if let (Some(registry), Some(name)) = (configured_skill_registry(), command_name(text)) {
@@ -447,6 +463,7 @@ fn handle_help() -> String {
     let _ = writeln!(out, "/skill    - List, view, and search registered skills");
     let _ = writeln!(out, "/validate - Validate config.yaml and show results");
     let _ = writeln!(out, "/settings - Toggle preferences (notifications, model)");
+    let _ = writeln!(out, "/models   - Browse and select models from providers");
     let _ = writeln!(out, "/history  - Browse recent conversation history");
     let _ = writeln!(out, "/reset    - Reset conversation context for this chat");
     let _ = writeln!(out, "/menu     - Show interactive menu");
@@ -546,8 +563,8 @@ fn build_settings_response(config: &Config) -> CommandResponse {
 
     let keyboard = InlineKeyboardBuilder::new()
         .row_pair(
-            "Model: switch",
-            "settings:model:switch",
+            "Models: pick",
+            "models:providers",
             "Streaming: toggle",
             "settings:streaming:toggle",
         )
@@ -1578,6 +1595,149 @@ pub fn handle_reset(session_key: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// /models implementation (two-level provider → model selection)
+// ---------------------------------------------------------------------------
+
+/// Show the provider list as an inline keyboard.
+///
+/// Level 1: User picks a provider to see its models.
+pub async fn handle_models_provider_list() -> CommandResponse {
+    let config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
+    };
+
+    let current_model = config.agent.model.clone();
+
+    let catalog = get_model_catalog().await;
+    let models = catalog.list_all_models().await;
+
+    if models.is_empty() {
+        return CommandResponse::text(
+            "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml.",
+        );
+    }
+
+    // Group models by provider and count.
+    let mut provider_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for m in &models {
+        *provider_counts.entry(m.provider.clone()).or_insert(0) += 1;
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Select a provider:");
+    let _ = writeln!(out, "Current: {}", current_model);
+
+    let mut kb = InlineKeyboardBuilder::new();
+    for (provider, count) in &provider_counts {
+        let label = format!("{} ({} models)", provider, count);
+        let data = format!("models:provider:{}", provider);
+        kb = kb.button(&label, &data);
+        kb = kb.new_row();
+    }
+    kb = kb.button("Refresh", "models:refresh");
+
+    CommandResponse::with_keyboard(out, kb.build())
+}
+
+/// Show models for a specific provider as an inline keyboard.
+///
+/// Level 2: User picks a model to set as active.
+pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
+    let config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
+    };
+
+    let current_model = config.agent.model.clone();
+
+    let catalog = get_model_catalog().await;
+    let models = catalog.list_provider_models(provider).await;
+
+    if models.is_empty() {
+        return CommandResponse::text(format!("No models found for provider: {}", provider));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "[{}] models:", provider);
+    let _ = writeln!(out, "Current: {}", current_model);
+
+    let mut kb = InlineKeyboardBuilder::new();
+    for m in &models {
+        let marker = if m.qualified_id() == current_model || m.id == current_model {
+            " *"
+        } else {
+            ""
+        };
+        let ctx = m
+            .context_length
+            .map(|c| format!(" ({}K)", c / 1024))
+            .unwrap_or_default();
+        let label = format!("{}{}{}", m.id, ctx, marker);
+        let data = format!("models:select:{}/{}", m.provider, m.id);
+        kb = kb.button(&label, &data);
+        kb = kb.new_row();
+    }
+    kb = kb.button("<< Back to providers", "models:providers");
+
+    CommandResponse::with_keyboard(out, kb.build())
+}
+
+/// Select a model (provider/model_id format) and persist to config.
+pub fn handle_models_select(qualified_id: &str) -> CommandResponse {
+    let mut config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
+    };
+
+    let old = config.agent.model.clone();
+    config.agent.model = qualified_id.to_string();
+
+    if let Err(e) = save_config_to_default(&config) {
+        return CommandResponse::text(format!("Failed to save config: {e}"));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Model changed:");
+    let _ = writeln!(out, "  {} -> {}", old, qualified_id);
+
+    let keyboard = InlineKeyboardBuilder::new()
+        .button("Select another model", "models:providers")
+        .new_row()
+        .button("Settings", "settings:show")
+        .build();
+
+    CommandResponse::with_keyboard(out, keyboard)
+}
+
+/// Handle a callback from the /models inline keyboard.
+pub fn handle_models_callback(action: &str, payload: Option<&str>) -> Option<CommandResponse> {
+    match action {
+        "providers" => {
+            // Synchronous wrapper — we need to block on async here.
+            // Use tokio::task::block_in_place for a minimal synchronous path.
+            // Actually, let's just show the provider list synchronously from cached data.
+            // The async version is called from the router.
+            None // Handled by the async router
+        }
+        "provider" => {
+            // Handled by async router
+            None
+        }
+        "select" => {
+            let qualified_id = payload?;
+            Some(handle_models_select(qualified_id))
+        }
+        "refresh" => {
+            // Handled by async router
+            None
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Callback handler (for inline keyboard button presses)
 // ---------------------------------------------------------------------------
 
@@ -1599,6 +1759,7 @@ pub fn handle_callback(data: &str) -> Option<CommandResponse> {
         "settings" => match action {
             "model" if payload == Some("switch") => Some(handle_settings_model_switch()),
             "streaming" if payload == Some("toggle") => Some(handle_settings_streaming_toggle()),
+            "show" => Some(handle_settings()),
             _ => None,
         },
         "history" => {
@@ -2112,12 +2273,12 @@ providers:
         let _dir = with_temp_config(yaml);
         let r = handle_settings();
         let kb = r.keyboard.unwrap();
-        // Should have the row with model switch + streaming toggle.
+        // Should have the row with models picker + streaming toggle.
         assert!(!kb.inline_keyboard.is_empty());
         let row = &kb.inline_keyboard[0];
         assert_eq!(row.len(), 2);
-        assert!(row[0].callback_data.as_ref().unwrap().contains("settings"));
-        assert!(row[1].callback_data.as_ref().unwrap().contains("settings"));
+        assert!(row[0].callback_data.as_ref().unwrap().contains("models"));
+        assert!(row[1].callback_data.as_ref().unwrap().contains("streaming"));
     }
 
     // -- /settings tests (paginated view) -------------------------------------
@@ -2770,5 +2931,74 @@ agent:
         let _dir = with_empty_home();
         let result = handle_ws_settings("/settings models").await;
         assert!(result.contains("No models discovered"));
+    }
+
+    // -- /models tests (Telegram two-level selection) -------------------------
+
+    #[tokio::test]
+    async fn test_handle_models_provider_list_no_models() {
+        let _dir = with_empty_home();
+        let resp = handle_models_provider_list().await;
+        assert!(resp.text.contains("No models discovered"));
+        assert!(resp.keyboard.is_none());
+    }
+
+    #[test]
+    fn test_handle_models_select_sets_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+agent:
+  model: "gpt-4o"
+"#;
+        let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, yaml).unwrap();
+
+        let resp = handle_models_select("opencode_go/kimi-k2.6");
+        assert!(resp.text.contains("Model changed"));
+        assert!(resp.text.contains("gpt-4o"));
+        assert!(resp.text.contains("opencode_go/kimi-k2.6"));
+        assert!(resp.keyboard.is_some());
+    }
+
+    #[test]
+    fn test_handle_models_select_invalid_config() {
+        // No KESTREL_HOME set — should handle gracefully.
+        let resp = handle_models_select("test/model");
+        assert!(resp.text.contains("Failed to") || resp.text.contains("Model changed"));
+    }
+
+    #[test]
+    fn test_handle_models_callback_select() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+agent:
+  model: "gpt-4o"
+"#;
+        let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, yaml).unwrap();
+
+        let resp = handle_models_callback("select", Some("openai/gpt-4o-mini")).unwrap();
+        assert!(resp.text.contains("Model changed"));
+    }
+
+    #[test]
+    fn test_handle_models_callback_unknown_action() {
+        assert!(handle_models_callback("unknown", None).is_none());
+    }
+
+    #[test]
+    fn test_handle_models_callback_select_no_payload() {
+        assert!(handle_models_callback("select", None).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_try_handle_command_models() {
+        let _dir = with_empty_home();
+        let result = try_handle_command("/models").await;
+        assert!(result.is_some());
+        let resp = expect_response(result.unwrap());
+        assert!(resp.text.contains("No models discovered"));
     }
 }

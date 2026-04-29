@@ -49,8 +49,7 @@ impl AnthropicProvider {
 
     /// Create with a custom HTTP client (useful for testing).
     pub fn with_client(config: AnthropicConfig, client: Client) -> Self {
-        let streaming_client = build_streaming_client(false)
-            .unwrap_or_else(|_| client.clone());
+        let streaming_client = build_streaming_client(false).unwrap_or_else(|_| client.clone());
         Self {
             config,
             client,
@@ -77,8 +76,7 @@ impl AnthropicProvider {
         client: Client,
         retry: RetryConfig,
     ) -> Self {
-        let streaming_client = build_streaming_client(false)
-            .unwrap_or_else(|_| client.clone());
+        let streaming_client = build_streaming_client(false).unwrap_or_else(|_| client.clone());
         Self {
             config,
             client,

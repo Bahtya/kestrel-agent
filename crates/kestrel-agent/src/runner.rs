@@ -296,10 +296,8 @@ impl AgentRunner {
             let mut first_byte_logged = false;
             let mut full_content = String::new();
             let mut usage: Option<Usage> = None;
-            let mut tool_calls_map: std::collections::HashMap<
-                usize,
-                (String, String, String),
-            > = std::collections::HashMap::new();
+            let mut tool_calls_map: std::collections::HashMap<usize, (String, String, String)> =
+                std::collections::HashMap::new();
 
             let first_chunk_timeout = std::time::Duration::from_secs(15);
             let idle_timeout = std::time::Duration::from_secs(30);
@@ -337,8 +335,7 @@ impl AgentRunner {
                         );
                         if stream_attempt < max_stream_retries {
                             stream_attempt += 1;
-                            let backoff =
-                                std::time::Duration::from_millis(500 << stream_attempt);
+                            let backoff = std::time::Duration::from_millis(500 << stream_attempt);
                             warn!(
                                 attempt = stream_attempt,
                                 max_retries = max_stream_retries,
@@ -361,8 +358,7 @@ impl AgentRunner {
                             || err_str.contains("timeout");
                         if is_stream_err && stream_attempt < max_stream_retries {
                             stream_attempt += 1;
-                            let backoff =
-                                std::time::Duration::from_millis(500 << stream_attempt);
+                            let backoff = std::time::Duration::from_millis(500 << stream_attempt);
                             warn!(
                                 attempt = stream_attempt,
                                 max_retries = max_stream_retries,
@@ -449,8 +445,7 @@ impl AgentRunner {
             })
             .collect();
         tool_calls_list.sort_by_key(|(idx, _)| *idx);
-        let tool_calls: Vec<CoreToolCall> =
-            tool_calls_list.into_iter().map(|(_, tc)| tc).collect();
+        let tool_calls: Vec<CoreToolCall> = tool_calls_list.into_iter().map(|(_, tc)| tc).collect();
 
         Ok(crate::StreamingResult {
             content: if full_content.is_empty() && tool_calls.is_empty() {

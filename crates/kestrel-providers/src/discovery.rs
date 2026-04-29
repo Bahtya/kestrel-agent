@@ -56,12 +56,7 @@ pub struct OpenAiCompatDiscovery {
 }
 
 impl OpenAiCompatDiscovery {
-    pub fn new(
-        base_url: String,
-        api_key: String,
-        provider_name: String,
-        no_proxy: bool,
-    ) -> Self {
+    pub fn new(base_url: String, api_key: String, provider_name: String, no_proxy: bool) -> Self {
         Self {
             base_url,
             api_key,
@@ -90,7 +85,10 @@ impl ModelDiscovery for OpenAiCompatDiscovery {
         let client = crate::build_client(self.no_proxy)?;
         let url = format!("{}/models", self.base_url);
 
-        debug!("Fetching models from {} for provider {}", url, self.provider_name);
+        debug!(
+            "Fetching models from {} for provider {}",
+            url, self.provider_name
+        );
 
         let resp = client
             .get(&url)
@@ -106,7 +104,7 @@ impl ModelDiscovery for OpenAiCompatDiscovery {
         }
 
         let body: ModelsResponse = resp.json().await?;
-        let models = body
+        let models: Vec<_> = body
             .data
             .into_iter()
             .map(|m| ModelInfo {

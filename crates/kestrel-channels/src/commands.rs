@@ -723,7 +723,8 @@ async fn ws_settings_models_list(arg: &str) -> String {
 
     let models = catalog.list_all_models().await;
     if models.is_empty() {
-        return "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml.".to_string();
+        return "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml."
+            .to_string();
     }
 
     let mut out = String::new();
@@ -799,11 +800,7 @@ fn ws_settings_gateway() -> String {
             config.api.allowed_origins.join(", ")
         }
     );
-    let _ = writeln!(
-        out,
-        "Max body size: {} bytes",
-        config.api.max_body_size
-    );
+    let _ = writeln!(out, "Max body size: {} bytes", config.api.max_body_size);
     let _ = writeln!(
         out,
         "WebSocket: {}",
@@ -835,7 +832,11 @@ fn ws_settings_timeout(arg: &str) -> String {
         let _ = writeln!(out, "Timeout settings (seconds)");
         let _ = writeln!(out, "tool_timeout: {}", config.agent.tool_timeout);
         let _ = writeln!(out, "connect_timeout: {}", config.agent.connect_timeout);
-        let _ = writeln!(out, "first_byte_timeout: {}", config.agent.first_byte_timeout);
+        let _ = writeln!(
+            out,
+            "first_byte_timeout: {}",
+            config.agent.first_byte_timeout
+        );
         let _ = writeln!(out, "idle_timeout: {}", config.agent.idle_timeout);
         let _ = writeln!(out, "message_timeout: {}", config.agent.message_timeout);
         let _ = writeln!(out, "\nUsage: /settings timeout <key> <secs>");
@@ -857,7 +858,12 @@ fn ws_settings_timeout(arg: &str) -> String {
 
     let secs: u64 = match value_str.parse() {
         Ok(v) => v,
-        Err(_) => return format!("Invalid value '{}'. Must be a number in seconds.", value_str),
+        Err(_) => {
+            return format!(
+                "Invalid value '{}'. Must be a number in seconds.",
+                value_str
+            )
+        }
     };
 
     let mut config = match load_config(None) {
@@ -911,7 +917,10 @@ fn ws_settings_retry() -> String {
     let _ = writeln!(out, "retryable_codes: 429, 500, 502, 503");
     let _ = writeln!(out, "max_retries_503: 5");
     let _ = writeln!(out, "max_delay_503: 30s");
-    let _ = writeln!(out, "\nRetry is configured per-provider with circuit breaking.");
+    let _ = writeln!(
+        out,
+        "\nRetry is configured per-provider with circuit breaking."
+    );
     out
 }
 

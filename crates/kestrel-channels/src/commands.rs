@@ -646,17 +646,13 @@ pub fn handle_ws_settings(text: &str) -> String {
             ws_settings_model_set(rest)
         }
         "streaming" => ws_settings_streaming_toggle(),
-<<<<<<< Updated upstream
-        _ => "Usage:\n/settings model [next|<name>]\n/settings streaming".to_string(),
-=======
         "gateway" => ws_settings_gateway(),
         "timeout" => {
             let rest = parts.next().unwrap_or("").trim();
             ws_settings_timeout(rest)
         }
         "retry" => ws_settings_retry(),
-        _ => "Usage:\n/settings model [next|<name>]\n/settings models [refresh]\n/settings streaming\n/settings gateway\n/settings timeout [key secs]\n/settings retry".to_string(),
->>>>>>> Stashed changes
+        _ => "Usage:\n/settings model [next|<name>]\n/settings streaming\n/settings gateway\n/settings timeout [key secs]\n/settings retry".to_string(),
     }
 }
 
@@ -2609,15 +2605,6 @@ agent:
         let result = handle_ws_settings("/settings foobar");
         assert!(result.contains("Usage"));
     }
-<<<<<<< Updated upstream
-=======
-
-    #[tokio::test]
-    async fn test_ws_settings_models_empty() {
-        let _dir = with_empty_home();
-        let result = handle_ws_settings("/settings models").await;
-        assert!(result.contains("No models discovered"));
-    }
 
     // -- /settings gateway tests -----------------------------------------------
 
@@ -2691,5 +2678,4 @@ agent:
         assert!(result.contains("max_retries: 3"));
         assert!(result.contains("jitter: true"));
     }
->>>>>>> Stashed changes
 }

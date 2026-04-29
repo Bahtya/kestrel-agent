@@ -1,5 +1,26 @@
 # Changelog
 
+## [v0.5.3] - 2026-04-29
+
+### Bug Fixes
+- SSE streaming reliability: separate HTTP client for streaming (no total timeout), preventing reqwest from killing long-lived SSE connections at 30s (#206)
+- Match "timed out" (with space) in retryable error detection alongside "timeout" (#206)
+- Stream-error quick retry (up to 2 attempts with short backoff) in `complete_streaming` before falling through to agent-loop retry (#206)
+- Slow-provider WARN logs when SSE stream takes >5s to connect or has >10s gaps between chunks (#206)
+- Deadline-aware retries: skip retry when it would exceed the message timeout budget (#206)
+
+### New Features
+- OpenCode Go provider and extensible model selection system (#205)
+
+## [v0.5.1] - 2026-04-29
+
+### New Features
+- Add `/settings gateway`, `/settings timeout`, `/settings retry` subcommands for runtime configuration
+
+### Bug Fixes
+- Fix merge conflict markers left in `commands.rs`
+- Clean up stale sessions on timeout, add deadline-aware retries (#204)
+
 ## [v0.5.0] - 2026-04-29
 
 ### New Features

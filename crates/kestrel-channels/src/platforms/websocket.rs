@@ -1297,6 +1297,21 @@ mod tests {
         (channel, addr, rx)
     }
 
+    /// Helper: wait until the server has exactly `n` registered clients.
+    async fn wait_for_client_count(channel: &WebSocketChannel, n: usize) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while channel.client_count() != n {
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for {} clients (have {})",
+                    n,
+                    channel.client_count()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     /// Helper: drain the next text message from a WebSocket client.
     async fn drain_next_text(
         ws: &mut tokio_tungstenite::WebSocketStream<
@@ -1352,8 +1367,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert_eq!(channel.client_count(), 1);
+        wait_for_client_count(&channel, 1).await;
 
         channel.disconnect().await.unwrap();
     }
@@ -1367,7 +1381,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let client_id: String = channel
@@ -1400,7 +1413,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let legacy_msg = r#"{"role":"user","content":"legacy hello"}"#;
@@ -1425,7 +1437,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let envelope = WsEnvelope::message("envelope hello");
@@ -1452,7 +1463,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let legacy_msg = r#"{"role":"user","content":"legacy"}"#;
@@ -1477,7 +1487,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let ping_json = r#"{"type":"ping","id":"ping-1"}"#;
@@ -1502,7 +1511,8 @@ mod tests {
             drop(ws);
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Wait for server to detect the disconnect and remove the client.
+        wait_for_client_count(&channel, 0).await;
 
         let result = channel
             .send_message("nonexistent_client", "Hello", None)
@@ -1523,7 +1533,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let client_id: String = channel
@@ -1559,8 +1568,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert_eq!(channel.client_count(), 2);
+        wait_for_client_count(&channel, 2).await;
 
         let _w1 = drain_next_text(&mut ws1).await;
         let _w2 = drain_next_text(&mut ws2).await;
@@ -1617,7 +1625,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        wait_for_client_count(&channel, 1).await;
 
         // Send auth message with correct token.
         let auth_json = r#"{"type":"auth","token":"secret123"}"#;
@@ -1652,7 +1660,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        wait_for_client_count(&channel, 1).await;
 
         // Send auth with wrong token.
         let auth_json = r#"{"type":"auth","token":"wrong"}"#;
@@ -1675,7 +1683,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        wait_for_client_count(&channel, 1).await;
 
         // Send a regular message without auth.
         let msg_json = r#"{"type":"message","content":"hello"}"#;
@@ -1697,8 +1705,6 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
             .await
             .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         // Welcome should arrive immediately (no auth required).
         let parsed = drain_next_text(&mut ws).await;
@@ -1728,7 +1734,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        wait_for_client_count(&channel, 1).await;
 
         // Send legacy format without auth — should be rejected.
         let legacy = r#"{"role":"user","content":"hello"}"#;
@@ -1750,7 +1756,7 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        wait_for_client_count(&channel, 1).await;
 
         // Send ping before auth — should be rejected.
         let ping = r#"{"type":"ping"}"#;
@@ -1808,7 +1814,7 @@ mod tests {
         });
 
         // Give the consumer time to subscribe to the broadcast channel.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         // Publish a streaming chunk.
         bus.publish_stream_chunk(StreamChunk {
@@ -1881,7 +1887,7 @@ mod tests {
         });
 
         // Give it a moment to process.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         running_flag.store(false, Ordering::Relaxed);
         bus.publish_stream_chunk(StreamChunk {
@@ -1906,7 +1912,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         // Send /help — should be intercepted locally.
@@ -1939,7 +1944,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let envelope = WsEnvelope::message("/status");
@@ -1964,7 +1968,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let envelope = WsEnvelope::message("/settings");
@@ -1992,7 +1995,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         let mut envelope = WsEnvelope::message("/help");
@@ -2016,7 +2018,6 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _welcome = drain_next_text(&mut ws).await;
 
         // Non-command message should reach the bus.

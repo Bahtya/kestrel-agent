@@ -1544,19 +1544,10 @@ fn truncate_str(s: &str, max_len: usize) -> &str {
 /// Strips sensitive fields like `user_id` from embedded JSON that may appear
 /// in provider API error responses.
 fn sanitize_error_for_user(error: &str) -> String {
-    let mut result = error.to_string();
-
-    // Redact "user_id":"<value>"
-    while let Some(start) = result.find("\"user_id\":\"") {
-        let val_start = start + "\"user_id\":\"".len();
-        if let Some(end) = result[val_start..].find('"') {
-            result.replace_range(val_start..val_start + end, "[redacted]");
-        } else {
-            break;
-        }
-    }
-
-    result
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#""user_id":"[^"]*""#).unwrap())
+        .replace_all(error, r#""user_id":"[redacted]""#)
+        .to_string()
 }
 
 /// Handle to a running heartbeat service spawned as a background task.

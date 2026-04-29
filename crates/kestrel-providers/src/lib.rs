@@ -18,7 +18,7 @@ pub mod registry;
 pub mod retry;
 
 pub use base::{CompletionRequest, CompletionResponse, LlmProvider};
-pub use discovery::{ModelCatalog, ModelDiscovery, ModelInfo, build_catalog};
+pub use discovery::{build_catalog, ModelCatalog, ModelDiscovery, ModelInfo};
 pub use middleware::{MiddlewareConfig, ProviderMiddleware};
 pub use rate_limit::{RateLimiter, TokenBucket};
 pub use registry::ProviderRegistry;

@@ -109,7 +109,8 @@ impl ModelDiscovery for OpenAiCompatDiscovery {
             .into_iter()
             .map(|m| ModelInfo {
                 id: m.id.clone(),
-                name: m.owned_by
+                name: m
+                    .owned_by
                     .as_ref()
                     .map(|o| format!("{} ({})", m.id, o))
                     .unwrap_or_else(|| m.id.clone()),
@@ -228,11 +229,7 @@ impl ModelCatalog {
             }
         }
 
-        results.sort_by(|a, b| {
-            a.provider
-                .cmp(&b.provider)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        results.sort_by(|a, b| a.provider.cmp(&b.provider).then_with(|| a.id.cmp(&b.id)));
 
         results
     }
@@ -245,9 +242,7 @@ impl ModelCatalog {
     /// List models for a single provider.
     pub async fn list_provider_models(&self, provider: &str) -> Vec<ModelInfo> {
         let all = self.list_all_models().await;
-        all.into_iter()
-            .filter(|m| m.provider == provider)
-            .collect()
+        all.into_iter().filter(|m| m.provider == provider).collect()
     }
 }
 
@@ -285,10 +280,26 @@ pub fn build_catalog(config: &kestrel_config::schema::Config) -> ModelCatalog {
     // Any OpenAI-compatible provider with an API key can potentially list models.
     // Register discovery for the built-in providers that expose /v1/models.
     let builtins: Vec<(&str, Option<&kestrel_config::schema::ProviderEntry>, &str)> = vec![
-        ("openai", config.providers.openai.as_ref(), "https://api.openai.com/v1"),
-        ("deepseek", config.providers.deepseek.as_ref(), "https://api.deepseek.com/v1"),
-        ("groq", config.providers.groq.as_ref(), "https://api.groq.com/openai/v1"),
-        ("openrouter", config.providers.openrouter.as_ref(), "https://openrouter.ai/api/v1"),
+        (
+            "openai",
+            config.providers.openai.as_ref(),
+            "https://api.openai.com/v1",
+        ),
+        (
+            "deepseek",
+            config.providers.deepseek.as_ref(),
+            "https://api.deepseek.com/v1",
+        ),
+        (
+            "groq",
+            config.providers.groq.as_ref(),
+            "https://api.groq.com/openai/v1",
+        ),
+        (
+            "openrouter",
+            config.providers.openrouter.as_ref(),
+            "https://openrouter.ai/api/v1",
+        ),
     ];
 
     for (name, entry_opt, default_url) in builtins {

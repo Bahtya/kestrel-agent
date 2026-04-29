@@ -33,6 +33,8 @@ const MODEL_KEYWORD_MAP: &[(&str, &str)] = &[
     ("mistral", "ollama"),
     ("qwen", "ollama"),
     ("codestral", "ollama"),
+    ("opencode-go", "opencode_go"),
+    ("opencode_go", "opencode_go"),
 ];
 
 /// Registry of LLM providers.
@@ -180,6 +182,24 @@ impl ProviderRegistry {
             })?;
             registry.register("ollama", provider);
             info!("Registered Ollama provider");
+        }
+
+        // Register OpenCode Go provider (OpenAI-compatible endpoint)
+        if let Some(entry) = &config.providers.opencode_go {
+            if let Some(api_key) = &entry.api_key {
+                let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+                    api_key: api_key.clone(),
+                    base_url: entry
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string()),
+                    model: entry.model.clone().unwrap_or_default(),
+                    organization: None,
+                    no_proxy: entry.no_proxy.unwrap_or(false),
+                })?;
+                registry.register("opencode_go", provider);
+                info!("Registered OpenCode Go provider");
+            }
         }
 
         // Register custom providers

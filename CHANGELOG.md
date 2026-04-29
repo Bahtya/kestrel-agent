@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.5.5] - 2026-04-29
+
+### New Features
+- Two-level model/provider selection with `/models` command in Telegram (#208)
+- Model name prefix stripping: `provider/model` format strips prefix before API call (#208)
+
 ## [v0.5.4] - 2026-04-29
 
 ### New Features

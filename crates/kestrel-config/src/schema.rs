@@ -167,6 +167,9 @@ pub struct ProvidersConfig {
     /// OpenAI Codex provider settings.
     #[serde(default)]
     pub openai_codex: Option<ProviderEntry>,
+    /// OpenCode Go provider settings (https://opencode.ai/go).
+    #[serde(default)]
+    pub opencode_go: Option<ProviderEntry>,
 }
 
 /// A generic provider entry with API key and optional base URL.

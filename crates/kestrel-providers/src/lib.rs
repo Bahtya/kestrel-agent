@@ -10,6 +10,7 @@
 
 pub mod anthropic;
 pub mod base;
+pub mod discovery;
 pub mod middleware;
 pub mod openai_compat;
 pub mod rate_limit;
@@ -17,6 +18,7 @@ pub mod registry;
 pub mod retry;
 
 pub use base::{CompletionRequest, CompletionResponse, LlmProvider};
+pub use discovery::{ModelCatalog, ModelDiscovery, ModelInfo, build_catalog};
 pub use middleware::{MiddlewareConfig, ProviderMiddleware};
 pub use rate_limit::{RateLimiter, TokenBucket};
 pub use registry::ProviderRegistry;

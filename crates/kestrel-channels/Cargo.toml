@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 kestrel-core = { path = "../kestrel-core" }
 kestrel-config = { path = "../kestrel-config" }
+kestrel-providers = { path = "../kestrel-providers" }
 kestrel-bus = { path = "../kestrel-bus" }
 kestrel-session = { path = "../kestrel-session" }
 kestrel-skill = { path = "../kestrel-skill" }

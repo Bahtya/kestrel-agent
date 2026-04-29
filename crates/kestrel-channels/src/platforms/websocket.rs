@@ -686,7 +686,7 @@ impl WebSocketChannel {
                 }
                 // /settings: text-based interaction for WebSocket (no inline keyboard).
                 else if crate::commands::matches_command(&content_text, "settings") {
-                    let response = crate::commands::handle_ws_settings(&content_text);
+                    let response = crate::commands::handle_ws_settings(&content_text).await;
                     Self::send_ws_reply(
                         &clients,
                         &client_id,

@@ -6,22 +6,26 @@
 
 use kestrel_config::validate::ValidationFinding;
 use kestrel_config::{load_config, validate, Config};
+use kestrel_providers::ModelCatalog;
 use kestrel_session::SessionManager;
 use kestrel_skill::{Skill, SkillRegistry};
 use std::fmt::Write;
 use std::sync::{Arc, LazyLock};
 
 use parking_lot::RwLock;
+use tokio::sync::OnceCell;
 
 use crate::platforms::telegram::{InlineKeyboardBuilder, InlineKeyboardMarkup};
 
-/// Model names available for cycling via /settings.
+/// Fallback model names for cycling when dynamic discovery is unavailable.
 const MODEL_CYCLE: &[&str] = &[
     "gpt-4o",
     "claude-sonnet-4-6",
     "deepseek-chat",
     "deepseek/deepseek-v4-flash",
 ];
+
+static MODEL_CATALOG: OnceCell<ModelCatalog> = OnceCell::const_new();
 
 static SKILL_REGISTRY: LazyLock<RwLock<Option<Arc<SkillRegistry>>>> =
     LazyLock::new(|| RwLock::new(None));
@@ -33,6 +37,16 @@ pub fn set_skill_registry(registry: Option<Arc<SkillRegistry>>) {
 
 fn configured_skill_registry() -> Option<Arc<SkillRegistry>> {
     SKILL_REGISTRY.read().clone()
+}
+
+/// Get or initialize the shared model catalog.
+async fn get_model_catalog() -> &'static ModelCatalog {
+    MODEL_CATALOG
+        .get_or_init(|| async {
+            let config = load_config(None).unwrap_or_default();
+            kestrel_providers::build_catalog(&config)
+        })
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -598,8 +612,10 @@ fn save_config_to_default(config: &Config) -> Result<(), String> {
 /// - `/settings model` — show current model
 /// - `/settings model next` — cycle to next model
 /// - `/settings model <name>` — set model by name
+/// - `/settings models` — list all available models from providers
+/// - `/settings models refresh` — force refresh model list from APIs
 /// - `/settings streaming` — toggle streaming
-pub fn handle_ws_settings(text: &str) -> String {
+pub async fn handle_ws_settings(text: &str) -> String {
     let args = command_arguments(text);
 
     if args.is_empty() {
@@ -619,6 +635,8 @@ pub fn handle_ws_settings(text: &str) -> String {
         let _ = writeln!(out, "/settings model — show current model");
         let _ = writeln!(out, "/settings model next — cycle to next model");
         let _ = writeln!(out, "/settings model <name> — set model by name");
+        let _ = writeln!(out, "/settings models — list all available models");
+        let _ = writeln!(out, "/settings models refresh — refresh model list");
         let _ = writeln!(out, "/settings streaming — toggle streaming");
         return out;
     }
@@ -637,34 +655,86 @@ pub fn handle_ws_settings(text: &str) -> String {
                 return format!("Current model: {}", config.agent.model);
             }
             if rest.eq_ignore_ascii_case("next") {
-                return ws_settings_model_switch();
+                return ws_settings_model_switch().await;
             }
             ws_settings_model_set(rest)
         }
+        "models" => {
+            let rest = parts.next().unwrap_or("").trim();
+            ws_settings_models_list(rest).await
+        }
         "streaming" => ws_settings_streaming_toggle(),
-        _ => "Usage:\n/settings model [next|<name>]\n/settings streaming".to_string(),
+        _ => "Usage:\n/settings model [next|<name>]\n/settings models [refresh]\n/settings streaming".to_string(),
     }
 }
 
-fn ws_settings_model_switch() -> String {
+async fn ws_settings_model_switch() -> String {
     let mut config = match load_config(None) {
         Ok(c) => c,
         Err(e) => return format!("Failed to load config: {e}"),
     };
 
     let current = config.agent.model.to_lowercase();
-    let idx = MODEL_CYCLE
+
+    // Build cycle from discovered models + fallback list.
+    let catalog = get_model_catalog().await;
+    let discovered = catalog.list_all_models().await;
+    let cycle: Vec<String> = if discovered.is_empty() {
+        MODEL_CYCLE.iter().map(|s| s.to_string()).collect()
+    } else {
+        let mut ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
+        // Also include qualified IDs for disambiguation.
+        for m in &discovered {
+            ids.push(m.qualified_id());
+        }
+        ids
+    };
+
+    let idx = cycle
         .iter()
         .position(|m| m.eq_ignore_ascii_case(&current))
-        .map(|i| (i + 1) % MODEL_CYCLE.len())
+        .map(|i| (i + 1) % cycle.len())
         .unwrap_or(0);
-    config.agent.model = MODEL_CYCLE[idx].to_string();
+    config.agent.model = cycle[idx].clone();
 
     if let Err(e) = save_config_to_default(&config) {
         return format!("Failed to save config: {e}");
     }
 
     format!("Model switched to: {}", config.agent.model)
+}
+
+async fn ws_settings_models_list(arg: &str) -> String {
+    let catalog = get_model_catalog().await;
+
+    if arg.eq_ignore_ascii_case("refresh") {
+        catalog.invalidate_cache().await;
+    }
+
+    let models = catalog.list_all_models().await;
+    if models.is_empty() {
+        return "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml.".to_string();
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Available models ({}):\n", models.len());
+
+    // Group by provider for readability.
+    let mut current_provider = String::new();
+    for m in &models {
+        if m.provider != current_provider {
+            current_provider = m.provider.clone();
+            let _ = writeln!(out, "[{}]", current_provider);
+        }
+        let ctx = m
+            .context_length
+            .map(|c| format!(" ({}K ctx)", c / 1024))
+            .unwrap_or_default();
+        let _ = writeln!(out, "  {}{}", m.qualified_id(), ctx);
+    }
+
+    let _ = writeln!(out, "\nUse /settings model <id> to select.");
+    out
 }
 
 fn ws_settings_model_set(name: &str) -> String {
@@ -2377,35 +2447,36 @@ agent:
 
     // -- /settings text-based (WebSocket) tests ---------------------------------
 
-    #[test]
-    fn test_ws_settings_shows_current() {
+    #[tokio::test]
+    async fn test_ws_settings_shows_current() {
         let yaml = r#"
 providers:
   openai:
     api_key: "sk-test"
 "#;
         let _dir = with_temp_config(yaml);
-        let result = handle_ws_settings("/settings");
+        let result = handle_ws_settings("/settings").await;
         assert!(result.contains("Settings"));
         assert!(result.contains("Model:"));
         assert!(result.contains("Streaming:"));
         assert!(result.contains("/settings model"));
         assert!(result.contains("/settings streaming"));
+        assert!(result.contains("/settings models"));
     }
 
-    #[test]
-    fn test_ws_settings_model_show_current() {
+    #[tokio::test]
+    async fn test_ws_settings_model_show_current() {
         let yaml = r#"
 agent:
   model: "gpt-4o"
 "#;
         let _dir = with_temp_config(yaml);
-        let result = handle_ws_settings("/settings model");
+        let result = handle_ws_settings("/settings model").await;
         assert!(result.contains("gpt-4o"));
     }
 
-    #[test]
-    fn test_ws_settings_model_next_cycles() {
+    #[tokio::test]
+    async fn test_ws_settings_model_next_cycles() {
         let dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 agent:
@@ -2415,13 +2486,13 @@ agent:
         let config_path = dir.path().join("config.yaml");
         std::fs::write(&config_path, yaml).unwrap();
 
-        let result = handle_ws_settings("/settings model next");
+        let result = handle_ws_settings("/settings model next").await;
         assert!(result.contains("Model switched to:"));
         assert!(!result.contains("gpt-4o") || MODEL_CYCLE.len() == 1);
     }
 
-    #[test]
-    fn test_ws_settings_model_set_by_name() {
+    #[tokio::test]
+    async fn test_ws_settings_model_set_by_name() {
         let dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 agent:
@@ -2431,13 +2502,13 @@ agent:
         let config_path = dir.path().join("config.yaml");
         std::fs::write(&config_path, yaml).unwrap();
 
-        let result = handle_ws_settings("/settings model my-custom-model");
+        let result = handle_ws_settings("/settings model my-custom-model").await;
         assert!(result.contains("gpt-4o"));
         assert!(result.contains("my-custom-model"));
     }
 
-    #[test]
-    fn test_ws_settings_streaming_toggle() {
+    #[tokio::test]
+    async fn test_ws_settings_streaming_toggle() {
         let dir = tempfile::tempdir().unwrap();
         let yaml = r#"
 agent:
@@ -2448,16 +2519,23 @@ agent:
         let config_path = dir.path().join("config.yaml");
         std::fs::write(&config_path, yaml).unwrap();
 
-        let result = handle_ws_settings("/settings streaming");
+        let result = handle_ws_settings("/settings streaming").await;
         assert!(result.contains("Streaming: off"));
 
-        let result2 = handle_ws_settings("/settings streaming");
+        let result2 = handle_ws_settings("/settings streaming").await;
         assert!(result2.contains("Streaming: on"));
     }
 
-    #[test]
-    fn test_ws_settings_unknown_subcommand() {
-        let result = handle_ws_settings("/settings foobar");
+    #[tokio::test]
+    async fn test_ws_settings_unknown_subcommand() {
+        let result = handle_ws_settings("/settings foobar").await;
         assert!(result.contains("Usage"));
+    }
+
+    #[tokio::test]
+    async fn test_ws_settings_models_empty() {
+        let _dir = with_empty_home();
+        let result = handle_ws_settings("/settings models").await;
+        assert!(result.contains("No models discovered"));
     }
 }

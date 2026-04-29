@@ -127,17 +127,13 @@ impl StreamConsumer {
 
             // Check for tool call events (segment break)
             let mut tool_break = false;
-            let mut tool_name_opt = None;
             let mut completed_tools: Vec<(String, u64)> = Vec::new();
             loop {
                 match self.event_rx.try_recv() {
-                    Ok(AgentEvent::ToolCall {
-                        session_key,
-                        tool_name,
-                        ..
-                    }) if session_key == self.session_key => {
+                    Ok(AgentEvent::ToolCall { session_key, .. })
+                        if session_key == self.session_key =>
+                    {
                         tool_break = true;
-                        tool_name_opt = Some(tool_name);
                     }
                     Ok(AgentEvent::ToolResult {
                         session_key,
@@ -207,16 +203,9 @@ impl StreamConsumer {
                 self.last_edit_time = std::time::Instant::now();
             }
 
-            // Handle tool break: send tool progress message, reset for next segment
+            // Handle tool break: reset for next segment (per-tool previews are
+            // already emitted as stream chunks by the runner).
             if tool_break {
-                if let Some(tn) = tool_name_opt {
-                    let reply_to = self.message_id.as_deref();
-                    let tool_msg = format!("Using `{}`...", tn);
-                    let _ = self
-                        .channel
-                        .send_message(&self.chat_id, &tool_msg, reply_to)
-                        .await;
-                }
                 self.accumulated.clear();
                 self.last_sent_text.clear();
                 self.message_id = None;

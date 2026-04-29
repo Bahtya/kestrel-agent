@@ -980,6 +980,9 @@ fn collect_settings(config: &Config) -> Vec<String> {
     if config.providers.openai_codex.is_some() {
         providers.push("openai_codex");
     }
+    if config.providers.opencode_go.is_some() {
+        providers.push("opencode_go");
+    }
     for cp in &config.custom_providers {
         providers.push(&cp.name);
     }
@@ -1365,6 +1368,9 @@ fn build_summary(config: &Config) -> String {
     }
     if config.providers.openai_codex.is_some() {
         providers.push("openai_codex");
+    }
+    if config.providers.opencode_go.is_some() {
+        providers.push("opencode_go");
     }
     for cp in &config.custom_providers {
         providers.push(&cp.name);

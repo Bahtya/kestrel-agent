@@ -28,6 +28,7 @@ pub fn run(config: &Config) -> Result<()> {
         ("OpenRouter", config.providers.openrouter.as_ref()),
         ("Ollama", config.providers.ollama.as_ref()),
         ("Gemini", config.providers.gemini.as_ref()),
+        ("OpenCode Go", config.providers.opencode_go.as_ref()),
     ];
     for (name, entry) in &provider_entries {
         let status = match entry {

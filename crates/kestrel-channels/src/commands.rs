@@ -620,6 +620,10 @@ pub fn handle_ws_settings(text: &str) -> String {
         let _ = writeln!(out, "/settings model next — cycle to next model");
         let _ = writeln!(out, "/settings model <name> — set model by name");
         let _ = writeln!(out, "/settings streaming — toggle streaming");
+        let _ = writeln!(out, "/settings gateway — show API gateway config");
+        let _ = writeln!(out, "/settings timeout — show timeout settings");
+        let _ = writeln!(out, "/settings timeout <key> <secs> — set a timeout");
+        let _ = writeln!(out, "/settings retry — show retry policy");
         return out;
     }
 
@@ -642,7 +646,17 @@ pub fn handle_ws_settings(text: &str) -> String {
             ws_settings_model_set(rest)
         }
         "streaming" => ws_settings_streaming_toggle(),
+<<<<<<< Updated upstream
         _ => "Usage:\n/settings model [next|<name>]\n/settings streaming".to_string(),
+=======
+        "gateway" => ws_settings_gateway(),
+        "timeout" => {
+            let rest = parts.next().unwrap_or("").trim();
+            ws_settings_timeout(rest)
+        }
+        "retry" => ws_settings_retry(),
+        _ => "Usage:\n/settings model [next|<name>]\n/settings models [refresh]\n/settings streaming\n/settings gateway\n/settings timeout [key secs]\n/settings retry".to_string(),
+>>>>>>> Stashed changes
     }
 }
 
@@ -698,6 +712,141 @@ fn ws_settings_streaming_toggle() -> String {
         "Streaming: {}",
         if config.agent.streaming { "on" } else { "off" }
     )
+}
+
+fn ws_settings_gateway() -> String {
+    let config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return format!("Failed to load config: {e}"),
+    };
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Gateway settings");
+    let _ = writeln!(out, "API host: {}", config.api.host);
+    let _ = writeln!(out, "API port: {}", config.api.port);
+    let _ = writeln!(
+        out,
+        "CORS origins: {}",
+        if config.api.allowed_origins.is_empty() {
+            "(none)".to_string()
+        } else {
+            config.api.allowed_origins.join(", ")
+        }
+    );
+    let _ = writeln!(
+        out,
+        "Max body size: {} bytes",
+        config.api.max_body_size
+    );
+    let _ = writeln!(
+        out,
+        "WebSocket: {}",
+        if let Some(ref ws) = config.channels.websocket {
+            format!("{} (enabled: {})", ws.listen_addr, ws.enabled)
+        } else {
+            "not configured".to_string()
+        }
+    );
+    out
+}
+
+/// Timeout field names that can be set via /settings timeout <key> <secs>.
+const TIMEOUT_FIELDS: &[&str] = &[
+    "tool_timeout",
+    "connect_timeout",
+    "first_byte_timeout",
+    "idle_timeout",
+    "message_timeout",
+];
+
+fn ws_settings_timeout(arg: &str) -> String {
+    if arg.is_empty() {
+        let config = match load_config(None) {
+            Ok(c) => c,
+            Err(e) => return format!("Failed to load config: {e}"),
+        };
+        let mut out = String::new();
+        let _ = writeln!(out, "Timeout settings (seconds)");
+        let _ = writeln!(out, "tool_timeout: {}", config.agent.tool_timeout);
+        let _ = writeln!(out, "connect_timeout: {}", config.agent.connect_timeout);
+        let _ = writeln!(out, "first_byte_timeout: {}", config.agent.first_byte_timeout);
+        let _ = writeln!(out, "idle_timeout: {}", config.agent.idle_timeout);
+        let _ = writeln!(out, "message_timeout: {}", config.agent.message_timeout);
+        let _ = writeln!(out, "\nUsage: /settings timeout <key> <secs>");
+        let _ = writeln!(out, "Keys: {}", TIMEOUT_FIELDS.join(", "));
+        return out;
+    }
+
+    let mut parts = arg.splitn(2, char::is_whitespace);
+    let key = parts.next().unwrap_or_default().to_ascii_lowercase();
+    let value_str = parts.next().unwrap_or("").trim();
+
+    if !TIMEOUT_FIELDS.contains(&key.as_str()) {
+        return format!(
+            "Unknown timeout key '{}'. Valid keys: {}",
+            key,
+            TIMEOUT_FIELDS.join(", ")
+        );
+    }
+
+    let secs: u64 = match value_str.parse() {
+        Ok(v) => v,
+        Err(_) => return format!("Invalid value '{}'. Must be a number in seconds.", value_str),
+    };
+
+    let mut config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return format!("Failed to load config: {e}"),
+    };
+
+    let old = match key.as_str() {
+        "tool_timeout" => {
+            let old = config.agent.tool_timeout;
+            config.agent.tool_timeout = secs;
+            old
+        }
+        "connect_timeout" => {
+            let old = config.agent.connect_timeout;
+            config.agent.connect_timeout = secs;
+            old
+        }
+        "first_byte_timeout" => {
+            let old = config.agent.first_byte_timeout;
+            config.agent.first_byte_timeout = secs;
+            old
+        }
+        "idle_timeout" => {
+            let old = config.agent.idle_timeout;
+            config.agent.idle_timeout = secs;
+            old
+        }
+        "message_timeout" => {
+            let old = config.agent.message_timeout;
+            config.agent.message_timeout = secs;
+            old
+        }
+        _ => unreachable!(),
+    };
+
+    if let Err(e) = save_config_to_default(&config) {
+        return format!("Failed to save config: {e}");
+    }
+
+    format!("{}: {}s → {}s", key, old, secs)
+}
+
+fn ws_settings_retry() -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Retry policy (built-in defaults)");
+    let _ = writeln!(out, "max_retries: 3");
+    let _ = writeln!(out, "base_delay: 500ms");
+    let _ = writeln!(out, "max_delay: 60s");
+    let _ = writeln!(out, "jitter: true");
+    let _ = writeln!(out, "retryable_codes: 429, 500, 502, 503");
+    let _ = writeln!(out, "max_retries_503: 5");
+    let _ = writeln!(out, "max_delay_503: 30s");
+    let _ = writeln!(out, "\nRetry is configured per-provider with circuit breaking.");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2460,4 +2609,87 @@ agent:
         let result = handle_ws_settings("/settings foobar");
         assert!(result.contains("Usage"));
     }
+<<<<<<< Updated upstream
+=======
+
+    #[tokio::test]
+    async fn test_ws_settings_models_empty() {
+        let _dir = with_empty_home();
+        let result = handle_ws_settings("/settings models").await;
+        assert!(result.contains("No models discovered"));
+    }
+
+    // -- /settings gateway tests -----------------------------------------------
+
+    #[test]
+    fn test_ws_settings_gateway_shows_config() {
+        let yaml = r#"
+api:
+  host: "0.0.0.0"
+  port: 9090
+channels:
+  websocket:
+    enabled: true
+    listen_addr: "0.0.0.0:9091"
+"#;
+        let _dir = with_temp_config(yaml);
+        let result = ws_settings_gateway();
+        assert!(result.contains("Gateway settings"));
+        assert!(result.contains("API host: 0.0.0.0"));
+        assert!(result.contains("API port: 9090"));
+        assert!(result.contains("0.0.0.0:9091"));
+    }
+
+    // -- /settings timeout tests -----------------------------------------------
+
+    #[test]
+    fn test_ws_settings_timeout_shows_all() {
+        let _dir = with_empty_home();
+        let result = ws_settings_timeout("");
+        assert!(result.contains("Timeout settings"));
+        assert!(result.contains("tool_timeout:"));
+        assert!(result.contains("connect_timeout:"));
+        assert!(result.contains("first_byte_timeout:"));
+        assert!(result.contains("idle_timeout:"));
+        assert!(result.contains("message_timeout:"));
+    }
+
+    #[test]
+    fn test_ws_settings_timeout_set_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+agent:
+  model: "gpt-4o"
+  tool_timeout: 120
+"#;
+        let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, yaml).unwrap();
+
+        let result = ws_settings_timeout("tool_timeout 300");
+        assert!(result.contains("tool_timeout: 120s → 300s"));
+    }
+
+    #[test]
+    fn test_ws_settings_timeout_invalid_key() {
+        let result = ws_settings_timeout("bogus 99");
+        assert!(result.contains("Unknown timeout key"));
+    }
+
+    #[test]
+    fn test_ws_settings_timeout_invalid_value() {
+        let result = ws_settings_timeout("tool_timeout abc");
+        assert!(result.contains("Invalid value"));
+    }
+
+    // -- /settings retry tests -------------------------------------------------
+
+    #[test]
+    fn test_ws_settings_retry_shows_defaults() {
+        let result = ws_settings_retry();
+        assert!(result.contains("Retry policy"));
+        assert!(result.contains("max_retries: 3"));
+        assert!(result.contains("jitter: true"));
+    }
+>>>>>>> Stashed changes
 }

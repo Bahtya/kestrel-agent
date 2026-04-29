@@ -647,7 +647,10 @@ fn is_retryable_err(err: &anyhow::Error, retry_on_server_error: bool) -> bool {
         }
         return false;
     }
-    msg.contains("connection") || msg.contains("timeout") || msg.contains("refused")
+    msg.contains("connection")
+        || msg.contains("timeout")
+        || msg.contains("timed out")
+        || msg.contains("refused")
 }
 
 /// Check if an error is retryable using a RetryPolicy.
@@ -657,7 +660,10 @@ fn is_retryable_err_policy(err: &anyhow::Error, policy: &RetryPolicy) -> bool {
         return policy.is_retryable(code);
     }
     // Connection-level errors are always retryable.
-    msg.contains("connection") || msg.contains("timeout") || msg.contains("refused")
+    msg.contains("connection")
+        || msg.contains("timeout")
+        || msg.contains("timed out")
+        || msg.contains("refused")
 }
 
 /// Extract HTTP status code from an error message like "API error (429): ..."

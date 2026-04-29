@@ -7,6 +7,7 @@ use crate::base::{
     BoxStream, CompletionChunk, CompletionRequest, CompletionResponse, LlmProvider, ToolCallDelta,
 };
 use crate::build_client;
+use crate::build_streaming_client;
 use crate::retry::{retry_with_backoff, RetryConfig};
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -32,24 +33,31 @@ pub struct OpenAiCompatConfig {
 pub struct OpenAiCompatProvider {
     config: OpenAiCompatConfig,
     client: Client,
+    /// Client without total timeout for SSE streaming.
+    streaming_client: Client,
     retry: Arc<RetryConfig>,
 }
 
 impl OpenAiCompatProvider {
     pub fn new(config: OpenAiCompatConfig) -> anyhow::Result<Self> {
         let client = build_client(config.no_proxy)?;
+        let streaming_client = build_streaming_client(config.no_proxy)?;
         Ok(Self {
             config,
             client,
+            streaming_client,
             retry: Arc::new(RetryConfig::default()),
         })
     }
 
     /// Create with a custom HTTP client (useful for testing).
     pub fn with_client(config: OpenAiCompatConfig, client: Client) -> Self {
+        let streaming_client =
+            build_streaming_client(config.no_proxy).unwrap_or_else(|_| client.clone());
         Self {
             config,
             client,
+            streaming_client,
             retry: Arc::new(RetryConfig::default()),
         }
     }
@@ -57,9 +65,11 @@ impl OpenAiCompatProvider {
     /// Create with a custom retry configuration.
     pub fn with_retry(config: OpenAiCompatConfig, retry: RetryConfig) -> anyhow::Result<Self> {
         let client = build_client(config.no_proxy)?;
+        let streaming_client = build_streaming_client(config.no_proxy)?;
         Ok(Self {
             config,
             client,
+            streaming_client,
             retry: Arc::new(retry),
         })
     }
@@ -70,9 +80,12 @@ impl OpenAiCompatProvider {
         client: Client,
         retry: RetryConfig,
     ) -> Self {
+        let streaming_client =
+            build_streaming_client(config.no_proxy).unwrap_or_else(|_| client.clone());
         Self {
             config,
             client,
+            streaming_client,
             retry: Arc::new(retry),
         }
     }
@@ -478,7 +491,7 @@ impl LlmProvider for OpenAiCompatProvider {
             let url = url.clone();
             let body = body.clone();
             let headers = headers.clone();
-            let client = self.client.clone();
+            let client = self.streaming_client.clone();
             async move {
                 let mut req_builder = client.post(&url);
                 for (k, v) in &headers {

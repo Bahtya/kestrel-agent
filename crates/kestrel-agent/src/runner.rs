@@ -274,6 +274,14 @@ impl AgentRunner {
         let send_start = std::time::Instant::now();
         let mut stream = provider.complete_stream(request).await?;
 
+        let connect_ms = send_start.elapsed().as_millis() as u64;
+        if connect_ms > 5000 {
+            warn!(
+                elapsed_ms = connect_ms,
+                "Slow provider response: took >5s to establish stream"
+            );
+        }
+
         let mut first_byte_logged = false;
 
         let mut full_content = String::new();
@@ -284,6 +292,7 @@ impl AgentRunner {
         let first_chunk_timeout = std::time::Duration::from_secs(15);
         let idle_timeout = std::time::Duration::from_secs(30);
         let mut is_first = true;
+        let mut last_chunk_at = std::time::Instant::now();
 
         loop {
             let timeout = if is_first {
@@ -293,6 +302,16 @@ impl AgentRunner {
             };
             let chunk_result = tokio::time::timeout(timeout, stream.next()).await;
             is_first = false;
+
+            let now = std::time::Instant::now();
+            let gap = now.duration_since(last_chunk_at);
+            if gap >= std::time::Duration::from_secs(10) {
+                warn!(
+                    elapsed_ms = send_start.elapsed().as_millis() as u64,
+                    gap_ms = gap.as_millis() as u64,
+                    "SSE stream slow: long gap between chunks"
+                );
+            }
 
             let chunk_result = match chunk_result {
                 Ok(Some(r)) => r,
@@ -314,6 +333,7 @@ impl AgentRunner {
                 );
                 first_byte_logged = true;
             }
+            last_chunk_at = std::time::Instant::now();
 
             // Accumulate text content
             if let Some(delta) = &chunk.delta {

@@ -127,17 +127,13 @@ impl StreamConsumer {
 
             // Check for tool call events (segment break)
             let mut tool_break = false;
-            let mut tool_name_opt = None;
             let mut completed_tools: Vec<(String, u64)> = Vec::new();
             loop {
                 match self.event_rx.try_recv() {
-                    Ok(AgentEvent::ToolCall {
-                        session_key,
-                        tool_name,
-                        ..
-                    }) if session_key == self.session_key => {
+                    Ok(AgentEvent::ToolCall { session_key, .. })
+                        if session_key == self.session_key =>
+                    {
                         tool_break = true;
-                        tool_name_opt = Some(tool_name);
                     }
                     Ok(AgentEvent::ToolResult {
                         session_key,

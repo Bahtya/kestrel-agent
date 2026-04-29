@@ -570,6 +570,7 @@ impl AgentLoop {
                         let is_transient = err_str.contains("Stream error")
                             || err_str.contains("connection")
                             || err_str.contains("timeout")
+                            || err_str.contains("timed out")
                             || err_str.contains("error decoding response body")
                             || err_str.contains("broken pipe")
                             || err_str.contains("reset by peer");

@@ -845,6 +845,10 @@ impl TelegramChannel {
                 description: "Show settings".to_string(),
             },
             BotCommand {
+                command: "models".to_string(),
+                description: "Browse and select models".to_string(),
+            },
+            BotCommand {
                 command: "history".to_string(),
                 description: "Browse recent history".to_string(),
             },
@@ -1652,6 +1656,52 @@ impl TelegramChannel {
                     CallbackResponse::EditMessage {
                         text: response.text,
                         keyboard: response.keyboard,
+                    }
+                }
+            });
+        }
+
+        // Models selection handler (provider list, provider detail, model select)
+        if !router.has_handler("models") {
+            router.register("models", |ctx| {
+                let action = ctx.action.action.clone();
+                let payload = ctx.action.payload.clone();
+                async move {
+                    match action.as_str() {
+                        "providers" => {
+                            let response = crate::commands::handle_models_provider_list().await;
+                            CallbackResponse::EditMessage {
+                                text: response.text,
+                                keyboard: response.keyboard,
+                            }
+                        }
+                        "provider" => {
+                            let provider = payload.as_deref().unwrap_or("");
+                            let response =
+                                crate::commands::handle_models_provider_detail(provider).await;
+                            CallbackResponse::EditMessage {
+                                text: response.text,
+                                keyboard: response.keyboard,
+                            }
+                        }
+                        "refresh" => {
+                            let catalog = crate::commands::get_model_catalog_static().await;
+                            catalog.invalidate_cache().await;
+                            let response = crate::commands::handle_models_provider_list().await;
+                            CallbackResponse::EditMessage {
+                                text: response.text,
+                                keyboard: response.keyboard,
+                            }
+                        }
+                        "select" => {
+                            let qualified_id = payload.as_deref().unwrap_or("");
+                            let response = crate::commands::handle_models_select(qualified_id);
+                            CallbackResponse::EditMessage {
+                                text: response.text,
+                                keyboard: response.keyboard,
+                            }
+                        }
+                        _ => CallbackResponse::Acknowledged,
                     }
                 }
             });
@@ -3927,7 +3977,8 @@ mod tests {
         assert!(router.has_handler("settings"));
         assert!(router.has_handler("settings_view"));
         assert!(router.has_handler("history"));
-        assert_eq!(router.handler_count(), 4);
+        assert!(router.has_handler("models"));
+        assert_eq!(router.handler_count(), 5);
     }
 
     #[test]
@@ -3937,7 +3988,7 @@ mod tests {
         TelegramChannel::register_default_handlers(&mut router, &session_keys);
         TelegramChannel::register_default_handlers(&mut router, &session_keys);
         // Should not double-register.
-        assert_eq!(router.handler_count(), 4);
+        assert_eq!(router.handler_count(), 5);
     }
 
     #[tokio::test]

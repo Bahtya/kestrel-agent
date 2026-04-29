@@ -263,6 +263,10 @@ impl AgentRunner {
     }
 
     /// Perform a streaming completion, accumulating the full response.
+    ///
+    /// On transient stream errors (decode failure, idle timeout), retries the
+    /// provider call up to `max_stream_retries` times with short backoff before
+    /// propagating the error to the agent-loop retry.
     async fn complete_streaming(
         &self,
         provider: &Arc<dyn kestrel_providers::LlmProvider>,
@@ -271,104 +275,153 @@ impl AgentRunner {
         use futures::StreamExt;
         use kestrel_core::{FunctionCall, ToolCall as CoreToolCall};
 
-        let send_start = std::time::Instant::now();
-        let mut stream = provider.complete_stream(request).await?;
+        let max_stream_retries: u32 = 2;
+        let mut stream_attempt = 0u32;
 
-        let connect_ms = send_start.elapsed().as_millis() as u64;
-        if connect_ms > 5000 {
-            warn!(
-                elapsed_ms = connect_ms,
-                "Slow provider response: took >5s to establish stream"
-            );
-        }
-
-        let mut first_byte_logged = false;
-
-        let mut full_content = String::new();
-        let mut usage: Option<Usage> = None;
-        let mut tool_calls_map: std::collections::HashMap<usize, (String, String, String)> =
-            std::collections::HashMap::new();
-
-        let first_chunk_timeout = std::time::Duration::from_secs(15);
-        let idle_timeout = std::time::Duration::from_secs(30);
-        let mut is_first = true;
-        let mut last_chunk_at = std::time::Instant::now();
-
-        loop {
-            let timeout = if is_first {
-                first_chunk_timeout
-            } else {
-                idle_timeout
+        let result = 'stream_retry: loop {
+            let send_start = std::time::Instant::now();
+            let mut stream = match provider.complete_stream(request.clone()).await {
+                Ok(s) => s,
+                Err(e) => break 'stream_retry Err(e),
             };
-            let chunk_result = tokio::time::timeout(timeout, stream.next()).await;
-            is_first = false;
 
-            let now = std::time::Instant::now();
-            let gap = now.duration_since(last_chunk_at);
-            if gap >= std::time::Duration::from_secs(10) {
+            let connect_ms = send_start.elapsed().as_millis() as u64;
+            if connect_ms > 5000 {
                 warn!(
-                    elapsed_ms = send_start.elapsed().as_millis() as u64,
-                    gap_ms = gap.as_millis() as u64,
-                    "SSE stream slow: long gap between chunks"
+                    elapsed_ms = connect_ms,
+                    "Slow provider response: took >5s to establish stream"
                 );
             }
 
-            let chunk_result = match chunk_result {
-                Ok(Some(r)) => r,
-                Ok(None) => break,
-                Err(_) => {
-                    warn!("SSE stream idle timeout after {}s", timeout.as_secs());
-                    anyhow::bail!(
-                        "SSE stream timed out: no data received within {}s",
-                        timeout.as_secs()
+            let mut first_byte_logged = false;
+            let mut full_content = String::new();
+            let mut usage: Option<Usage> = None;
+            let mut tool_calls_map: std::collections::HashMap<
+                usize,
+                (String, String, String),
+            > = std::collections::HashMap::new();
+
+            let first_chunk_timeout = std::time::Duration::from_secs(15);
+            let idle_timeout = std::time::Duration::from_secs(30);
+            let mut is_first = true;
+            let mut last_chunk_at = std::time::Instant::now();
+
+            loop {
+                let timeout = if is_first {
+                    first_chunk_timeout
+                } else {
+                    idle_timeout
+                };
+                let chunk_result = tokio::time::timeout(timeout, stream.next()).await;
+                is_first = false;
+
+                let now = std::time::Instant::now();
+                let gap = now.duration_since(last_chunk_at);
+                if gap >= std::time::Duration::from_secs(10) {
+                    warn!(
+                        elapsed_ms = send_start.elapsed().as_millis() as u64,
+                        gap_ms = gap.as_millis() as u64,
+                        "SSE stream slow: long gap between chunks"
                     );
                 }
-            };
-            let chunk = chunk_result?;
 
-            if !first_byte_logged {
-                debug!(
-                    elapsed_ms = send_start.elapsed().as_millis() as u64,
-                    "SSE first-byte received"
-                );
-                first_byte_logged = true;
-            }
-            last_chunk_at = std::time::Instant::now();
-
-            // Accumulate text content
-            if let Some(delta) = &chunk.delta {
-                full_content.push_str(delta);
-                // Emit streaming chunk
-                self.emit_stream_chunk(delta.clone(), false);
-            }
-
-            // Accumulate tool call deltas
-            if let Some(deltas) = &chunk.tool_call_deltas {
-                for delta in deltas {
-                    let entry = tool_calls_map
-                        .entry(delta.index)
-                        .or_insert_with(|| (String::new(), String::new(), String::new()));
-                    if let Some(id) = &delta.id {
-                        entry.0 = id.clone();
+                let chunk_result = match chunk_result {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        break 'stream_retry Ok((full_content, usage, tool_calls_map, send_start));
                     }
-                    if let Some(name) = &delta.function_name {
-                        entry.1 = name.clone();
+                    Err(_) => {
+                        let err = anyhow::anyhow!(
+                            "SSE stream timed out: no data received within {}s",
+                            timeout.as_secs()
+                        );
+                        if stream_attempt < max_stream_retries {
+                            stream_attempt += 1;
+                            let backoff =
+                                std::time::Duration::from_millis(500 << stream_attempt);
+                            warn!(
+                                attempt = stream_attempt,
+                                max_retries = max_stream_retries,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "Stream idle timeout, retrying provider call"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            continue 'stream_retry;
+                        }
+                        break 'stream_retry Err(err);
                     }
-                    if let Some(args) = &delta.function_arguments {
-                        entry.2.push_str(args);
+                };
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let err_str = format!("{:#}", e);
+                        let is_stream_err = err_str.contains("Stream error")
+                            || err_str.contains("error decoding response body")
+                            || err_str.contains("timed out")
+                            || err_str.contains("timeout");
+                        if is_stream_err && stream_attempt < max_stream_retries {
+                            stream_attempt += 1;
+                            let backoff =
+                                std::time::Duration::from_millis(500 << stream_attempt);
+                            warn!(
+                                attempt = stream_attempt,
+                                max_retries = max_stream_retries,
+                                backoff_ms = backoff.as_millis() as u64,
+                                error = %err_str,
+                                "Stream decode error, retrying provider call"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            continue 'stream_retry;
+                        }
+                        break 'stream_retry Err(e);
+                    }
+                };
+
+                if !first_byte_logged {
+                    debug!(
+                        elapsed_ms = send_start.elapsed().as_millis() as u64,
+                        "SSE first-byte received"
+                    );
+                    first_byte_logged = true;
+                }
+                last_chunk_at = std::time::Instant::now();
+
+                // Accumulate text content
+                if let Some(delta) = &chunk.delta {
+                    full_content.push_str(delta);
+                    self.emit_stream_chunk(delta.clone(), false);
+                }
+
+                // Accumulate tool call deltas
+                if let Some(deltas) = &chunk.tool_call_deltas {
+                    for delta in deltas {
+                        let entry = tool_calls_map
+                            .entry(delta.index)
+                            .or_insert_with(|| (String::new(), String::new(), String::new()));
+                        if let Some(id) = &delta.id {
+                            entry.0 = id.clone();
+                        }
+                        if let Some(name) = &delta.function_name {
+                            entry.1 = name.clone();
+                        }
+                        if let Some(args) = &delta.function_arguments {
+                            entry.2.push_str(args);
+                        }
                     }
                 }
-            }
 
-            // Capture usage from final chunks
-            if chunk.usage.is_some() {
-                usage = chunk.usage.clone();
-            }
+                // Capture usage from final chunks
+                if chunk.usage.is_some() {
+                    usage = chunk.usage.clone();
+                }
 
-            if chunk.done {
-                break;
+                if chunk.done {
+                    break 'stream_retry Ok((full_content, usage, tool_calls_map, send_start));
+                }
             }
-        }
+        };
+
+        let (full_content, usage, tool_calls_map, send_start) = result?;
 
         debug!(
             total_ms = send_start.elapsed().as_millis() as u64,
@@ -396,7 +449,8 @@ impl AgentRunner {
             })
             .collect();
         tool_calls_list.sort_by_key(|(idx, _)| *idx);
-        let tool_calls: Vec<CoreToolCall> = tool_calls_list.into_iter().map(|(_, tc)| tc).collect();
+        let tool_calls: Vec<CoreToolCall> =
+            tool_calls_list.into_iter().map(|(_, tc)| tc).collect();
 
         Ok(crate::StreamingResult {
             content: if full_content.is_empty() && tool_calls.is_empty() {

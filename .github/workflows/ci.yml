@@ -69,16 +69,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+      - name: Free Disk Space (conditional)
+        run: |
+          usage=$(df / --output=pcent | tail -1 | tr -d '%')
+          if [ "$usage" -gt 80 ]; then
+            echo "Disk usage at ${usage}% — cleaning up large unused packages..."
+            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost 2>/dev/null || true
+            sudo apt-get clean 2>/dev/null || true
+            df -h / | tail -1
+          else
+            echo "Disk usage at ${usage}% — no cleanup needed."
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get install -y protobuf-compiler

@@ -1324,14 +1324,18 @@ impl AgentLoop {
 /// Consecutive failures are tracked and logged at ERROR level once the
 /// threshold is exceeded.
 async fn post_task_reflect(task: ReflectionTask) {
-    let model = &task.config.agent.model;
-    let provider = match task.provider_registry.get_provider(model) {
+    let config_model = &task.config.agent.model;
+    let provider = match task.provider_registry.get_provider(config_model) {
         Some(p) => p,
         None => {
             warn!("No provider available for task reflection");
             return;
         }
     };
+
+    // Strip the provider prefix so the API receives a clean model name
+    // (e.g. "opencode_go/kimi-k2.6" → "kimi-k2.6").
+    let model = task.provider_registry.strip_provider_prefix(config_model);
 
     let reflection_prompt = REFLECTION_USER_TEMPLATE
         .replace("{user_request}", truncate_str(&task.user_message, 100))

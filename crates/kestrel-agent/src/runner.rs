@@ -15,6 +15,52 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, info, warn};
 
+/// Map a tool name to its display icon.
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "exec" | "shell" => "\u{1f4bb}",        // 💻 terminal
+        "write_file" => "\u{270d}\u{fe0f}",     // ✍️ write
+        "read_file" => "\u{1f4d6}",              // 📖 read
+        "edit_file" => "\u{270f}\u{fe0f}",       // ✏️ edit
+        "list_dir" => "\u{1f4c2}",               // 📂 directory
+        "web_search" => "\u{1f50d}",             // 🔍 search
+        "web_fetch" => "\u{1f310}",              // 🌐 web
+        "memory" | "save_memory" => "\u{1f9e0}", // 🧠 memory
+        _ => "\u{26a1}",                         // ⚡ default
+    }
+}
+
+/// Build a short preview of a tool call's primary argument for display.
+fn format_tool_preview(name: &str, args_json: &str) -> String {
+    let args: serde_json::Value = match serde_json::from_str(args_json) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+
+    let preview: Option<&str> = match name {
+        "exec" | "shell" => args.get("command").and_then(|v| v.as_str()),
+        "write_file" | "read_file" | "edit_file" => args.get("path").and_then(|v| v.as_str()),
+        "list_dir" => args.get("path").and_then(|v| v.as_str()),
+        "web_search" => args.get("query").and_then(|v| v.as_str()),
+        "web_fetch" => args.get("url").and_then(|v| v.as_str()),
+        _ => None,
+    };
+
+    match preview {
+        Some(p) if !p.is_empty() => {
+            let max_chars = 50;
+            let chars: Vec<char> = p.chars().collect();
+            if chars.len() > max_chars {
+                let truncated: String = chars.iter().take(max_chars).collect();
+                format!("\"{}\u{2026}\"", truncated)
+            } else {
+                format!("\"{}\"", p)
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 /// Callback for emitting events during agent execution.
 pub type EventCallback = Box<dyn Fn(AgentEvent) + Send + Sync>;
 
@@ -388,7 +434,7 @@ impl AgentRunner {
                     self.emit_stream_chunk(delta.clone(), false);
                 }
 
-                // Accumulate tool call deltas
+                // Accumulate tool call deltas and announce new tool names in real-time
                 if let Some(deltas) = &chunk.tool_call_deltas {
                     for delta in deltas {
                         let entry = tool_calls_map
@@ -398,7 +444,15 @@ impl AgentRunner {
                             entry.0 = id.clone();
                         }
                         if let Some(name) = &delta.function_name {
+                            let is_new = entry.1.is_empty();
                             entry.1 = name.clone();
+                            if is_new {
+                                let icon = tool_icon(&entry.1);
+                                self.emit_stream_chunk(
+                                    format!("\n{} {} ...\n", icon, entry.1),
+                                    false,
+                                );
+                            }
                         }
                         if let Some(args) = &delta.function_arguments {
                             entry.2.push_str(args);
@@ -512,11 +566,17 @@ impl AgentRunner {
             handles.push(handle);
         }
 
-        // Emit a progress indicator so Telegram doesn't go silent while tools run.
-        self.emit_stream_chunk(
-            format!("\n\u{1f527} Executing {} tool(s)...\n", tool_calls.len()),
-            false,
-        );
+        // Show each tool call with its icon and argument preview.
+        for tc in tool_calls {
+            let icon = tool_icon(&tc.function.name);
+            let preview = format_tool_preview(&tc.function.name, &tc.function.arguments);
+            let display = if preview.is_empty() {
+                format!("\n{} {}\n", icon, tc.function.name)
+            } else {
+                format!("\n{} {}: {}\n", icon, tc.function.name, preview)
+            };
+            self.emit_stream_chunk(display, false);
+        }
 
         let total = handles.len();
         let mut results: Vec<(String, u64)> = Vec::with_capacity(total);

@@ -207,16 +207,9 @@ impl StreamConsumer {
                 self.last_edit_time = std::time::Instant::now();
             }
 
-            // Handle tool break: send tool progress message, reset for next segment
+            // Handle tool break: reset for next segment (per-tool previews are
+            // already emitted as stream chunks by the runner).
             if tool_break {
-                if let Some(tn) = tool_name_opt {
-                    let reply_to = self.message_id.as_deref();
-                    let tool_msg = format!("Using `{}`...", tn);
-                    let _ = self
-                        .channel
-                        .send_message(&self.chat_id, &tool_msg, reply_to)
-                        .await;
-                }
                 self.accumulated.clear();
                 self.last_sent_text.clear();
                 self.message_id = None;

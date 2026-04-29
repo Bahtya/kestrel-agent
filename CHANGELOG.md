@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.5.6] - 2026-04-29
+
+### Bug Fixes
+- Model/provider routing: fix prefix precedence, reflection prefix stripping, and WebSocket `/models` command (#209)
+
 ## [v0.5.5] - 2026-04-29
 
 ### New Features

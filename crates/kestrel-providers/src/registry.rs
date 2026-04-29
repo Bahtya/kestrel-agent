@@ -219,7 +219,6 @@ impl ProviderRegistry {
         let model = &config.agent.model;
         let default = registry
             .resolve_provider_name(model)
-            .map(|s| s.to_string())
             .or_else(|| registry.providers.keys().next().cloned());
         registry.default_provider = default;
         if let Some(ref name) = registry.default_provider {
@@ -242,14 +241,30 @@ impl ProviderRegistry {
     }
 
     /// Resolve a model name to a provider name.
-    pub fn resolve_provider_name(&self, model: &str) -> Option<&str> {
+    ///
+    /// Resolution order:
+    /// 1. Explicit provider prefix (`opencode_go/model-name`) → that provider
+    /// 2. Keyword matching against [`MODEL_KEYWORD_MAP`]
+    /// 3. Fallback to the default provider
+    pub fn resolve_provider_name(&self, model: &str) -> Option<String> {
+        // 1. Check for explicit provider prefix first (e.g. "opencode_go/deepseek-v4-flash").
+        //    This takes precedence over keyword matching to avoid mis-routing.
+        if let Some((prefix, rest)) = model.split_once('/') {
+            if !rest.is_empty() && self.providers.contains_key(prefix) {
+                return Some(prefix.to_string());
+            }
+        }
+
+        // 2. Fall back to keyword matching.
         let lower = model.to_lowercase();
         for (keyword, provider_name) in MODEL_KEYWORD_MAP {
             if lower.contains(keyword) && self.providers.contains_key(*provider_name) {
-                return Some(provider_name);
+                return Some(provider_name.to_string());
             }
         }
-        self.default_provider.as_deref()
+
+        // 3. Default provider.
+        self.default_provider.clone()
     }
 
     /// Strip the provider prefix from a qualified model name.
@@ -285,10 +300,46 @@ impl ProviderRegistry {
         model.to_string()
     }
 
+    /// Resolve a model name to a provider name, with an explicit provider override.
+    ///
+    /// Resolution order:
+    /// 1. Explicit `provider_override` parameter (from `agent.provider` config)
+    /// 2. Explicit provider prefix in model string
+    /// 3. Keyword matching against [`MODEL_KEYWORD_MAP`]
+    /// 4. Fallback to the default provider
+    pub fn resolve_provider_name_with_override(
+        &self,
+        model: &str,
+        provider_override: Option<&str>,
+    ) -> Option<String> {
+        // 0. Explicit provider override takes absolute precedence.
+        if let Some(name) = provider_override {
+            if self.providers.contains_key(name) {
+                return Some(name.to_string());
+            }
+        }
+        self.resolve_provider_name(model)
+    }
+
+    /// Get a provider for a given model, with optional explicit provider override.
+    pub fn get_provider_with_override(
+        &self,
+        model: &str,
+        provider_override: Option<&str>,
+    ) -> Option<Arc<dyn LlmProvider>> {
+        if let Some(name) = self.resolve_provider_name_with_override(model, provider_override) {
+            self.providers.get(&name).cloned()
+        } else {
+            self.default_provider
+                .as_ref()
+                .and_then(|name| self.providers.get(name).cloned())
+        }
+    }
+
     /// Get a provider for a given model.
     pub fn get_provider(&self, model: &str) -> Option<Arc<dyn LlmProvider>> {
         if let Some(name) = self.resolve_provider_name(model) {
-            self.providers.get(name).cloned()
+            self.providers.get(&name).cloned()
         } else {
             self.default_provider
                 .as_ref()
@@ -392,11 +443,45 @@ mod tests {
 
         // "claude-3.5-sonnet" should resolve to "anthropic"
         let resolved = reg.resolve_provider_name("claude-3.5-sonnet");
-        assert_eq!(resolved, Some("anthropic"));
+        assert_eq!(resolved.as_deref(), Some("anthropic"));
 
         // "gpt-4o" should resolve to "openai"
         let resolved = reg.resolve_provider_name("gpt-4o");
-        assert_eq!(resolved, Some("openai"));
+        assert_eq!(resolved.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn test_resolve_provider_prefix_takes_precedence_over_keywords() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("opencode_go", MockProvider::new("opencode_go", "glm"));
+        reg.register("openrouter", MockProvider::new("openrouter", "deepseek"));
+
+        // "opencode_go/deepseek-v4-flash" should resolve to opencode_go,
+        // NOT openrouter (even though "deepseek-v4" keyword matches openrouter).
+        let resolved = reg.resolve_provider_name("opencode_go/deepseek-v4-flash");
+        assert_eq!(resolved.as_deref(), Some("opencode_go"));
+    }
+
+    #[test]
+    fn test_resolve_provider_override() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("anthropic", MockProvider::new("anthropic", "claude"));
+        reg.register("openai", MockProvider::new("openai", "gpt"));
+
+        // Override takes absolute precedence over keyword matching.
+        let resolved = reg.resolve_provider_name_with_override("claude-sonnet-4-6", Some("openai"));
+        assert_eq!(resolved.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn test_resolve_provider_override_ignored_when_not_registered() {
+        let mut reg = ProviderRegistry::new();
+        reg.register("anthropic", MockProvider::new("anthropic", "claude"));
+
+        // Unknown override falls back to keyword matching.
+        let resolved =
+            reg.resolve_provider_name_with_override("claude-sonnet-4-6", Some("nonexistent"));
+        assert_eq!(resolved.as_deref(), Some("anthropic"));
     }
 
     #[test]

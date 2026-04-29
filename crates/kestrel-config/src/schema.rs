@@ -523,6 +523,15 @@ pub struct AgentDefaults {
     #[serde(default = "default_model")]
     pub model: String,
 
+    /// Explicit provider override.
+    ///
+    /// When set, the agent routes all requests to this provider regardless of
+    /// model name keyword matching.  The provider prefix in `model` (e.g.
+    /// `"opencode_go/deepseek-v4-flash"`) still takes precedence over this
+    /// field — this field acts as a fallback when no prefix is present.
+    #[serde(default)]
+    pub provider: Option<String>,
+
     /// Default temperature.
     #[serde(default = "default_temperature")]
     pub temperature: f32,
@@ -575,6 +584,7 @@ impl Default for AgentDefaults {
     fn default() -> Self {
         Self {
             model: default_model(),
+            provider: None,
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
             max_iterations: default_max_iterations(),

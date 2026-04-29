@@ -152,14 +152,20 @@ impl AgentRunner {
     /// Uses streaming if a stream_tx is configured.
     pub async fn run(&self, system_prompt: String, messages: Vec<Message>) -> Result<RunResult> {
         let config_model = &self.config.agent.model;
+        let provider_override = self.config.agent.provider.as_deref();
         let max_iterations = self.config.agent.max_iterations;
         let temperature = self.config.agent.temperature;
         let max_tokens = self.config.agent.max_tokens;
 
         let provider = self
             .providers
-            .get_provider(config_model)
-            .with_context(|| format!("No provider available for model: {}", config_model))?;
+            .get_provider_with_override(config_model, provider_override)
+            .with_context(|| {
+                format!(
+                    "No provider available for model: {} (override: {:?})",
+                    config_model, provider_override
+                )
+            })?;
 
         // Strip the provider prefix so the API receives a clean model name.
         // e.g. "opencode-go/kimi-k2.6" → "kimi-k2.6"

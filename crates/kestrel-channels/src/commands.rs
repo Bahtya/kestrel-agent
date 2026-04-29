@@ -6,7 +6,7 @@
 
 use kestrel_config::validate::ValidationFinding;
 use kestrel_config::{load_config, validate, Config};
-use kestrel_providers::ModelCatalog;
+use kestrel_providers::{ModelCatalog, ModelInfo};
 use kestrel_session::SessionManager;
 use kestrel_skill::{Skill, SkillRegistry};
 use std::fmt::Write;
@@ -621,6 +621,104 @@ fn save_config_to_default(config: &Config) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // /settings text-based implementation (for WebSocket and other non-keyboard channels)
 // ---------------------------------------------------------------------------
+
+/// Handle `/models` for text-only channels (WebSocket, etc.) that lack inline keyboards.
+///
+/// Two-level text-based interaction:
+/// - `/models` — list available providers with model counts
+/// - `/models <provider>` — list models for a specific provider
+/// - `/models <provider>/<model_id>` — select a model
+/// - `/models refresh` — invalidate model cache and show providers
+pub async fn handle_ws_models(text: &str) -> String {
+    let args = command_arguments(text);
+
+    if args.eq_ignore_ascii_case("refresh") {
+        let catalog = get_model_catalog().await;
+        catalog.invalidate_cache().await;
+        return ws_models_provider_list().await;
+    }
+
+    // Check if args looks like a provider/model selection (contains /).
+    if let Some((provider, model_id)) = args.split_once('/') {
+        if !provider.is_empty() && !model_id.is_empty() {
+            return ws_models_select(provider, model_id);
+        }
+    }
+
+    // If args matches a known provider name, show its models.
+    if !args.is_empty() {
+        let catalog = get_model_catalog().await;
+        let models = catalog.list_all_models().await;
+        let provider_models: Vec<_> = models
+            .iter()
+            .filter(|m| m.provider.eq_ignore_ascii_case(args))
+            .collect();
+        if !provider_models.is_empty() {
+            return ws_models_detail(args, &provider_models).await;
+        }
+    }
+
+    // Default: show provider list.
+    ws_models_provider_list().await
+}
+
+async fn ws_models_provider_list() -> String {
+    let config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return format!("Failed to load config: {e}"),
+    };
+
+    let current_model = config.agent.model.clone();
+
+    let catalog = get_model_catalog().await;
+    let models = catalog.list_all_models().await;
+
+    if models.is_empty() {
+        return "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml."
+            .to_string();
+    }
+
+    let mut provider_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for m in &models {
+        *provider_counts.entry(m.provider.clone()).or_insert(0) += 1;
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Providers (current: {}):\n", current_model);
+    for (provider, count) in &provider_counts {
+        let _ = writeln!(out, "  {} ({} models)", provider, count);
+    }
+    let _ = writeln!(out, "\nUsage:");
+    let _ = writeln!(out, "/models <provider> — list models");
+    let _ = writeln!(out, "/models <provider>/<model> — select model");
+    out
+}
+
+async fn ws_models_detail(provider: &str, models: &[&ModelInfo]) -> String {
+    let config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return format!("Failed to load config: {e}"),
+    };
+    let current_model = config.agent.model.clone();
+
+    let mut out = String::new();
+    let _ = writeln!(out, "[{}] models (current: {}):\n", provider, current_model);
+    for m in models {
+        let ctx = m
+            .context_length
+            .map(|c| format!(" ({}K ctx)", c / 1024))
+            .unwrap_or_default();
+        let _ = writeln!(out, "  {}{}", m.id, ctx);
+    }
+    let _ = writeln!(out, "\nUse /models {}/<model_id> to select.", provider);
+    out
+}
+
+fn ws_models_select(provider: &str, model_id: &str) -> String {
+    let qualified_id = format!("{}/{}", provider, model_id);
+    handle_models_select(&qualified_id).text
+}
 
 /// Handle `/settings` for text-only channels (WebSocket, etc.) that lack inline keyboards.
 ///

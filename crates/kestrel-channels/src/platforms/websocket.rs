@@ -696,6 +696,18 @@ impl WebSocketChannel {
                     );
                     handled = true;
                 }
+                // /models: text-based two-level model selection for WebSocket.
+                else if crate::commands::matches_command(&content_text, "models") {
+                    let response = crate::commands::handle_ws_models(&content_text).await;
+                    Self::send_ws_reply(
+                        &clients,
+                        &client_id,
+                        &response,
+                        envelope_msg_id.as_deref(),
+                        &trace_id,
+                    );
+                    handled = true;
+                }
                 // General command dispatch.
                 else if let Some(dispatch) =
                     crate::commands::try_handle_command(&content_text).await

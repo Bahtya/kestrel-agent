@@ -68,6 +68,8 @@ pub struct RetryPolicy {
     /// Lower than `max_delay` (30s vs 60s) because 503 outages are typically
     /// short-lived and we want faster retry cycles.
     pub max_delay_503: Duration,
+    /// Optional deadline; retries are aborted when this instant is reached.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for RetryPolicy {
@@ -80,6 +82,7 @@ impl Default for RetryPolicy {
             retryable_status_codes: vec![429, 500, 502, 503],
             max_retries_503: 5,
             max_delay_503: Duration::from_secs(30),
+            deadline: None,
         }
     }
 }
@@ -95,6 +98,7 @@ impl RetryPolicy {
             retryable_status_codes: vec![],
             max_retries_503: 0,
             max_delay_503: Duration::from_secs(30),
+            deadline: None,
         }
     }
 
@@ -144,6 +148,12 @@ impl RetryPolicy {
     pub fn is_retryable(&self, status: u16) -> bool {
         self.retryable_status_codes.contains(&status)
     }
+
+    /// Set a deadline after which retries are aborted.
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +176,8 @@ pub struct RetryConfig {
     pub max_retries_503: u32,
     /// Maximum delay cap for 503 retries (default 30s).
     pub max_delay_503: Duration,
+    /// Optional deadline; retries are aborted when this instant is reached.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for RetryConfig {
@@ -176,6 +188,7 @@ impl Default for RetryConfig {
             retry_on_server_error: true,
             max_retries_503: 5,
             max_delay_503: Duration::from_secs(30),
+            deadline: None,
         }
     }
 }
@@ -189,12 +202,19 @@ impl RetryConfig {
             retry_on_server_error: false,
             max_retries_503: 0,
             max_delay_503: Duration::from_secs(30),
+            deadline: None,
         }
     }
 
     /// Create a config with a custom max retry count.
     pub fn with_max_retries(mut self, max: u32) -> Self {
         self.max_retries = max;
+        self
+    }
+
+    /// Set a deadline after which retries are aborted.
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
         self
     }
 }
@@ -211,6 +231,7 @@ impl From<RetryPolicy> for RetryConfig {
             retry_on_server_error,
             max_retries_503: policy.max_retries_503,
             max_delay_503: policy.max_delay_503,
+            deadline: policy.deadline,
         }
     }
 }
@@ -519,6 +540,11 @@ where
                     return Err(err);
                 }
                 let delay = backoff_duration(config.initial_backoff, attempt, max_delay_for_err);
+                if let Some(dl) = config.deadline {
+                    if std::time::Instant::now() + delay >= dl {
+                        return Err(err);
+                    }
+                }
                 warn!(
                     attempt = attempt + 1,
                     max_retries = max_retries_for_err,
@@ -588,6 +614,12 @@ where
                 } else {
                     backoff_duration(policy.base_delay, attempt, max_delay_for_err)
                 };
+
+                if let Some(dl) = policy.deadline {
+                    if std::time::Instant::now() + delay >= dl {
+                        return Err(err);
+                    }
+                }
 
                 warn!(
                     attempt = attempt + 1,

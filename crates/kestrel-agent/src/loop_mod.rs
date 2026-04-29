@@ -250,6 +250,7 @@ impl AgentLoop {
                     let timeout_chat_id = msg.chat_id.clone();
                     let timeout_message_id = msg.message_id.clone();
                     let timeout_trace_id = msg.trace_id.clone();
+                    let timeout_session_key = msg.session_key();
 
                     let result = tokio::time::timeout(
                         std::time::Duration::from_secs(self.config.agent.message_timeout),
@@ -280,6 +281,14 @@ impl AgentLoop {
                             if let Err(e) = self.bus.publish_outbound(timeout_reply).await {
                                 error!("Failed to send timeout reply: {}", e);
                             }
+
+                            // Clean up stale session entry after timeout
+                            if let Some((_, token)) =
+                                self.active_sessions.remove(&timeout_session_key)
+                            {
+                                token.cancel();
+                            }
+                            self.pending_messages.remove(&timeout_session_key);
                         }
                     }
                 }
@@ -469,6 +478,8 @@ impl AgentLoop {
             // Run agent with events wired through, with retry for transient stream errors
             let messages = session.to_messages();
             let run_start = std::time::Instant::now();
+            let retry_deadline =
+                run_start + std::time::Duration::from_secs(self.config.agent.message_timeout);
             let max_retries = 3;
             let mut attempt = 0;
             let mut stream_consumer_handle: Option<tokio::task::JoinHandle<(String, Option<String>)>> = None;
@@ -564,7 +575,24 @@ impl AgentLoop {
                             || err_str.contains("reset by peer");
 
                         if is_transient && attempt < max_retries {
-                            let backoff = std::time::Duration::from_secs(1 << (attempt + 1));
+                            let is_stream_error = err_str.contains("Stream error")
+                                || err_str.contains("error decoding response body");
+                            let backoff = if is_stream_error {
+                                std::time::Duration::from_millis(500 << attempt)
+                            } else {
+                                std::time::Duration::from_secs(1 << (attempt + 1))
+                            };
+
+                            let now = std::time::Instant::now();
+                            if now + backoff >= retry_deadline {
+                                warn!(
+                                    remaining_ms = (retry_deadline - now).as_millis() as u64,
+                                    backoff_ms = backoff.as_millis() as u64,
+                                    "Skipping retry: would exceed message timeout budget"
+                                );
+                                break 'retry Err(e);
+                            }
+
                             warn!(
                                 attempt = attempt + 1,
                                 max_retries,
@@ -1275,7 +1303,10 @@ impl AgentLoop {
 
     /// Check if a session currently has an active agent run.
     pub fn is_session_active(&self, session_key: &str) -> bool {
-        self.active_sessions.contains_key(session_key)
+        self.active_sessions
+            .get(session_key)
+            .map(|entry| !entry.value().is_cancelled())
+            .unwrap_or(false)
     }
 }
 

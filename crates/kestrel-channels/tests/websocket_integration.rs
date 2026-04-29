@@ -68,13 +68,13 @@ async fn test_full_cycle_no_auth() {
         });
     }
     // Give streaming consumer time to subscribe.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // Connect client.
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // 1. Receive welcome.
     let welcome = drain_text(&mut ws).await;
@@ -137,7 +137,7 @@ async fn test_full_cycle_with_auth() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // 1. Sending a message before auth should fail.
     let msg = WsEnvelope::message("premature");
@@ -153,7 +153,7 @@ async fn test_full_cycle_with_auth() {
     let (mut ws2, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     let auth_msg = r#"{"type":"auth","token":"my-token"}"#;
     ws2.send(WsMessage::Text(auth_msg.into())).await.unwrap();
@@ -215,7 +215,7 @@ async fn test_streaming_end_to_end() {
             .await;
         });
     }
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // Publish streaming chunks.
     bus.publish_stream_chunk(StreamChunk {
@@ -288,7 +288,7 @@ async fn test_multiple_clients_individual_sessions() {
     let (mut ws2, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     // Drain welcomes.
     let w1 = drain_text(&mut ws1).await;
@@ -358,7 +358,7 @@ async fn test_trace_id_from_envelope_to_inbound_message() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // Drain welcome.
     let _welcome = drain_text(&mut ws).await;
@@ -399,7 +399,7 @@ async fn test_trace_id_auto_generated_when_missing() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     let _welcome = drain_text(&mut ws).await;
 
@@ -469,7 +469,7 @@ async fn test_outbound_message_carries_trace_id() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     let welcome = drain_text(&mut ws).await;
     let client_id = welcome["client_id"].as_str().unwrap().to_string();
@@ -510,7 +510,7 @@ async fn test_trace_id_round_trip_full_chain() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     let welcome = drain_text(&mut ws).await;
     // The client_id from welcome equals the chat_id in InboundMessage.
@@ -573,7 +573,7 @@ async fn test_inbound_metadata_contains_ws_ids() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     let welcome = drain_text(&mut ws).await;
     let client_id = welcome["client_id"].as_str().unwrap().to_string();
@@ -631,7 +631,7 @@ async fn test_streaming_chunk_carries_trace_id() {
             .await;
         });
     }
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // Publish a streaming chunk WITH trace_id.
     bus.publish_stream_chunk(StreamChunk {

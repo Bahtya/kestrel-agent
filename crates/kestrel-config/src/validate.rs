@@ -2564,10 +2564,7 @@ mod tests {
         config.dream.enabled = true;
         config.dream.model = Some("claude-3".to_string());
         let report = validate(&config);
-        assert!(report
-            .warnings()
-            .iter()
-            .all(|w| w.path != "dream.model"));
+        assert!(report.warnings().iter().all(|w| w.path != "dream.model"));
     }
 
     #[test]

@@ -861,7 +861,7 @@ async fn ws_settings_model_switch() -> String {
 
     // Fallback to MODEL_CYCLE if no discovered models.
     if candidates.is_empty() {
-        let cycle: Vec<&str> = MODEL_CYCLE.iter().copied().collect();
+        let cycle: Vec<&str> = MODEL_CYCLE.to_vec();
         let idx = cycle
             .iter()
             .position(|m| m.eq_ignore_ascii_case(current_model))

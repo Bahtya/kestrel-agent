@@ -1,13 +1,14 @@
 //! Setup command — interactive wizard for configuring Kestrel.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use console::Term;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input, Password as PasswordInput, Select};
 use kestrel_config::{
     loader, paths,
     schema::{Config, ProviderEntry, TelegramConfig, WebSocketConfig},
 };
 use owo_colors::OwoColorize;
+use std::net::SocketAddr;
 use std::path::Path;
 
 const PROVIDER_NAMES: &[&str] = &[
@@ -26,31 +27,139 @@ const PROVIDER_NAMES: &[&str] = &[
 
 const TOTAL_STEPS: usize = 5;
 
-pub fn run(_config: Config) -> Result<()> {
-    let term = Term::stdout();
-    run_wizard(&term)
+// ── Trait for interactive I/O (enables testability) ────────────
+
+trait WizardIo {
+    fn confirm(&self, prompt: &str, default: bool) -> Result<bool>;
+    fn select(&self, prompt: &str, items: &[&str], default: usize) -> Result<usize>;
+    fn input_with_default(&self, prompt: &str, default: &str) -> Result<String>;
+    fn input_allow_empty(&self, prompt: &str) -> Result<String>;
+    fn password(&self, prompt: &str) -> Result<String>;
+    fn write_line(&self, line: &str) -> Result<()>;
 }
 
-fn run_wizard(term: &Term) -> Result<()> {
-    print_banner(term)?;
+// ── Production implementation using Term + dialoguer ───────────
 
+struct TermWizard<'a> {
+    term: &'a Term,
+}
+
+impl<'a> TermWizard<'a> {
+    fn new(term: &'a Term) -> Self {
+        Self { term }
+    }
+}
+
+impl WizardIo for TermWizard<'_> {
+    fn confirm(&self, prompt: &str, default: bool) -> Result<bool> {
+        Ok(Confirm::new()
+            .with_prompt(prompt)
+            .default(default)
+            .interact_on(self.term)?)
+    }
+
+    fn select(&self, prompt: &str, items: &[&str], default: usize) -> Result<usize> {
+        Ok(Select::new()
+            .with_prompt(prompt)
+            .items(items)
+            .default(default)
+            .interact_on(self.term)?)
+    }
+
+    fn input_with_default(&self, prompt: &str, default: &str) -> Result<String> {
+        Ok(Input::new()
+            .with_prompt(prompt)
+            .default(default.to_string())
+            .interact_text_on(self.term)?)
+    }
+
+    fn input_allow_empty(&self, prompt: &str) -> Result<String> {
+        Ok(Input::<String>::new()
+            .with_prompt(prompt)
+            .allow_empty(true)
+            .interact_text_on(self.term)?)
+    }
+
+    fn password(&self, prompt: &str) -> Result<String> {
+        Ok(PasswordInput::new()
+            .with_prompt(prompt)
+            .interact_on(self.term)?)
+    }
+
+    fn write_line(&self, line: &str) -> Result<()> {
+        self.term.write_line(line)?;
+        Ok(())
+    }
+}
+
+// ── Provider dispatch macro (single source of truth) ───────────
+
+macro_rules! provider_field {
+    ($config:expr, $provider:expr, mut) => {
+        match $provider {
+            "anthropic" => &mut $config.providers.anthropic,
+            "openai" => &mut $config.providers.openai,
+            "openrouter" => &mut $config.providers.openrouter,
+            "ollama" => &mut $config.providers.ollama,
+            "deepseek" => &mut $config.providers.deepseek,
+            "gemini" => &mut $config.providers.gemini,
+            "groq" => &mut $config.providers.groq,
+            "moonshot" => &mut $config.providers.moonshot,
+            "minimax" => &mut $config.providers.minimax,
+            "github_copilot" => &mut $config.providers.github_copilot,
+            "openai_codex" => &mut $config.providers.openai_codex,
+            _ => return None,
+        }
+    };
+    ($config:expr, $provider:expr) => {
+        match $provider {
+            "anthropic" => &$config.providers.anthropic,
+            "openai" => &$config.providers.openai,
+            "openrouter" => &$config.providers.openrouter,
+            "ollama" => &$config.providers.ollama,
+            "deepseek" => &$config.providers.deepseek,
+            "gemini" => &$config.providers.gemini,
+            "groq" => &$config.providers.groq,
+            "moonshot" => &$config.providers.moonshot,
+            "minimax" => &$config.providers.minimax,
+            "github_copilot" => &$config.providers.github_copilot,
+            "openai_codex" => &$config.providers.openai_codex,
+            _ => return None,
+        }
+    };
+}
+
+// ── Entry point ────────────────────────────────────────────────
+
+pub fn run(_config: Config) -> Result<()> {
+    let term = Term::stdout();
+    if !term.features().is_atty() {
+        bail!(
+            "Setup requires an interactive terminal. \
+             Run this command in a terminal, not in a pipe or CI environment."
+        );
+    }
+    let io = TermWizard::new(&term);
     let config_path = paths::get_config_path()?;
+    run_wizard(&io, &config_path)
+}
+
+// ── Wizard flow ────────────────────────────────────────────────
+
+fn run_wizard(io: &dyn WizardIo, config_path: &Path) -> Result<()> {
+    print_banner(io)?;
 
     // ── Step 1: Check existing config ────────────────────────────
-    print_step(term, 1, "Existing Configuration")?;
+    print_step(io, 1, "Existing Configuration")?;
 
     let mut config = if config_path.exists() {
-        match load_existing_config(&config_path) {
+        match load_existing_config(config_path) {
             Ok(existing) => {
-                show_config_summary(term, &existing)?;
-                if Confirm::new()
-                    .with_prompt("Update existing config?")
-                    .default(true)
-                    .interact_on(term)?
-                {
+                show_config_summary(io, &existing)?;
+                if io.confirm("Update existing config?", true)? {
                     existing
                 } else {
-                    term.write_line(&format!(
+                    io.write_line(&format!(
                         "  {} Keeping config at {}.",
                         "✓".green(),
                         config_path.display()
@@ -59,53 +168,45 @@ fn run_wizard(term: &Term) -> Result<()> {
                 }
             }
             Err(e) => {
-                term.write_line(&format!(
+                io.write_line(&format!(
                     "  {} Could not parse existing config: {}",
                     "!".yellow(),
                     e
                 ))?;
-                if Confirm::new()
-                    .with_prompt("Start fresh with defaults?")
-                    .default(true)
-                    .interact_on(term)?
-                {
+                if io.confirm("Start fresh with defaults?", true)? {
                     Config::default()
                 } else {
-                    anyhow::bail!("Setup cancelled.");
+                    bail!("Setup cancelled.");
                 }
             }
         }
     } else {
-        term.write_line("  No config file found. Starting fresh.")?;
+        io.write_line("  No config file found. Starting fresh.")?;
         Config::default()
     };
 
     // ── Step 2: Provider configuration ───────────────────────────
-    print_step(term, 2, "Provider Configuration")?;
-    configure_provider(term, &mut config)?;
+    print_step(io, 2, "Provider Configuration")?;
+    configure_provider(io, &mut config)?;
 
     // ── Step 3: Telegram channel ─────────────────────────────────
-    print_step(term, 3, "Telegram Channel")?;
-    configure_telegram(term, &mut config)?;
+    print_step(io, 3, "Telegram Channel")?;
+    configure_telegram(io, &mut config)?;
 
     // ── Step 4: WebSocket port ───────────────────────────────────
-    print_step(term, 4, "WebSocket Port")?;
-    configure_websocket(term, &mut config)?;
+    print_step(io, 4, "WebSocket Port")?;
+    configure_websocket(io, &mut config)?;
 
     // ── Step 5: Validate & write ─────────────────────────────────
-    print_step(term, 5, "Save Configuration")?;
+    print_step(io, 5, "Save Configuration")?;
 
-    term.write_line(&format!("  Config path: {}", config_path.display()))?;
-    term.write_line("")?;
-    show_config_summary(term, &config)?;
-    term.write_line("")?;
+    io.write_line(&format!("  Config path: {}", config_path.display()))?;
+    io.write_line("")?;
+    show_config_summary(io, &config)?;
+    io.write_line("")?;
 
-    if !Confirm::new()
-        .with_prompt("Write this configuration?")
-        .default(true)
-        .interact_on(term)?
-    {
-        term.write_line(&format!("  {} Setup cancelled.", "!".yellow()))?;
+    if !io.confirm("Write this configuration?", true)? {
+        io.write_line(&format!("  {} Setup cancelled.", "!".yellow()))?;
         return Ok(());
     }
 
@@ -116,7 +217,7 @@ fn run_wizard(term: &Term) -> Result<()> {
     std::fs::create_dir_all(home)
         .with_context(|| format!("Failed to create config home: {}", home.display()))?;
 
-    loader::save_config(&config, &config_path)?;
+    loader::save_config(&config, config_path)?;
 
     for dir in ["skills", "sessions", "learning"] {
         let path = home.join(dir);
@@ -124,42 +225,42 @@ fn run_wizard(term: &Term) -> Result<()> {
             .with_context(|| format!("Failed to create directory: {}", path.display()))?;
     }
 
-    term.write_line("")?;
-    term.write_line(&format!(
+    io.write_line("")?;
+    io.write_line(&format!(
         "  {} Configuration saved to {}",
         "✓".green(),
         config_path.display()
     ))?;
-    term.write_line(&format!(
+    io.write_line(&format!(
         "  {} Created directories: skills, sessions, learning",
         "✓".green()
     ))?;
-    term.write_line(&format!("  {} Setup complete!", "✓".green()))?;
+    io.write_line(&format!("  {} Setup complete!", "✓".green()))?;
 
     Ok(())
 }
 
-fn print_banner(term: &Term) -> Result<()> {
-    term.write_line("")?;
-    term.write_line(&format!(
+fn print_banner(io: &dyn WizardIo) -> Result<()> {
+    io.write_line("")?;
+    io.write_line(&format!(
         "  {} {}",
         "▸".cyan(),
         "Kestrel Setup Wizard".bold().cyan()
     ))?;
-    term.write_line("")?;
+    io.write_line("")?;
     Ok(())
 }
 
-fn print_step(term: &Term, step: usize, title: &str) -> Result<()> {
-    term.write_line("")?;
-    term.write_line(&format!(
+fn print_step(io: &dyn WizardIo, step: usize, title: &str) -> Result<()> {
+    io.write_line("")?;
+    io.write_line(&format!(
         "  {} Step {}/{}: {}",
         "▸".cyan(),
         step,
         TOTAL_STEPS,
         title.bold()
     ))?;
-    term.write_line(&format!("  {}", "─".repeat(40).dimmed()))?;
+    io.write_line(&format!("  {}", "─".repeat(40).dimmed()))?;
     Ok(())
 }
 
@@ -171,33 +272,37 @@ fn load_existing_config(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-fn show_config_summary(term: &Term, config: &Config) -> Result<()> {
-    let model = &config.agent.model;
+fn mask_token(token: &str) -> String {
+    if token.is_empty() {
+        "(not set)".to_string()
+    } else {
+        let visible = token.len().min(3);
+        format!("{}…(masked)", &token[..visible])
+    }
+}
+
+fn show_config_summary(io: &dyn WizardIo, config: &Config) -> Result<()> {
     let provider = config.agent.provider.as_deref().unwrap_or("default");
-    term.write_line(&format!("  Model:        {}", model))?;
-    term.write_line(&format!("  Provider:     {}", provider))?;
-    term.write_line(&format!("  Temperature:  {}", config.agent.temperature))?;
-    term.write_line(&format!("  Max tokens:   {}", config.agent.max_tokens))?;
-    term.write_line(&format!("  Streaming:    {}", config.agent.streaming))?;
+    io.write_line(&format!("  Model:        {}", config.agent.model))?;
+    io.write_line(&format!("  Provider:     {}", provider))?;
+    io.write_line(&format!("  Temperature:  {}", config.agent.temperature))?;
+    io.write_line(&format!("  Max tokens:   {}", config.agent.max_tokens))?;
+    io.write_line(&format!("  Streaming:    {}", config.agent.streaming))?;
 
     if let Some(ref tg) = config.channels.telegram {
-        term.write_line(&format!(
-            "  Telegram:     {}…{}",
-            &tg.token[..tg.token.len().min(4)],
-            if tg.token.len() > 4 { "(masked)" } else { "" }
-        ))?;
+        io.write_line(&format!("  Telegram:     {}", mask_token(&tg.token)))?;
     }
 
     if let Some(ref ws) = config.channels.websocket {
         if ws.enabled {
-            term.write_line(&format!("  WebSocket:    {}", ws.listen_addr))?;
+            io.write_line(&format!("  WebSocket:    {}", ws.listen_addr))?;
         }
     }
 
     Ok(())
 }
 
-fn configure_provider(term: &Term, config: &mut Config) -> Result<()> {
+fn configure_provider(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
     let default_idx = config
         .agent
         .provider
@@ -205,11 +310,7 @@ fn configure_provider(term: &Term, config: &mut Config) -> Result<()> {
         .and_then(|p| PROVIDER_NAMES.iter().position(|&n| n == p))
         .unwrap_or(1); // default to "openai"
 
-    let provider_name = Select::new()
-        .with_prompt("Select LLM provider")
-        .items(PROVIDER_NAMES)
-        .default(default_idx)
-        .interact_on(term)?;
+    let provider_name = io.select("Select LLM provider", PROVIDER_NAMES, default_idx)?;
 
     let provider_key = PROVIDER_NAMES[provider_name];
     config.agent.provider = Some(provider_key.to_string());
@@ -235,10 +336,7 @@ fn configure_provider(term: &Term, config: &mut Config) -> Result<()> {
         &config.agent.model
     };
 
-    let model: String = Input::new()
-        .with_prompt("Model name")
-        .default(current_model.to_string())
-        .interact_text_on(term)?;
+    let model: String = io.input_with_default("Model name", current_model)?;
     config.agent.model = model;
 
     let default_url = match provider_key {
@@ -259,24 +357,16 @@ fn configure_provider(term: &Term, config: &mut Config) -> Result<()> {
     let current_url = get_provider_url(config, provider_key).unwrap_or(default_url);
 
     if !current_url.is_empty() {
-        let base_url: String = Input::new()
-            .with_prompt("Base URL")
-            .default(current_url.to_string())
-            .interact_text_on(term)?;
+        let base_url: String = io.input_with_default("Base URL", current_url)?;
         set_provider_url(config, provider_key, &base_url);
     } else {
-        let base_url: String = Input::new()
-            .with_prompt("Base URL (leave empty for default)")
-            .allow_empty(true)
-            .interact_text_on(term)?;
+        let base_url: String = io.input_allow_empty("Base URL (leave empty for default)")?;
         if !base_url.is_empty() {
             set_provider_url(config, provider_key, &base_url);
         }
     }
 
-    let api_key: String = Input::new()
-        .with_prompt("API key (input hidden)")
-        .interact_text_on(term)?;
+    let api_key: String = io.password("API key")?;
     if !api_key.is_empty() {
         set_provider_api_key(config, provider_key, &api_key);
     }
@@ -284,21 +374,15 @@ fn configure_provider(term: &Term, config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-fn configure_telegram(term: &Term, config: &mut Config) -> Result<()> {
+fn configure_telegram(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
     let setup_tg = if config.channels.telegram.is_some() {
-        Confirm::new()
-            .with_prompt("Configure Telegram bot?")
-            .default(true)
-            .interact_on(term)?
+        io.confirm("Configure Telegram bot?", true)?
     } else {
-        Confirm::new()
-            .with_prompt("Set up a Telegram bot?")
-            .default(false)
-            .interact_on(term)?
+        io.confirm("Set up a Telegram bot?", false)?
     };
 
     if !setup_tg {
-        term.write_line("  Skipped.")?;
+        io.write_line("  Skipped.")?;
         return Ok(());
     }
 
@@ -309,20 +393,44 @@ fn configure_telegram(term: &Term, config: &mut Config) -> Result<()> {
         .map(|tg| tg.token.as_str())
         .unwrap_or("");
 
-    let token: String = Input::new()
-        .with_prompt("Bot token (from @BotFather)")
-        .default(current_token.to_string())
-        .interact_text_on(term)?;
+    let token: String = if current_token.is_empty() {
+        io.input_allow_empty("Bot token (from @BotFather)")?
+    } else {
+        io.input_with_default("Bot token (from @BotFather)", current_token)?
+    };
 
     if token.is_empty() {
-        term.write_line("  No token provided, skipping Telegram.")?;
+        io.write_line("  No token provided, skipping Telegram.")?;
         return Ok(());
     }
 
-    let allowed: String = Input::new()
-        .with_prompt("Allowed user IDs (comma-separated, leave empty for all)")
-        .allow_empty(true)
-        .interact_text_on(term)?;
+    let allowed: String = loop {
+        let input: String =
+            io.input_allow_empty("Allowed user IDs (comma-separated, leave empty for all)")?;
+        if input.trim().is_empty() {
+            break String::new();
+        }
+        let ids: Vec<&str> = input
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut valid = true;
+        for id in &ids {
+            if id.parse::<u64>().is_err() {
+                io.write_line(&format!(
+                    "  {} '{}' is not a valid user ID (must be a positive integer).",
+                    "!".yellow(),
+                    id
+                ))?;
+                valid = false;
+                break;
+            }
+        }
+        if valid {
+            break input;
+        }
+    };
 
     let allowed_users: Vec<String> = if allowed.trim().is_empty() {
         Vec::new()
@@ -334,19 +442,34 @@ fn configure_telegram(term: &Term, config: &mut Config) -> Result<()> {
             .collect()
     };
 
+    // Preserve existing values for fields not explicitly configured in the wizard.
+    let (admin_users, enabled, streaming, proxy) = config
+        .channels
+        .telegram
+        .as_ref()
+        .map(|tg| {
+            (
+                tg.admin_users.clone(),
+                tg.enabled,
+                tg.streaming,
+                tg.proxy.clone(),
+            )
+        })
+        .unwrap_or((Vec::new(), true, true, None));
+
     config.channels.telegram = Some(TelegramConfig {
         token,
         allowed_users,
-        admin_users: Vec::new(),
-        enabled: true,
-        streaming: true,
-        proxy: None,
+        admin_users,
+        enabled,
+        streaming,
+        proxy,
     });
 
     Ok(())
 }
 
-fn configure_websocket(term: &Term, config: &mut Config) -> Result<()> {
+fn configure_websocket(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
     let default_addr = config
         .channels
         .websocket
@@ -354,21 +477,28 @@ fn configure_websocket(term: &Term, config: &mut Config) -> Result<()> {
         .map(|ws| ws.listen_addr.as_str())
         .unwrap_or("127.0.0.1:8090");
 
-    let enable = Confirm::new()
-        .with_prompt("Enable WebSocket channel?")
-        .default(false)
-        .interact_on(term)?;
+    let enable = io.confirm("Enable WebSocket channel?", false)?;
 
     if !enable {
         config.channels.websocket = None;
-        term.write_line("  Skipped.")?;
+        io.write_line("  Skipped.")?;
         return Ok(());
     }
 
-    let listen_addr: String = Input::new()
-        .with_prompt("Listen address")
-        .default(default_addr.to_string())
-        .interact_text_on(term)?;
+    let listen_addr: String = loop {
+        let input = io.input_with_default("Listen address", default_addr)?;
+        match input.parse::<SocketAddr>() {
+            Ok(_) => break input,
+            Err(e) => {
+                io.write_line(&format!(
+                    "  {} Invalid address '{}': {}",
+                    "!".yellow(),
+                    input,
+                    e
+                ))?;
+            }
+        }
+    };
 
     config.channels.websocket = Some(WebSocketConfig {
         enabled: true,
@@ -381,116 +511,24 @@ fn configure_websocket(term: &Term, config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-// ── Provider field helpers ───────────────────────────────────
+// ── Provider field helpers (using macro) ───────────────────────
 
 fn get_provider_entry_mut<'a>(
     config: &'a mut Config,
     provider: &str,
 ) -> Option<&'a mut ProviderEntry> {
-    match provider {
-        "anthropic" => config.providers.anthropic.as_mut(),
-        "openai" => config.providers.openai.as_mut(),
-        "openrouter" => config.providers.openrouter.as_mut(),
-        "ollama" => config.providers.ollama.as_mut(),
-        "deepseek" => config.providers.deepseek.as_mut(),
-        "gemini" => config.providers.gemini.as_mut(),
-        "groq" => config.providers.groq.as_mut(),
-        "moonshot" => config.providers.moonshot.as_mut(),
-        "minimax" => config.providers.minimax.as_mut(),
-        "github_copilot" => config.providers.github_copilot.as_mut(),
-        "openai_codex" => config.providers.openai_codex.as_mut(),
-        _ => None,
-    }
+    let field: &mut Option<ProviderEntry> = provider_field!(config, provider, mut);
+    Some(field.as_mut()?)
 }
 
 fn ensure_provider_entry(config: &mut Config, provider: &str) {
-    match provider {
-        "anthropic" => {
-            config
-                .providers
-                .anthropic
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "openai" => {
-            config
-                .providers
-                .openai
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "openrouter" => {
-            config
-                .providers
-                .openrouter
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "ollama" => {
-            config
-                .providers
-                .ollama
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "deepseek" => {
-            config
-                .providers
-                .deepseek
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "gemini" => {
-            config
-                .providers
-                .gemini
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "groq" => {
-            config
-                .providers
-                .groq
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "moonshot" => {
-            config
-                .providers
-                .moonshot
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "minimax" => {
-            config
-                .providers
-                .minimax
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "github_copilot" => {
-            config
-                .providers
-                .github_copilot
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        "openai_codex" => {
-            config
-                .providers
-                .openai_codex
-                .get_or_insert_with(ProviderEntry::default);
-        }
-        _ => {}
-    }
+    let field: &mut Option<ProviderEntry> = provider_field!(config, provider, mut);
+    field.get_or_insert_with(ProviderEntry::default);
 }
 
 fn get_provider_url<'a>(config: &'a Config, provider: &str) -> Option<&'a str> {
-    let entry = match provider {
-        "anthropic" => config.providers.anthropic.as_ref(),
-        "openai" => config.providers.openai.as_ref(),
-        "openrouter" => config.providers.openrouter.as_ref(),
-        "ollama" => config.providers.ollama.as_ref(),
-        "deepseek" => config.providers.deepseek.as_ref(),
-        "gemini" => config.providers.gemini.as_ref(),
-        "groq" => config.providers.groq.as_ref(),
-        "moonshot" => config.providers.moonshot.as_ref(),
-        "minimax" => config.providers.minimax.as_ref(),
-        "github_copilot" => config.providers.github_copilot.as_ref(),
-        "openai_codex" => config.providers.openai_codex.as_ref(),
-        _ => None,
-    };
-    entry.and_then(|e| e.base_url.as_deref())
+    let field: &Option<ProviderEntry> = provider_field!(config, provider);
+    field.as_ref().and_then(|e| e.base_url.as_deref())
 }
 
 fn set_provider_url(config: &mut Config, provider: &str, url: &str) {
@@ -518,18 +556,110 @@ fn set_provider_api_key(config: &mut Config, provider: &str, key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
 
     fn template_toml() -> String {
         toml::to_string(&Config::default()).unwrap()
     }
+
+    // ── Mock wizard IO for flow testing ─────────────────────────
+
+    #[derive(Debug, Clone)]
+    enum MockAction {
+        Confirm {
+            prompt_contains: &'static str,
+            result: bool,
+        },
+        Select { result: usize },
+        Input { result: &'static str },
+        Password { result: &'static str },
+    }
+
+    struct MockWizard {
+        actions: RefCell<VecDeque<MockAction>>,
+        output: RefCell<String>,
+    }
+
+    impl MockWizard {
+        fn new(actions: Vec<MockAction>) -> Self {
+            Self {
+                actions: RefCell::new(actions.into()),
+                output: RefCell::new(String::new()),
+            }
+        }
+
+        fn output(&self) -> String {
+            self.output.borrow().clone()
+        }
+    }
+
+    impl WizardIo for MockWizard {
+        fn confirm(&self, prompt: &str, _default: bool) -> Result<bool> {
+            let action = self.actions.borrow_mut().pop_front();
+            match action {
+                Some(MockAction::Confirm {
+                    prompt_contains,
+                    result,
+                }) => {
+                    assert!(
+                        prompt.contains(prompt_contains),
+                        "confirm prompt '{}' did not contain '{}'",
+                        prompt,
+                        prompt_contains
+                    );
+                    Ok(result)
+                }
+                _ => panic!("unexpected confirm call, prompt: {}", prompt),
+            }
+        }
+
+        fn select(&self, _prompt: &str, _items: &[&str], _default: usize) -> Result<usize> {
+            let action = self.actions.borrow_mut().pop_front();
+            match action {
+                Some(MockAction::Select { result }) => Ok(result),
+                _ => panic!("unexpected select call"),
+            }
+        }
+
+        fn input_with_default(&self, _prompt: &str, _default: &str) -> Result<String> {
+            let action = self.actions.borrow_mut().pop_front();
+            match action {
+                Some(MockAction::Input { result }) => Ok(result.to_string()),
+                _ => panic!("unexpected input_with_default call"),
+            }
+        }
+
+        fn input_allow_empty(&self, _prompt: &str) -> Result<String> {
+            let action = self.actions.borrow_mut().pop_front();
+            match action {
+                Some(MockAction::Input { result }) => Ok(result.to_string()),
+                _ => panic!("unexpected input_allow_empty call"),
+            }
+        }
+
+        fn password(&self, _prompt: &str) -> Result<String> {
+            let action = self.actions.borrow_mut().pop_front();
+            match action {
+                Some(MockAction::Password { result }) => Ok(result.to_string()),
+                _ => panic!("unexpected password call"),
+            }
+        }
+
+        fn write_line(&self, line: &str) -> Result<()> {
+            self.output.borrow_mut().push_str(line);
+            self.output.borrow_mut().push('\n');
+            Ok(())
+        }
+    }
+
+    // ── Unit tests ──────────────────────────────────────────────
 
     #[test]
     fn setup_creates_template_config_when_config_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.toml");
 
-        // Simulate: no existing config, wizard writes defaults
         let config = Config::default();
         let home = config_path.parent().unwrap();
         std::fs::create_dir_all(home).unwrap();
@@ -558,5 +688,150 @@ mod tests {
         let mut config = Config::default();
         set_provider_url(&mut config, "nonexistent", "https://example.com");
         assert!(get_provider_url(&config, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn wizard_keeps_existing_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let existing = Config::default();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        loader::save_config(&existing, &config_path).unwrap();
+
+        let mock = MockWizard::new(vec![MockAction::Confirm {
+            prompt_contains: "Update",
+            result: false,
+        }]);
+
+        run_wizard(&mock, &config_path).unwrap();
+
+        // Config should be unchanged
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            template_toml()
+        );
+    }
+
+    #[test]
+    fn wizard_fresh_setup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let mock = MockWizard::new(vec![
+            // Step 2: Provider
+            MockAction::Select { result: 1 }, // openai
+            MockAction::Input { result: "gpt-4o" },
+            MockAction::Input { result: "https://api.openai.com/v1" },
+            MockAction::Password { result: "sk-test-key" },
+            // Step 3: Telegram (skip)
+            MockAction::Confirm {
+                prompt_contains: "Telegram",
+                result: false,
+            },
+            // Step 4: WebSocket (skip)
+            MockAction::Confirm {
+                prompt_contains: "WebSocket",
+                result: false,
+            },
+            // Step 5: Save
+            MockAction::Confirm {
+                prompt_contains: "Write",
+                result: true,
+            },
+        ]);
+
+        run_wizard(&mock, &config_path).unwrap();
+
+        assert!(config_path.exists());
+        let saved: Config =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(saved.agent.provider.as_deref(), Some("openai"));
+        assert_eq!(saved.agent.model, "gpt-4o");
+    }
+
+    #[test]
+    fn wizard_overwrite_existing_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let existing = Config::default();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        loader::save_config(&existing, &config_path).unwrap();
+
+        let mock = MockWizard::new(vec![
+            // Step 1: Overwrite
+            MockAction::Confirm {
+                prompt_contains: "Update",
+                result: true,
+            },
+            // Step 2: Provider
+            MockAction::Select { result: 0 }, // anthropic
+            MockAction::Input {
+                result: "claude-sonnet-4-20250514",
+            },
+            MockAction::Input {
+                result: "https://api.anthropic.com",
+            },
+            MockAction::Password { result: "sk-ant-test" },
+            // Step 3: Telegram (skip)
+            MockAction::Confirm {
+                prompt_contains: "Telegram",
+                result: false,
+            },
+            // Step 4: WebSocket (skip)
+            MockAction::Confirm {
+                prompt_contains: "WebSocket",
+                result: false,
+            },
+            // Step 5: Save
+            MockAction::Confirm {
+                prompt_contains: "Write",
+                result: true,
+            },
+        ]);
+
+        run_wizard(&mock, &config_path).unwrap();
+
+        let saved: Config =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(saved.agent.provider.as_deref(), Some("anthropic"));
+        assert_eq!(saved.agent.model, "claude-sonnet-4-20250514");
+    }
+
+    fn tg(token: &str) -> TelegramConfig {
+        TelegramConfig {
+            token: token.to_string(),
+            allowed_users: Vec::new(),
+            admin_users: Vec::new(),
+            enabled: true,
+            streaming: false,
+            proxy: None,
+        }
+    }
+
+    #[test]
+    fn token_masking_short_tokens() {
+        let mut config = Config::default();
+        config.channels.telegram = Some(tg("ab"));
+
+        let mock = MockWizard::new(vec![]);
+        show_config_summary(&mock, &config).unwrap();
+
+        let output = mock.output();
+        assert!(output.contains("(masked)"));
+        assert!(!output.contains("ab…"));
+    }
+
+    #[test]
+    fn token_masking_empty_token() {
+        let mut config = Config::default();
+        config.channels.telegram = Some(tg(""));
+
+        let mock = MockWizard::new(vec![]);
+        show_config_summary(&mock, &config).unwrap();
+
+        let output = mock.output();
+        assert!(output.contains("(not set)"));
     }
 }

@@ -113,6 +113,27 @@ enum ConfigSubcommand {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Import encrypted config from a URL.
+    Import {
+        /// URL to download the encrypted config file from.
+        url: String,
+
+        /// Password for decryption.
+        #[arg(long)]
+        password: String,
+    },
+
+    /// Export current config as an encrypted file.
+    Export {
+        /// Password for encryption.
+        #[arg(long)]
+        password: String,
+
+        /// Output file path.
+        #[arg(short, long, default_value = "config.toml.enc")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -193,6 +214,13 @@ fn main() -> Result<()> {
             }
             ConfigSubcommand::Migrate { from, dry_run } => {
                 commands::config::migrate(&from, dry_run)?;
+            }
+            ConfigSubcommand::Import { url, password } => {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(commands::config::import(&url, &password))?;
+            }
+            ConfigSubcommand::Export { password, output } => {
+                commands::config::export(&config, &password, &output)?;
             }
         },
         Commands::Setup => unreachable!("setup is handled before config loading"),

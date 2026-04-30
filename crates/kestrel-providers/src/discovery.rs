@@ -277,6 +277,25 @@ pub fn build_catalog(config: &kestrel_config::schema::Config) -> ModelCatalog {
         }
     }
 
+    // GLM Coding Plan (智谱) — OpenAI-compatible dynamic model fetching.
+    if let Some(entry) = &config.providers.glm_coding_plan {
+        if let Some(api_key) = &entry.api_key {
+            let base_url = entry
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://open.bigmodel.cn/api/coding/paas/v4".to_string());
+            catalog.register(
+                "glm_coding_plan",
+                Arc::new(OpenAiCompatDiscovery::new(
+                    base_url,
+                    api_key.clone(),
+                    "glm_coding_plan".to_string(),
+                    entry.no_proxy.unwrap_or(false),
+                )),
+            );
+        }
+    }
+
     // Any OpenAI-compatible provider with an API key can potentially list models.
     // Register discovery for the built-in providers that expose /v1/models.
     let builtins: Vec<(&str, Option<&kestrel_config::schema::ProviderEntry>, &str)> = vec![

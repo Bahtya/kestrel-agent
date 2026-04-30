@@ -23,6 +23,7 @@ const PROVIDER_NAMES: &[&str] = &[
     "minimax",
     "github_copilot",
     "openai_codex",
+    "glm_coding_plan",
 ];
 
 const TOTAL_STEPS: usize = 5;
@@ -328,6 +329,7 @@ fn configure_provider(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
         "minimax" => "MiniMax-Text-01",
         "github_copilot" => "gpt-4o",
         "openai_codex" => "codex-mini",
+        "glm_coding_plan" => "glm-5.1",
         _ => "gpt-4o",
     };
 
@@ -352,6 +354,7 @@ fn configure_provider(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
         "minimax" => "https://api.minimax.chat/v1",
         "github_copilot" => "https://api.githubcopilot.com",
         "openai_codex" => "https://api.openai.com/v1",
+        "glm_coding_plan" => "https://open.bigmodel.cn/api/coding/paas/v4",
         _ => "",
     };
 
@@ -518,19 +521,126 @@ fn get_provider_entry_mut<'a>(
     config: &'a mut Config,
     provider: &str,
 ) -> Option<&'a mut ProviderEntry> {
-    provider_field!(config, provider, mut)?.as_mut()
+    match provider {
+        "anthropic" => config.providers.anthropic.as_mut(),
+        "openai" => config.providers.openai.as_mut(),
+        "openrouter" => config.providers.openrouter.as_mut(),
+        "ollama" => config.providers.ollama.as_mut(),
+        "deepseek" => config.providers.deepseek.as_mut(),
+        "gemini" => config.providers.gemini.as_mut(),
+        "groq" => config.providers.groq.as_mut(),
+        "moonshot" => config.providers.moonshot.as_mut(),
+        "minimax" => config.providers.minimax.as_mut(),
+        "github_copilot" => config.providers.github_copilot.as_mut(),
+        "openai_codex" => config.providers.openai_codex.as_mut(),
+        "opencode_go" => config.providers.opencode_go.as_mut(),
+        "glm_coding_plan" => config.providers.glm_coding_plan.as_mut(),
+        _ => None,
+    }
 }
 
 fn ensure_provider_entry(config: &mut Config, provider: &str) {
-    if let Some(field) = provider_field!(config, provider, mut) {
-        field.get_or_insert_with(ProviderEntry::default);
+    match provider {
+        "anthropic" => {
+            config
+                .providers
+                .anthropic
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "openai" => {
+            config
+                .providers
+                .openai
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "openrouter" => {
+            config
+                .providers
+                .openrouter
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "ollama" => {
+            config
+                .providers
+                .ollama
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "deepseek" => {
+            config
+                .providers
+                .deepseek
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "gemini" => {
+            config
+                .providers
+                .gemini
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "groq" => {
+            config
+                .providers
+                .groq
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "moonshot" => {
+            config
+                .providers
+                .moonshot
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "minimax" => {
+            config
+                .providers
+                .minimax
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "github_copilot" => {
+            config
+                .providers
+                .github_copilot
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "openai_codex" => {
+            config
+                .providers
+                .openai_codex
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "opencode_go" => {
+            config
+                .providers
+                .opencode_go
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        "glm_coding_plan" => {
+            config
+                .providers
+                .glm_coding_plan
+                .get_or_insert_with(ProviderEntry::default);
+        }
+        _ => {}
     }
 }
 
 fn get_provider_url<'a>(config: &'a Config, provider: &str) -> Option<&'a str> {
-    provider_field!(config, provider)?
-        .as_ref()
-        .and_then(|e| e.base_url.as_deref())
+    let entry = match provider {
+        "anthropic" => config.providers.anthropic.as_ref(),
+        "openai" => config.providers.openai.as_ref(),
+        "openrouter" => config.providers.openrouter.as_ref(),
+        "ollama" => config.providers.ollama.as_ref(),
+        "deepseek" => config.providers.deepseek.as_ref(),
+        "gemini" => config.providers.gemini.as_ref(),
+        "groq" => config.providers.groq.as_ref(),
+        "moonshot" => config.providers.moonshot.as_ref(),
+        "minimax" => config.providers.minimax.as_ref(),
+        "github_copilot" => config.providers.github_copilot.as_ref(),
+        "openai_codex" => config.providers.openai_codex.as_ref(),
+        "opencode_go" => config.providers.opencode_go.as_ref(),
+        "glm_coding_plan" => config.providers.glm_coding_plan.as_ref(),
+        _ => None,
+    };
+    entry.and_then(|e| e.base_url.as_deref())
 }
 
 fn set_provider_url(config: &mut Config, provider: &str, url: &str) {

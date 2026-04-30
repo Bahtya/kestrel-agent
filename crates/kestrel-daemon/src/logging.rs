@@ -10,11 +10,7 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use tracing_subscriber::{
-    filter::Targets,
-    layer::SubscriberExt,
-    EnvFilter, Layer, Registry,
-};
+use tracing_subscriber::{filter::Targets, layer::SubscriberExt, EnvFilter, Layer, Registry};
 
 /// Guard returned by [`setup_file_logging`]. Must be kept alive for the
 /// lifetime of the application — dropping it flushes and closes the log file.
@@ -74,8 +70,7 @@ pub fn setup_file_logging(
         let (comm_nb, cg) = tracing_appender::non_blocking(comm_appender);
         comm_guard = Some(cg);
 
-        let comm_filter = Targets::new()
-            .with_target("comm", parse_level(comm_level));
+        let comm_filter = Targets::new().with_target("comm", parse_level(comm_level));
 
         if effective_format == "json" {
             Some(
@@ -120,8 +115,7 @@ pub fn setup_file_logging(
         None => subscriber,
     };
 
-    tracing::subscriber::set_global_default(subscriber)
-        .context("set global tracing subscriber")?;
+    tracing::subscriber::set_global_default(subscriber).context("set global tracing subscriber")?;
 
     tracing::info!(
         "File logging initialized: {}/kestrel.log (format: {})",
@@ -130,10 +124,7 @@ pub fn setup_file_logging(
     );
 
     if comm_log_level.is_some() {
-        tracing::info!(
-            "Comm logging initialized: {}/comm.log",
-            log_dir
-        );
+        tracing::info!("Comm logging initialized: {}/comm.log", log_dir);
     }
 
     Ok((guard, comm_guard))

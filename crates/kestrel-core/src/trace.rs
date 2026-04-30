@@ -30,9 +30,8 @@ mod tests {
 
     #[test]
     fn test_generate_trace_id_uniqueness() {
-        let ids: std::collections::HashSet<String> = (0..1000)
-            .map(|_| generate_trace_id())
-            .collect();
+        let ids: std::collections::HashSet<String> =
+            (0..1000).map(|_| generate_trace_id()).collect();
         assert_eq!(ids.len(), 1000, "all trace IDs should be unique");
     }
 

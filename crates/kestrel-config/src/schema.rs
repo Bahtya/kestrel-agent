@@ -806,6 +806,48 @@ impl Default for ApiConfig {
 /// working_directory = "/"
 /// grace_period_secs = 30
 /// ```
+/// Communication log configuration — controls HTTP/WS/tool-call tracing.
+///
+/// When enabled, the system emits structured logs tagged with `target: "comm"`
+/// containing `trace_id` fields for full-chain correlation.
+///
+/// ```yaml
+/// daemon:
+///   comm_log:
+///     enabled: true
+///     level: debug
+///     separate_file: true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CommLogConfig {
+    /// Whether communication logging is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Log level for comm events: `"info"`, `"debug"`, or `"trace"`.
+    #[serde(default = "default_comm_log_level")]
+    pub level: String,
+
+    /// Write comm events to a separate `comm.log` file.
+    #[serde(default)]
+    pub separate_file: bool,
+}
+
+fn default_comm_log_level() -> String {
+    "info".to_string()
+}
+
+impl Default for CommLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            level: default_comm_log_level(),
+            separate_file: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DaemonConfig {
@@ -836,6 +878,10 @@ pub struct DaemonConfig {
     /// Log output format: `"text"` (human-readable) or `"json"` (structured).
     #[serde(default = "default_daemon_log_format")]
     pub log_format: String,
+
+    /// Communication log configuration (HTTP, WS, tool-call tracing).
+    #[serde(default)]
+    pub comm_log: Option<CommLogConfig>,
 }
 
 fn default_daemon_pid_file() -> String {
@@ -901,6 +947,7 @@ impl Default for DaemonConfig {
             log_level: default_daemon_log_level(),
             log_retain_days: default_daemon_log_retain_days(),
             log_format: default_daemon_log_format(),
+            comm_log: None,
         }
     }
 }
@@ -1032,6 +1079,72 @@ mod tests {
             config.notifications.online_message,
             "🟢 Kestrel v{version} online — {channel} connected"
         );
+    }
+
+    #[test]
+    fn test_comm_log_config_default() {
+        let cfg = CommLogConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.level, "info");
+        assert!(!cfg.separate_file);
+    }
+
+    #[test]
+    fn test_comm_log_config_serde_roundtrip() {
+        let cfg = CommLogConfig {
+            enabled: true,
+            level: "debug".to_string(),
+            separate_file: true,
+        };
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        let parsed: CommLogConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.level, "debug");
+        assert!(parsed.separate_file);
+    }
+
+    #[test]
+    fn test_daemon_config_comm_log_default_none() {
+        let cfg = DaemonConfig::default();
+        assert!(cfg.comm_log.is_none());
+    }
+
+    #[test]
+    fn test_daemon_config_with_comm_log_yaml() {
+        let yaml = r#"
+pid_file: /tmp/test.pid
+log_dir: /tmp/test-logs
+working_directory: /
+grace_period_secs: 30
+log_level: info
+log_retain_days: 30
+log_format: text
+comm_log:
+  enabled: true
+  level: debug
+  separate_file: true
+"#;
+        let cfg: DaemonConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.comm_log.is_some());
+        let cl = cfg.comm_log.unwrap();
+        assert!(cl.enabled);
+        assert_eq!(cl.level, "debug");
+        assert!(cl.separate_file);
+    }
+
+    #[test]
+    fn test_daemon_config_without_comm_log_yaml() {
+        let yaml = r#"
+pid_file: /tmp/test.pid
+log_dir: /tmp/test-logs
+working_directory: /
+grace_period_secs: 30
+log_level: info
+log_retain_days: 30
+log_format: text
+"#;
+        let cfg: DaemonConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.comm_log.is_none());
     }
 
     #[test]

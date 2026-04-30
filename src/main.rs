@@ -79,6 +79,9 @@ enum Commands {
     /// Show current configuration and status.
     Status,
 
+    /// Run comprehensive system diagnostics.
+    Doctor,
+
     /// Daemon management commands (Unix only).
     Daemon {
         #[command(subcommand)]
@@ -226,6 +229,10 @@ fn main() -> Result<()> {
         Commands::Setup => unreachable!("setup is handled before config loading"),
         Commands::Status => {
             commands::status::run(&config)?;
+        }
+        Commands::Doctor => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::doctor::run(&config))?;
         }
         Commands::Daemon { subcommand } => {
             let action = match subcommand {

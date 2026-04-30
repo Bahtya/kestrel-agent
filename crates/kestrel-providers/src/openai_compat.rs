@@ -525,7 +525,7 @@ impl LlmProvider for OpenAiCompatProvider {
             }
         })
         .await
-        .map(|resp| {
+        .inspect(|resp| {
             let duration_ms = start.elapsed().as_millis() as u64;
             tracing::info!(
                 target: "comm",
@@ -535,7 +535,6 @@ impl LlmProvider for OpenAiCompatProvider {
                 tokens = ?resp.usage,
                 "HTTP RESP"
             );
-            resp
         })
     }
 

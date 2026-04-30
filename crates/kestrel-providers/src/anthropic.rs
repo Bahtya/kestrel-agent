@@ -504,7 +504,7 @@ impl LlmProvider for AnthropicProvider {
             }
         })
         .await
-        .map(|resp| {
+        .inspect(|resp| {
             let duration_ms = start.elapsed().as_millis() as u64;
             tracing::info!(
                 target: "comm",
@@ -514,7 +514,6 @@ impl LlmProvider for AnthropicProvider {
                 tokens = ?resp.usage,
                 "HTTP RESP"
             );
-            resp
         })
     }
 

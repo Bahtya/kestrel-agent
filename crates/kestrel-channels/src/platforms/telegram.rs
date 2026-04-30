@@ -328,31 +328,53 @@ impl InlineKeyboardBuilder {
         )
     }
 
-    /// Build a pagination keyboard with previous/next buttons.
-    pub fn pagination(prefix: &str, page: usize, total_pages: usize) -> Self {
-        let mut builder = Self::new();
+    /// Build a single pagination button row (Prev / indicator / Next).
+    pub fn pagination_row<F>(
+        page: usize,
+        total_pages: usize,
+        callback: F,
+    ) -> Vec<InlineKeyboardButton>
+    where
+        F: Fn(usize) -> String,
+    {
         let mut row = Vec::new();
         if page > 0 {
             row.push(InlineKeyboardButton {
                 text: "◀ Prev".to_string(),
-                callback_data: Some(format!("{prefix}:page:{}", page - 1)),
+                callback_data: Some(callback(page - 1)),
                 url: None,
             });
         }
         row.push(InlineKeyboardButton {
             text: format!("{}/{}", page + 1, total_pages),
-            callback_data: Some(format!("{prefix}:page:{page}")),
+            callback_data: Some(callback(page)),
             url: None,
         });
         if page + 1 < total_pages {
             row.push(InlineKeyboardButton {
                 text: "Next ▶".to_string(),
-                callback_data: Some(format!("{prefix}:page:{}", page + 1)),
+                callback_data: Some(callback(page + 1)),
                 url: None,
             });
         }
+        row
+    }
+
+    /// Build a pagination keyboard with previous/next buttons.
+    pub fn pagination(prefix: &str, page: usize, total_pages: usize) -> Self {
+        let row = Self::pagination_row(page, total_pages, |p| format!("{prefix}:page:{p}"));
+        let mut builder = Self::new();
         builder.rows.push(row);
         builder
+    }
+
+    /// Append a pre-built row of buttons, flushing any pending row first.
+    pub fn push_row(mut self, row: Vec<InlineKeyboardButton>) -> Self {
+        if !self.current_row.is_empty() {
+            self.rows.push(std::mem::take(&mut self.current_row));
+        }
+        self.rows.push(row);
+        self
     }
 
     /// Finalise: flush any pending row and return the markup.
@@ -1678,7 +1700,21 @@ impl TelegramChannel {
                         "provider" => {
                             let provider = payload.as_deref().unwrap_or("");
                             let response =
-                                crate::commands::handle_models_provider_detail(provider).await;
+                                crate::commands::handle_models_provider_detail(provider, 0).await;
+                            CallbackResponse::EditMessage {
+                                text: response.text,
+                                keyboard: response.keyboard,
+                            }
+                        }
+                        "ppage" => {
+                            let raw = payload.as_deref().unwrap_or("");
+                            let (provider, page) = raw
+                                .rsplit_once('|')
+                                .map(|(p, n)| (p, n.parse::<usize>().unwrap_or(0)))
+                                .unwrap_or((raw, 0));
+                            let response =
+                                crate::commands::handle_models_provider_detail(provider, page)
+                                    .await;
                             CallbackResponse::EditMessage {
                                 text: response.text,
                                 keyboard: response.keyboard,
@@ -1698,7 +1734,9 @@ impl TelegramChannel {
                             let response = crate::commands::handle_models_select(qualified_id);
                             CallbackResponse::EditMessage {
                                 text: response.text,
-                                keyboard: response.keyboard,
+                                keyboard: response
+                                    .keyboard
+                                    .or_else(|| Some(InlineKeyboardBuilder::new().build())),
                             }
                         }
                         _ => CallbackResponse::Acknowledged,

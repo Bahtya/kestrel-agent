@@ -213,7 +213,13 @@ async fn check_providers(config: &Config, errors: &mut usize, warnings: &mut usi
         match tokio::time::timeout(Duration::from_secs(30), provider.complete(req)).await {
             Ok(Ok(resp)) => {
                 let elapsed = start.elapsed();
-                let content_preview: String = content_preview.chars().take(30).collect();
+                let content_preview: String = resp
+                    .content
+                    .as_deref()
+                    .unwrap_or("(no content)")
+                    .chars()
+                    .take(30)
+                    .collect();
                 println!("pass ({:.1}s) — {}", elapsed.as_secs_f64(), content_preview);
             }
             Ok(Err(e)) => {

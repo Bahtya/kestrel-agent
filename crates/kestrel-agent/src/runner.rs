@@ -789,7 +789,7 @@ mod tests {
         // Counter must be exactly 3
         assert_eq!(counter.load(Ordering::SeqCst), 3);
         // Each result should be distinct (serialized execution)
-        assert!(results.iter().all(|(r, _)| r.starts_with("write-")));
+        assert!(results.iter().all(|(r, _, _)| r.starts_with("write-")));
     }
 
     #[tokio::test]
@@ -908,7 +908,7 @@ mod tests {
         let results = runner.execute_tools(&calls).await;
 
         assert_eq!(results.len(), 1);
-        let (_, duration_ms) = &results[0];
+        let (_, duration_ms, _) = &results[0];
         assert!(
             *duration_ms >= 40,
             "per-tool duration should reflect actual execution time, got {duration_ms}ms"

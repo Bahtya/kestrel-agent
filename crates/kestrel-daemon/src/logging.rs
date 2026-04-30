@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use tracing_subscriber::{filter::Targets, layer::SubscriberExt, EnvFilter, Layer, Registry};
+use tracing_subscriber::{filter::Targets, layer::SubscriberExt, EnvFilter, Registry};
 
 /// Guard returned by [`setup_file_logging`]. Must be kept alive for the
 /// lifetime of the application — dropping it flushes and closes the log file.
@@ -65,7 +65,7 @@ pub fn setup_file_logging(
     // Build the comm-log layer if requested.
     let mut comm_guard: Option<CommLogGuard> = None;
 
-    let comm_layer = if let Some(comm_level) = comm_log_level {
+    if let Some(comm_level) = comm_log_level {
         let comm_appender = tracing_appender::rolling::daily(log_path, "comm.log");
         let (comm_nb, cg) = tracing_appender::non_blocking(comm_appender);
         comm_guard = Some(cg);
@@ -73,49 +73,50 @@ pub fn setup_file_logging(
         let comm_filter = Targets::new().with_target("comm", parse_level(comm_level));
 
         if effective_format == "json" {
-            Some(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(comm_nb)
-                    .with_ansi(false)
-                    .json()
-                    .with_filter(comm_filter),
-            )
+            let main_layer = tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .json()
+                .with_filter(filter);
+            let comm_layer = tracing_subscriber::fmt::layer()
+                .with_writer(comm_nb)
+                .with_ansi(false)
+                .json()
+                .with_filter(comm_filter);
+            let subscriber = Registry::default().with(main_layer).with(comm_layer);
+            tracing::subscriber::set_global_default(subscriber)
+                .context("set global tracing subscriber")?;
         } else {
-            Some(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(comm_nb)
-                    .with_ansi(false)
-                    .with_filter(comm_filter),
-            )
+            let main_layer = tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_filter(filter);
+            let comm_layer = tracing_subscriber::fmt::layer()
+                .with_writer(comm_nb)
+                .with_ansi(false)
+                .with_filter(comm_filter);
+            let subscriber = Registry::default().with(main_layer).with(comm_layer);
+            tracing::subscriber::set_global_default(subscriber)
+                .context("set global tracing subscriber")?;
         }
-    } else {
-        None
-    };
-
-    // Main layer excludes "comm" target so events don't duplicate.
-    let main_filter = filter;
-    let main_layer = if effective_format == "json" {
-        tracing_subscriber::fmt::layer()
+    } else if effective_format == "json" {
+        let main_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             .with_ansi(false)
             .json()
-            .with_filter(main_filter)
-            .boxed()
+            .with_filter(filter);
+        let subscriber = Registry::default().with(main_layer);
+        tracing::subscriber::set_global_default(subscriber)
+            .context("set global tracing subscriber")?;
     } else {
-        tracing_subscriber::fmt::layer()
+        let main_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             .with_ansi(false)
-            .with_filter(main_filter)
-            .boxed()
-    };
-
-    let subscriber = Registry::default().with(main_layer);
-    let subscriber = match comm_layer {
-        Some(cl) => subscriber.with(cl),
-        None => subscriber,
-    };
-
-    tracing::subscriber::set_global_default(subscriber).context("set global tracing subscriber")?;
+            .with_filter(filter);
+        let subscriber = Registry::default().with(main_layer);
+        tracing::subscriber::set_global_default(subscriber)
+            .context("set global tracing subscriber")?;
+    }
 
     tracing::info!(
         "File logging initialized: {}/kestrel.log (format: {})",

@@ -397,6 +397,7 @@ impl LlmProvider for AnthropicProvider {
         debug!("Anthropic request to {} (model: {})", url, request.model);
 
         let start = std::time::Instant::now();
+        let trace_id_for_log = trace_id.clone();
 
         retry_with_backoff(&retry_config, move |_attempt| {
             let url = url.clone();
@@ -507,7 +508,7 @@ impl LlmProvider for AnthropicProvider {
             let duration_ms = start.elapsed().as_millis() as u64;
             tracing::info!(
                 target: "comm",
-                trace_id = %trace_id,
+                trace_id = %trace_id_for_log,
                 status = 200,
                 duration_ms = duration_ms,
                 tokens = ?resp.usage,

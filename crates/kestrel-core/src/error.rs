@@ -38,8 +38,8 @@ pub enum KestrelError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[error("YAML error: {0}")]
-    Yaml(String),
+    #[error("TOML error: {0}")]
+    Toml(String),
 
     #[error("HTTP error: {0}")]
     Http(String),
@@ -102,8 +102,8 @@ mod tests {
         let agent_err = KestrelError::Agent("agent lost".to_string());
         assert!(format!("{}", agent_err).contains("Agent error"));
 
-        let yaml_err = KestrelError::Yaml("parse fail".to_string());
-        assert!(format!("{}", yaml_err).contains("YAML error"));
+        let toml_err = KestrelError::Toml("parse fail".to_string());
+        assert!(format!("{}", toml_err).contains("TOML error"));
 
         let http_err = KestrelError::Http("503".to_string());
         assert!(format!("{}", http_err).contains("HTTP error"));

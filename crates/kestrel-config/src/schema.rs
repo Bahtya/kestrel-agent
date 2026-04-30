@@ -1,4 +1,4 @@
-//! Configuration schema matching the Python kestrel config.yaml format.
+//! Configuration schema matching the Python kestrel config.toml format.
 //!
 //! Uses serde for deserialization with `#[serde(rename_all = "snake_case")]`
 //! to maintain compatibility with the Python camelCase config keys.
@@ -799,12 +799,12 @@ impl Default for ApiConfig {
 /// signal handling, and file-based logging. Activated via `kestrel daemon start`
 /// on the CLI — there is no config-file toggle.
 ///
-/// ```yaml
-/// daemon:
-///   pid_file: ~/.kestrel/kestrel.pid
-///   log_dir: ~/.kestrel/logs
-///   working_directory: /
-///   grace_period_secs: 30
+/// ```toml
+/// [daemon]
+/// pid_file = "~/.kestrel/kestrel.pid"
+/// log_dir = "~/.kestrel/logs"
+/// working_directory = "/"
+/// grace_period_secs = 30
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1048,10 +1048,10 @@ mod tests {
     }
 
     #[test]
-    fn test_config_yaml_roundtrip() {
+    fn test_config_toml_roundtrip() {
         let config = Config::default();
-        let yaml = serde_yaml::to_string(&config).expect("serialize to yaml");
-        let parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize from yaml");
+        let toml_str = toml::to_string(&config).expect("serialize to toml");
+        let parsed: Config = toml::from_str(&toml_str).expect("deserialize from toml");
         assert_eq!(parsed._config_version, config._config_version);
         assert_eq!(parsed.agent.model, config.agent.model);
         assert_eq!(parsed.agent.temperature, config.agent.temperature);
@@ -1080,9 +1080,9 @@ mod tests {
         assert!(security.ssrf_whitelist.is_empty());
         assert!(security.blocked_networks.is_empty());
 
-        // Verify that serde deserialization of empty yaml uses default_true.
-        let from_yaml: SecurityConfig = serde_yaml::from_str("{}").unwrap();
-        assert!(from_yaml.block_private_ips);
+        // Verify that serde deserialization of empty toml uses default_true.
+        let from_toml: SecurityConfig = toml::from_str("").unwrap();
+        assert!(from_toml.block_private_ips);
     }
 
     #[test]
@@ -1098,13 +1098,13 @@ mod tests {
     }
 
     #[test]
-    fn test_config_parse_minimal_yaml() {
-        let yaml = r#"
-agent:
-  model: gpt-4o-mini
-  temperature: 0.5
+    fn test_config_parse_minimal_toml() {
+        let toml_str = r#"
+[agent]
+model = "gpt-4o-mini"
+temperature = 0.5
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.agent.model, "gpt-4o-mini");
         assert!((config.agent.temperature - 0.5).abs() < f32::EPSILON);
         assert!(config.providers.anthropic.is_none());
@@ -1112,55 +1112,57 @@ agent:
     }
 
     #[test]
-    fn test_config_parse_full_yaml() {
-        let yaml = r#"
-_config_version: 4
-providers:
-  openai:
-    api_key: sk-test-123
-    base_url: https://api.openai.com/v1
-    model: gpt-4o
-  anthropic:
-    api_key: sk-ant-123
-channels:
-  telegram:
-    token: "123456:ABC"
-    allowed_users:
-      - user1
-    streaming: true
-agent:
-  model: gpt-4o
-  temperature: 0.8
-  max_tokens: 2048
-  max_iterations: 30
-  streaming: false
-  tool_timeout: 60
-dream:
-  enabled: true
-  interval_secs: 3600
-heartbeat:
-  enabled: true
-  interval_secs: 600
-security:
-  block_private_ips: true
-  ssrf_whitelist:
-    - 10.0.0.0/8
-custom_instructions: "Be helpful"
-name: "TestBot"
-workspace: "/tmp/workspace"
-mcp_servers:
-  filesystem:
-    transport: stdio
-    command: "mcp-filesystem"
-    args:
-      - "--root"
-      - "/data"
-notifications:
-  online_notify: false
-  notify_chat_id: "-1001234567890"
-  online_message: "Kestrel {version} online on {channel}"
+    fn test_config_parse_full_toml() {
+        let toml_str = r#"
+_config_version = 4
+custom_instructions = "Be helpful"
+name = "TestBot"
+workspace = "/tmp/workspace"
+
+[providers.openai]
+api_key = "sk-test-123"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+
+[providers.anthropic]
+api_key = "sk-ant-123"
+
+[channels.telegram]
+token = "123456:ABC"
+allowed_users = ["user1"]
+streaming = true
+
+[agent]
+model = "gpt-4o"
+temperature = 0.8
+max_tokens = 2048
+max_iterations = 30
+streaming = false
+tool_timeout = 60
+
+[dream]
+enabled = true
+interval_secs = 3600
+
+[heartbeat]
+enabled = true
+interval_secs = 600
+
+[security]
+block_private_ips = true
+ssrf_whitelist = ["10.0.0.0/8"]
+
+[mcp_servers.filesystem]
+transport = "stdio"
+command = "mcp-filesystem"
+args = ["--root", "/data"]
+
+[notifications]
+online_notify = false
+notify_chat_id = "-1001234567890"
+online_message = "Kestrel {version} online on {channel}"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config._config_version, Some(4));
         assert_eq!(config.agent.model, "gpt-4o");
         assert!((config.agent.temperature - 0.8).abs() < f32::EPSILON);
@@ -1218,7 +1220,7 @@ notifications:
 
     #[test]
     fn test_notifications_config_parse_defaults_when_missing() {
-        let config: Config = serde_yaml::from_str("{}").unwrap();
+        let config: Config = toml::from_str("").unwrap();
         assert!(config.notifications.online_notify);
         assert!(config.notifications.notify_chat_id.is_none());
         assert_eq!(
@@ -1229,16 +1231,15 @@ notifications:
 
     #[test]
     fn test_custom_provider_config_parse() {
-        let yaml = r#"
-custom_providers:
-  - name: my_provider
-    base_url: https://my-api.com/v1
-    api_key: key123
-    model_patterns:
-      - my-model
-    no_proxy: true
+        let toml_str = r#"
+[[custom_providers]]
+name = "my_provider"
+base_url = "https://my-api.com/v1"
+api_key = "key123"
+model_patterns = ["my-model"]
+no_proxy = true
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.custom_providers.len(), 1);
         let cp = &config.custom_providers[0];
         assert_eq!(cp.name, "my_provider");
@@ -1273,13 +1274,13 @@ custom_providers:
 
     #[test]
     fn test_cron_config_parse() {
-        let yaml = r#"
-cron:
-  enabled: true
-  state_file: /tmp/cron_state.json
-  tick_secs: 30
+        let toml_str = r#"
+[cron]
+enabled = true
+state_file = "/tmp/cron_state.json"
+tick_secs = 30
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.cron.enabled);
         assert_eq!(
             config.cron.state_file,
@@ -1289,9 +1290,8 @@ cron:
     }
 
     #[test]
-    fn test_empty_config_yaml() {
-        let yaml = "{}";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+    fn test_empty_config_toml() {
+        let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.agent.model, "gpt-4o");
         assert!(config.agent.streaming);
     }
@@ -1309,16 +1309,16 @@ cron:
 
     #[test]
     fn test_daemon_config_parse() {
-        let yaml = r#"
-daemon:
-  pid_file: /var/run/kestrel.pid
-  log_dir: /var/log/kestrel
-  working_directory: /opt
-  grace_period_secs: 60
-  log_retain_days: 7
-  log_format: json
+        let toml_str = r#"
+[daemon]
+pid_file = "/var/run/kestrel.pid"
+log_dir = "/var/log/kestrel"
+working_directory = "/opt"
+grace_period_secs = 60
+log_retain_days = 7
+log_format = "json"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.daemon.pid_file, "/var/run/kestrel.pid");
         assert_eq!(config.daemon.log_dir, "/var/log/kestrel");
         assert_eq!(config.daemon.working_directory, "/opt");
@@ -1328,10 +1328,10 @@ daemon:
     }
 
     #[test]
-    fn test_daemon_config_yaml_roundtrip() {
+    fn test_daemon_config_toml_roundtrip() {
         let dc = DaemonConfig::default();
-        let yaml = serde_yaml::to_string(&dc).unwrap();
-        let parsed: DaemonConfig = serde_yaml::from_str(&yaml).unwrap();
+        let toml_str = toml::to_string(&dc).unwrap();
+        let parsed: DaemonConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.pid_file, dc.pid_file);
         assert_eq!(parsed.log_dir, dc.log_dir);
         assert_eq!(parsed.working_directory, dc.working_directory);
@@ -1353,18 +1353,18 @@ daemon:
 
     #[test]
     fn test_websocket_config_parse() {
-        let yaml = r#"
-channels:
-  websocket:
-    enabled: true
-    listen_addr: "0.0.0.0:9090"
-    auth:
-      required: true
-      token: "my-secret"
-    max_clients: 50
-    max_message_size: 2097152
+        let toml_str = r#"
+[channels.websocket]
+enabled = true
+listen_addr = "0.0.0.0:9090"
+max_clients = 50
+max_message_size = 2097152
+
+[channels.websocket.auth]
+required = true
+token = "my-secret"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         let ws = config.channels.websocket.unwrap();
         assert!(ws.enabled);
         assert_eq!(ws.listen_addr, "0.0.0.0:9090");
@@ -1375,10 +1375,10 @@ channels:
     }
 
     #[test]
-    fn test_websocket_config_yaml_roundtrip() {
+    fn test_websocket_config_toml_roundtrip() {
         let wc = WebSocketConfig::default();
-        let yaml = serde_yaml::to_string(&wc).unwrap();
-        let parsed: WebSocketConfig = serde_yaml::from_str(&yaml).unwrap();
+        let toml_str = toml::to_string(&wc).unwrap();
+        let parsed: WebSocketConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.enabled, wc.enabled);
         assert_eq!(parsed.listen_addr, wc.listen_addr);
         assert_eq!(parsed.max_clients, wc.max_clients);

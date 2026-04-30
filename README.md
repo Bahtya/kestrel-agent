@@ -141,7 +141,7 @@ cargo build --release
 
 ```bash
 kestrel setup
-# Edit ~/.kestrel/config.yaml with your API keys
+# Edit ~/.kestrel/config.toml with your API keys
 ```
 
 ### Run
@@ -180,120 +180,126 @@ Environment variable `KESTREL_HOME` overrides the default config directory
 
 ## Configuration
 
-```yaml
-# ~/.kestrel/config.yaml
+```toml
+# ~/.kestrel/config.toml
 
-providers:
-  openai:
-    api_key: ${OPENAI_API_KEY}
-    model: gpt-4o
-    base_url: https://api.openai.com/v1   # optional: point to any OpenAI-compatible API
-  anthropic:
-    api_key: ${ANTHROPIC_API_KEY}
-    model: claude-sonnet-4-6
-  openrouter:
-    api_key: ${OPENROUTER_API_KEY}
-    model: anthropic/claude-sonnet-4-6
-  ollama:
-    base_url: http://localhost:11434/v1
-    model: llama3
-  deepseek:
-    api_key: ${DEEPSEEK_API_KEY}
-    model: deepseek-chat
-  groq:
-    api_key: ${GROQ_API_KEY}
-    model: llama-3.3-70b-versatile
-  gemini:
-    api_key: ${GEMINI_API_KEY}
-    model: gemini-2.0-flash
-  # no_proxy: true              # skip proxy for domestic APIs (e.g. ZAI, Qwen)
+[providers.openai]
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4o"
+# base_url = "https://api.openai.com/v1"   # optional: point to any OpenAI-compatible API
 
-channels:
-  telegram:
-    token: ${TELEGRAM_BOT_TOKEN}
-    allowed_users: ["123456789"]         # optional: restrict to user IDs
-    admin_users: ["123456789"]           # optional: admin user IDs
-    enabled: true
-    streaming: false                     # telegram doesn't support token-by-token
-    proxy: ""                            # optional: http/socks5 proxy URL
-  discord:
-    token: ${DISCORD_BOT_TOKEN}
-    allowed_guilds: ["111222333"]        # optional: restrict to guild IDs
-    enabled: true
-  websocket:
-    enabled: true
-    listen_addr: "127.0.0.1:8090"
-    auth:
-      required: true
-      token: "my-secret"
-    max_clients: 100
-    max_message_size: 1048576
+[providers.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"
+model = "claude-sonnet-4-6"
 
-agent:
-  model: gpt-4o
-  temperature: 0.7
-  max_tokens: 4096
-  max_iterations: 50                    # tool loop limit
-  streaming: true
-  tool_timeout: 120                     # seconds per tool execution
-  system_prompt: "You are a helpful AI assistant."  # optional override
-  workspace: /tmp/workspace             # optional: default working directory
+[providers.openrouter]
+api_key = "${OPENROUTER_API_KEY}"
+model = "anthropic/claude-sonnet-4-6"
 
-dream:                                  # memory consolidation
-  enabled: true
-  interval_secs: 7200                   # consolidate every 2h
-  model: gpt-4o-mini                    # optional: use cheaper model
+[providers.ollama]
+base_url = "http://localhost:11434/v1"
+model = "llama3"
 
-heartbeat:
-  enabled: false
-  interval_secs: 1800
+[providers.deepseek]
+api_key = "${DEEPSEEK_API_KEY}"
+model = "deepseek-chat"
 
-cron:
-  enabled: false
-  state_file: ~/.kestrel/cron_state.json
-  tick_secs: 60
+[providers.groq]
+api_key = "${GROQ_API_KEY}"
+model = "llama-3.3-70b-versatile"
 
-security:
-  block_private_ips: true               # block RFC1918 by default
-  ssrf_whitelist: []                    # allowed IP ranges for outbound
-  blocked_networks: []                  # additional blocked ranges
+[providers.gemini]
+api_key = "${GEMINI_API_KEY}"
+model = "gemini-2.0-flash"
+# no_proxy = true              # skip proxy for domestic APIs (e.g. ZAI, Qwen)
 
-api:
-  host: 0.0.0.0
-  port: 8080
-  allowed_origins: ["*"]                # CORS origins
-  max_body_size: 10485760               # 10 MB
+[channels.telegram]
+token = "${TELEGRAM_BOT_TOKEN}"
+allowed_users = ["123456789"]         # optional: restrict to user IDs
+admin_users = ["123456789"]           # optional: admin user IDs
+enabled = true
+streaming = false                     # telegram doesn't support token-by-token
+# proxy = ""                          # optional: http/socks5 proxy URL
 
-daemon:
-  pid_file: ~/.kestrel/kestrel.pid
-  log_dir: ~/.kestrel/logs
-  working_directory: /
-  grace_period_secs: 30
+[channels.discord]
+token = "${DISCORD_BOT_TOKEN}"
+allowed_guilds = ["111222333"]        # optional: restrict to guild IDs
+enabled = true
+
+[channels.websocket]
+enabled = true
+listen_addr = "127.0.0.1:8090"
+max_clients = 100
+max_message_size = 1048576
+
+[channels.websocket.auth]
+required = true
+token = "my-secret"
+
+[agent]
+model = "gpt-4o"
+temperature = 0.7
+max_tokens = 4096
+max_iterations = 50                    # tool loop limit
+streaming = true
+tool_timeout = 120                     # seconds per tool execution
+# system_prompt = "You are a helpful AI assistant."  # optional override
+# workspace = "/tmp/workspace"                       # optional: default working directory
+
+[dream]                                 # memory consolidation
+enabled = true
+interval_secs = 7200                    # consolidate every 2h
+# model = "gpt-4o-mini"                # optional: use cheaper model
+
+[heartbeat]
+enabled = false
+interval_secs = 1800
+
+[cron]
+enabled = false
+# state_file = "~/.kestrel/cron_state.json"
+tick_secs = 60
+
+[security]
+block_private_ips = true                # block RFC1918 by default
+ssrf_whitelist = []                     # allowed IP ranges for outbound
+blocked_networks = []                   # additional blocked ranges
+
+[api]
+host = "0.0.0.0"
+port = 8080
+allowed_origins = ["*"]                 # CORS origins
+max_body_size = 10485760                # 10 MB
+
+[daemon]
+# pid_file = "~/.kestrel/kestrel.pid"
+# log_dir = "~/.kestrel/logs"
+# working_directory = "/"
+grace_period_secs = 30
 
 # optional: custom system prompt additions
-custom_instructions: "Always respond in English."
+# custom_instructions = "Always respond in English."
 
 # optional: agent identity
-name: "Kestrel"
+# name = "Kestrel"
 
 # optional: MCP tool servers
-# mcp_servers:
-#   filesystem:
-#     transport: stdio
-#     command: "mcp-filesystem"
-#     args: ["--root", "/data"]
+# [mcp_servers.filesystem]
+# transport = "stdio"
+# command = "mcp-filesystem"
+# args = ["--root", "/data"]
 
 # optional: custom provider endpoints
-# custom_providers:
-#   - name: my_provider
-#     base_url: https://my-api.com/v1
-#     api_key: key123
-#     model_patterns: ["my-model"]
+# [[custom_providers]]
+# name = "my_provider"
+# base_url = "https://my-api.com/v1"
+# api_key = "key123"
+# model_patterns = ["my-model"]
 
-notifications:
-  online_notify: true
-  # notify_chat_id: "-1001234567890"    # which chat receives the ping
-  online_message: "Kestrel v{version} online — {channel} connected"
+[notifications]
+online_notify = true
+# notify_chat_id = "-1001234567890"     # which chat receives the ping
+online_message = "Kestrel v{version} online — {channel} connected"
 ```
 
 Environment variables in values (`${VAR}`) are expanded at load time.
@@ -309,7 +315,7 @@ Environment variables in values (`${VAR}`) are expanded at load time.
 | `health` | Show health check status |
 | `cron list` | List all cron jobs |
 | `cron status` | Show status of a specific cron job |
-| `config validate` | Validate the config.yaml schema |
+| `config validate` | Validate the config.toml schema |
 | `config migrate` | Migrate Python kestrel config to kestrel format |
 | `setup` | Interactive configuration wizard |
 | `status` | Show current configuration and system status |

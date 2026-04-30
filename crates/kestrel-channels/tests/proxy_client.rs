@@ -16,21 +16,20 @@ use kestrel_core::Platform;
 #[test]
 fn test_expand_env_vars_telegram_token() {
     std::env::set_var("TEST_TG_TOKEN", "123456:ABC-DEF");
-    let input = "token: ${TEST_TG_TOKEN}";
+    let input = "token = ${TEST_TG_TOKEN}";
     let expanded = expand_env_vars(input);
-    assert_eq!(expanded, "token: 123456:ABC-DEF");
+    assert_eq!(expanded, "token = 123456:ABC-DEF");
     std::env::remove_var("TEST_TG_TOKEN");
 }
 
 #[test]
-fn test_expand_env_vars_with_default_in_yaml() {
-    let yaml = r#"
-channels:
-  telegram:
-    token: ${NONEXISTENT_TG_TOKEN:-default_token}
-    enabled: true
+fn test_expand_env_vars_with_default_in_toml() {
+    let toml_str = r#"
+[channels.telegram]
+token = "${NONEXISTENT_TG_TOKEN:-default_token}"
+enabled = true
 "#;
-    let expanded = expand_env_vars(yaml);
+    let expanded = expand_env_vars(toml_str);
     assert!(expanded.contains("default_token"));
     assert!(!expanded.contains("${"));
 }
@@ -39,9 +38,9 @@ channels:
 fn test_expand_env_vars_multiple_in_one_line() {
     std::env::set_var("TEST_HOST", "api.example.com");
     std::env::set_var("TEST_PORT", "8080");
-    let input = "url: https://${TEST_HOST}:${TEST_PORT}/v1";
+    let input = "url = \"https://${TEST_HOST}:${TEST_PORT}/v1\"";
     let expanded = expand_env_vars(input);
-    assert_eq!(expanded, "url: https://api.example.com:8080/v1");
+    assert_eq!(expanded, "url = \"https://api.example.com:8080/v1\"");
     std::env::remove_var("TEST_HOST");
     std::env::remove_var("TEST_PORT");
 }
@@ -49,24 +48,25 @@ fn test_expand_env_vars_multiple_in_one_line() {
 #[test]
 fn test_load_config_from_file_with_env_vars() {
     let tmp = tempfile::tempdir().unwrap();
-    let config_path = tmp.path().join("config.yaml");
+    let config_path = tmp.path().join("config.toml");
 
     std::env::set_var("TEST_KESTREL_TG_TOKEN", "999888:XYZ");
     std::env::set_var("TEST_KESTREL_OPENAI_KEY", "sk-test-key-12345");
 
-    let yaml_content = r#"
-_config_version: 4
-providers:
-  openai:
-    api_key: ${TEST_KESTREL_OPENAI_KEY}
-channels:
-  telegram:
-    token: ${TEST_KESTREL_TG_TOKEN}
-    enabled: true
-agent:
-  model: gpt-4o
+    let toml_content = r#"
+_config_version = 4
+
+[providers.openai]
+api_key = "${TEST_KESTREL_OPENAI_KEY}"
+
+[channels.telegram]
+token = "${TEST_KESTREL_TG_TOKEN}"
+enabled = true
+
+[agent]
+model = "gpt-4o"
 "#;
-    std::fs::write(&config_path, yaml_content).unwrap();
+    std::fs::write(&config_path, toml_content).unwrap();
 
     let config = load_config(Some(&config_path)).unwrap();
     assert_eq!(

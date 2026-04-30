@@ -1,15 +1,15 @@
 # kestrel-config
 
-YAML configuration loading with environment variable expansion and schema migration.
+TOML configuration loading with environment variable expansion and schema migration.
 
 Part of the [kestrel](../..) workspace.
 
 ## Overview
 
-Loads and validates the `config.yaml` that drives kestrel behavior. Supports `${VAR}`
-and `${VAR:-default}` environment variable substitution inside YAML values, and
-automatically migrates older config versions to the current schema. Maintains YAML
-compatibility with the Python kestrel config format.
+Loads and validates the `config.toml` that drives kestrel behavior. Supports `${VAR}`
+and `${VAR:-default}` environment variable substitution inside TOML values, and
+automatically migrates older config versions to the current schema. Can migrate from
+Python kestrel's JSON/YAML config format.
 
 ## Key Types
 
@@ -28,7 +28,7 @@ compatibility with the Python kestrel config format.
 ## Key Functions
 
 - `load_config(path)` -- Load from file (or default path), expand env vars, run migrations
-- `save_config(config, path)` -- Serialize config back to YAML
+- `save_config(config, path)` -- Serialize config back to TOML
 - `expand_env_vars(input)` -- Resolve `${VAR}` / `${VAR:-default}` patterns
 
 ## Usage
@@ -37,11 +37,11 @@ compatibility with the Python kestrel config format.
 use kestrel_config::load_config;
 use std::path::Path;
 
-let config = load_config(Some(Path::new("config.yaml")))?;
+let config = load_config(Some(Path::new("config.toml")))?;
 println!("Model: {}", config.agent.model);
 println!("Temperature: {}", config.agent.temperature);
 
-// Env vars in YAML are expanded:
-//   api_key: ${ANTHROPIC_API_KEY}
-//   model: ${MODEL:-gpt-4o}
+// Env vars in TOML are expanded:
+//   api_key = "${ANTHROPIC_API_KEY}"
+//   model = "${MODEL:-gpt-4o}"
 ```

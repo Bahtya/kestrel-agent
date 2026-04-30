@@ -1,4 +1,4 @@
-//! Config subcommand — validate config.yaml schema and migrate from Python.
+//! Config subcommand — validate config.toml schema and migrate from Python.
 
 use anyhow::Result;
 use kestrel_config::Config;
@@ -78,9 +78,9 @@ pub fn migrate(from: &Path, dry_run: bool) -> Result<()> {
     }
 
     if dry_run {
-        println!("\n--- Generated config.yaml (dry run) ---\n");
-        let yaml = serde_yaml::to_string(&result.config)?;
-        println!("{}", yaml);
+        println!("\n--- Generated config.toml (dry run) ---\n");
+        let toml_str = toml::to_string(&result.config)?;
+        println!("{}", toml_str);
     } else {
         let config_path = kestrel_config::paths::get_config_path()?;
         println!("\nWriting config to: {}", config_path.display());

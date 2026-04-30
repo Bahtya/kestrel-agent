@@ -97,15 +97,15 @@ fn initialize_home(config_path: &Path, template: &Config) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn template_yaml() -> String {
-        serde_yaml::to_string(&Config::default()).unwrap()
+    fn template_toml() -> String {
+        toml::to_string(&Config::default()).unwrap()
     }
 
     #[test]
     fn setup_keeps_existing_config_when_user_declines_overwrite() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.yaml");
-        std::fs::write(&config_path, "agent:\n  model: existing-model\n").unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "[agent]\nmodel = \"existing-model\"\n").unwrap();
 
         let mut input = io::Cursor::new(b"n\n");
         let mut output = Vec::new();
@@ -114,7 +114,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
-            "agent:\n  model: existing-model\n"
+            "[agent]\nmodel = \"existing-model\"\n"
         );
         assert!(!tmp.path().join("skills").exists());
 
@@ -126,8 +126,8 @@ mod tests {
     #[test]
     fn setup_keeps_existing_config_when_user_presses_enter() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.yaml");
-        std::fs::write(&config_path, "agent:\n  model: existing-model\n").unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "[agent]\nmodel = \"existing-model\"\n").unwrap();
 
         let mut input = io::Cursor::new(b"\n");
         let mut output = Vec::new();
@@ -136,7 +136,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
-            "agent:\n  model: existing-model\n"
+            "[agent]\nmodel = \"existing-model\"\n"
         );
         assert!(!tmp.path().join("sessions").exists());
 
@@ -147,8 +147,8 @@ mod tests {
     #[test]
     fn setup_overwrites_existing_config_and_creates_default_directories() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.yaml");
-        std::fs::write(&config_path, "agent:\n  model: existing-model\n").unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "[agent]\nmodel = \"existing-model\"\n").unwrap();
 
         let mut input = io::Cursor::new(b"y\n");
         let mut output = Vec::new();
@@ -157,7 +157,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
-            template_yaml()
+            template_toml()
         );
         assert!(tmp.path().join("skills").is_dir());
         assert!(tmp.path().join("sessions").is_dir());
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn setup_creates_template_config_and_directories_when_config_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.yaml");
+        let config_path = tmp.path().join("config.toml");
 
         let mut input = io::Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();
@@ -179,7 +179,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
-            template_yaml()
+            template_toml()
         );
         assert!(tmp.path().join("skills").is_dir());
         assert!(tmp.path().join("sessions").is_dir());

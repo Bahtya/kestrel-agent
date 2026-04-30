@@ -54,10 +54,10 @@ pub fn get_sessions_dir() -> Result<PathBuf> {
 
 /// Get the config file path.
 ///
-/// Default: `~/.kestrel/config.yaml`
+/// Default: `~/.kestrel/config.toml`
 pub fn get_config_path() -> Result<PathBuf> {
     let home = get_kestrel_home()?;
-    Ok(home.join("config.yaml"))
+    Ok(home.join("config.toml"))
 }
 
 /// Get the memory storage directory.
@@ -132,7 +132,7 @@ mod tests {
     fn test_config_path_default() {
         std::env::set_var("KESTREL_HOME", "/tmp/test-kestrel-config");
         let path = get_config_path().unwrap();
-        assert_eq!(path, PathBuf::from("/tmp/test-kestrel-config/config.yaml"));
+        assert_eq!(path, PathBuf::from("/tmp/test-kestrel-config/config.toml"));
         std::env::remove_var("KESTREL_HOME");
     }
 }

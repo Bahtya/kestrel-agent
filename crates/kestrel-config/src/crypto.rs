@@ -1,11 +1,10 @@
 //! AES-256-GCM encryption/decryption with Argon2 key derivation.
 
+use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, AeadCore, Nonce};
+use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
-use argon2::password_hash::SaltString;
 use argon2::Argon2;
-use rand::RngCore;
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
@@ -16,7 +15,7 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
     argon2
         .hash_password_into(password.as_bytes(), salt, &mut key)
-        .context("Argon2 key derivation failed")?;
+        .map_err(|e| anyhow::anyhow!("Argon2 key derivation failed: {e}"))?;
     Ok(key)
 }
 
@@ -28,8 +27,8 @@ pub fn encrypt(plaintext: &str, password: &str) -> Result<Vec<u8>> {
     OsRng.fill_bytes(&mut salt);
 
     let key = derive_key(password, &salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| anyhow::anyhow!("AES key init failed: {e}"))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("AES key init failed: {e}"))?;
 
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
@@ -55,8 +54,8 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<String> {
     let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
 
     let key = derive_key(password, salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| anyhow::anyhow!("AES key init failed: {e}"))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("AES key init failed: {e}"))?;
 
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher

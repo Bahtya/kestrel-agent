@@ -55,6 +55,7 @@ impl MockProvider {
                 .into_iter()
                 .map(|text| CompletionResponse {
                     content: Some(text.to_string()),
+                    reasoning_content: None,
                     tool_calls: None,
                     usage: Some(Usage {
                         prompt_tokens: Some(10),

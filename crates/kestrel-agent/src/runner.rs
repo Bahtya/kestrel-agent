@@ -387,7 +387,13 @@ impl AgentRunner {
                 let chunk_result = match chunk_result {
                     Ok(Some(r)) => r,
                     Ok(None) => {
-                        break 'stream_retry Ok((full_content, full_reasoning, usage, tool_calls_map, send_start));
+                        break 'stream_retry Ok((
+                            full_content,
+                            full_reasoning,
+                            usage,
+                            tool_calls_map,
+                            send_start,
+                        ));
                     }
                     Err(_) => {
                         let err = anyhow::anyhow!(
@@ -486,12 +492,19 @@ impl AgentRunner {
                 }
 
                 if chunk.done {
-                    break 'stream_retry Ok((full_content, full_reasoning, usage, tool_calls_map, send_start));
+                    break 'stream_retry Ok((
+                        full_content,
+                        full_reasoning,
+                        usage,
+                        tool_calls_map,
+                        send_start,
+                    ));
                 }
             }
         };
 
-        let (full_content, full_reasoning, usage, tool_calls_map, send_start) = result?;
+        let (full_content, full_reasoning, usage, tool_calls_map, send_start) =
+            result?;
 
         debug!(
             total_ms = send_start.elapsed().as_millis() as u64,

@@ -187,6 +187,7 @@ async fn test_agent_tool_call_malformed_args_returns_error() {
     let providers = make_providers(vec![
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_malformed".to_string(),
                 call_type: "function".to_string(),
@@ -200,6 +201,7 @@ async fn test_agent_tool_call_malformed_args_returns_error() {
         },
         CompletionResponse {
             content: Some("I see the error, let me retry.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(20),
@@ -284,6 +286,7 @@ async fn test_agent_tool_arg_error_includes_details() {
                 .cloned()
                 .unwrap_or(CompletionResponse {
                     content: Some("default mock response".to_string()),
+                    reasoning_content: None,
                     tool_calls: None,
                     usage: None,
                     finish_reason: None,
@@ -315,6 +318,7 @@ async fn test_agent_tool_arg_error_includes_details() {
         vec![
             CompletionResponse {
                 content: Some(String::new()),
+                reasoning_content: None,
                 tool_calls: Some(vec![ToolCall {
                     id: "call_err".to_string(),
                     call_type: "function".to_string(),
@@ -328,6 +332,7 @@ async fn test_agent_tool_arg_error_includes_details() {
             },
             CompletionResponse {
                 content: Some("Done.".to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: None,
                 finish_reason: Some("stop".to_string()),

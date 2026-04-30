@@ -170,6 +170,9 @@ pub struct ProvidersConfig {
     /// OpenCode Go provider settings (https://opencode.ai/go).
     #[serde(default)]
     pub opencode_go: Option<ProviderEntry>,
+    /// GLM Coding Plan (智谱) provider settings (https://open.bigmodel.cn).
+    #[serde(default)]
+    pub glm_coding_plan: Option<ProviderEntry>,
 }
 
 /// A generic provider entry with API key and optional base URL.

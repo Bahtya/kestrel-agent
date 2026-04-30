@@ -1166,6 +1166,9 @@ fn collect_settings(config: &Config) -> Vec<String> {
     if config.providers.opencode_go.is_some() {
         providers.push("opencode_go");
     }
+    if config.providers.glm_coding_plan.is_some() {
+        providers.push("glm_coding_plan");
+    }
     for cp in &config.custom_providers {
         providers.push(&cp.name);
     }
@@ -1555,6 +1558,9 @@ fn build_summary(config: &Config) -> String {
     if config.providers.opencode_go.is_some() {
         providers.push("opencode_go");
     }
+    if config.providers.glm_coding_plan.is_some() {
+        providers.push("glm_coding_plan");
+    }
     for cp in &config.custom_providers {
         providers.push(&cp.name);
     }
@@ -1704,6 +1710,12 @@ fn handle_status() -> String {
     }
     if let Some(ref p) = config.providers.openai_codex {
         providers.push(format_key_status("openai_codex", p.api_key.as_deref()));
+    }
+    if let Some(ref p) = config.providers.opencode_go {
+        providers.push(format_key_status("opencode_go", p.api_key.as_deref()));
+    }
+    if let Some(ref p) = config.providers.glm_coding_plan {
+        providers.push(format_key_status("glm_coding_plan", p.api_key.as_deref()));
     }
     for cp in &config.custom_providers {
         providers.push(format!("{} (custom)", cp.name));

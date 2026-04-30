@@ -29,6 +29,7 @@ pub fn run(config: &Config) -> Result<()> {
         ("Ollama", config.providers.ollama.as_ref()),
         ("Gemini", config.providers.gemini.as_ref()),
         ("OpenCode Go", config.providers.opencode_go.as_ref()),
+        ("GLM Coding Plan", config.providers.glm_coding_plan.as_ref()),
     ];
     for (name, entry) in &provider_entries {
         let status = match entry {

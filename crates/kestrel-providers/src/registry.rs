@@ -178,6 +178,23 @@ impl ProviderRegistry {
             }
         }
 
+        // Register GLM Coding Plan provider (智谱 — OpenAI-compatible endpoint)
+        if let Some(entry) = &config.providers.glm_coding_plan {
+            if let Some(api_key) = &entry.api_key {
+                let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+                    api_key: api_key.clone(),
+                    base_url: entry.base_url.clone().unwrap_or_else(|| {
+                        "https://open.bigmodel.cn/api/coding/paas/v4".to_string()
+                    }),
+                    model: entry.model.clone().unwrap_or_default(),
+                    organization: None,
+                    no_proxy: entry.no_proxy.unwrap_or(false),
+                })?;
+                registry.register("glm_coding_plan", provider);
+                info!("Registered GLM Coding Plan provider");
+            }
+        }
+
         // Register custom providers
         for custom in &config.custom_providers {
             let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {

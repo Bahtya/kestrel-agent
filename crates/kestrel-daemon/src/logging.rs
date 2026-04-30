@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use tracing_subscriber::{filter::Targets, layer::SubscriberExt, EnvFilter, Registry};
+use tracing_subscriber::{filter::Targets, layer::SubscriberExt, EnvFilter, Layer, Registry};
 
 /// Guard returned by [`setup_file_logging`]. Must be kept alive for the
 /// lifetime of the application — dropping it flushes and closes the log file.

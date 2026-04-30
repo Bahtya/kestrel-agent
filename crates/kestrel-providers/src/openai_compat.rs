@@ -435,16 +435,34 @@ impl LlmProvider for OpenAiCompatProvider {
         let client = self.client.clone();
         let retry_config = self.retry.clone();
 
+        let trace_id = kestrel_core::trace::generate_trace_id();
+        let sanitized = kestrel_core::comm_log::sanitize_headers(&headers);
+
+        tracing::info!(
+            target: "comm",
+            trace_id = %trace_id,
+            method = "POST",
+            url = %url,
+            model = %request.model,
+            stream = false,
+            max_tokens = ?request.max_tokens,
+            headers = ?sanitized,
+            "HTTP REQ"
+        );
+
         debug!(
             "Sending completion request to {} (model: {})",
             url, request.model
         );
+
+        let start = std::time::Instant::now();
 
         retry_with_backoff(&retry_config, move |_attempt| {
             let url = url.clone();
             let body = body.clone();
             let headers = headers.clone();
             let client = client.clone();
+            let trace_id = trace_id.clone();
             async move {
                 let mut req_builder = client.post(&url);
                 for (k, v) in &headers {
@@ -460,6 +478,13 @@ impl LlmProvider for OpenAiCompatProvider {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
+                    tracing::warn!(
+                        target: "comm",
+                        trace_id = %trace_id,
+                        status = status.as_u16(),
+                        error = %text,
+                        "HTTP RESP ERROR"
+                    );
                     anyhow::bail!("API error ({}): {}", status, text);
                 }
 
@@ -499,6 +524,18 @@ impl LlmProvider for OpenAiCompatProvider {
             }
         })
         .await
+        .map(|resp| {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            tracing::info!(
+                target: "comm",
+                trace_id = %trace_id,
+                status = 200,
+                duration_ms = duration_ms,
+                tokens = ?resp.usage,
+                "HTTP RESP"
+            );
+            resp
+        })
     }
 
     async fn complete_stream(&self, request: CompletionRequest) -> Result<BoxStream> {
@@ -508,6 +545,21 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let headers = self.build_headers();
         let retry_config = self.retry.clone();
+
+        let trace_id = kestrel_core::trace::generate_trace_id();
+        let sanitized = kestrel_core::comm_log::sanitize_headers(&headers);
+
+        tracing::info!(
+            target: "comm",
+            trace_id = %trace_id,
+            method = "POST",
+            url = %url,
+            model = %request.model,
+            stream = true,
+            max_tokens = ?request.max_tokens,
+            headers = ?sanitized,
+            "HTTP REQ"
+        );
 
         debug!(
             "Sending streaming request to {} (model: {})",
@@ -519,6 +571,7 @@ impl LlmProvider for OpenAiCompatProvider {
             let body = body.clone();
             let headers = headers.clone();
             let client = self.streaming_client.clone();
+            let trace_id = trace_id.clone();
             async move {
                 let mut req_builder = client.post(&url);
                 for (k, v) in &headers {
@@ -534,6 +587,13 @@ impl LlmProvider for OpenAiCompatProvider {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
+                    tracing::warn!(
+                        target: "comm",
+                        trace_id = %trace_id,
+                        status = status.as_u16(),
+                        error = %text,
+                        "HTTP RESP ERROR"
+                    );
                     anyhow::bail!("API error ({}): {}", status, text);
                 }
 

@@ -343,6 +343,13 @@ impl WebSocketChannel {
         let mut env = WsEnvelope::message(text);
         env.reply_to = reply_to.map(|r| r.to_string());
         env.trace_id = Some(trace_id.to_string());
+        tracing::info!(
+            target: "comm",
+            trace_id = %trace_id,
+            client_id = %client_id,
+            msg_type = "message",
+            "WS OUT"
+        );
         if let Ok(json) = env.to_json() {
             if let Some(client_tx) = clients.get(client_id) {
                 let _ = client_tx.send(json);
@@ -767,10 +774,18 @@ impl WebSocketChannel {
                 source: Some(source),
                 message_type,
                 message_id: envelope_msg_id.clone(),
-                trace_id: Some(trace_id),
+                trace_id: Some(trace_id.clone()),
                 reply_to: None,
                 timestamp: chrono::Local::now(),
             };
+
+            tracing::info!(
+                target: "comm",
+                trace_id = %trace_id,
+                client_id = %client_id,
+                msg_type = "message",
+                "WS IN"
+            );
 
             if let Err(e) = handler.send(inbound).await {
                 warn!(
@@ -939,6 +954,15 @@ impl BaseChannel for WebSocketChannel {
         match client.send(json) {
             Ok(()) => {
                 debug!("Sent message to WebSocket client {}", chat_id);
+                if let Some(tid) = trace_id {
+                    tracing::info!(
+                        target: "comm",
+                        trace_id = %tid,
+                        client_id = %chat_id,
+                        msg_type = "message",
+                        "WS OUT"
+                    );
+                }
                 Ok(SendResult {
                     success: true,
                     message_id: Some(format!("ws_{}", chat_id)),

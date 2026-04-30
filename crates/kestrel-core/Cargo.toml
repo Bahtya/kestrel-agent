@@ -10,3 +10,6 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 hickory-resolver = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = "0.2"

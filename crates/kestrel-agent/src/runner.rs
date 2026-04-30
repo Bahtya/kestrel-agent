@@ -276,6 +276,14 @@ impl AgentRunner {
                     iteration: iteration + 1,
                     trace_id: self.trace_id.clone(),
                 });
+                if let Some(ref tid) = self.trace_id {
+                    tracing::info!(
+                        target: "comm",
+                        trace_id = %tid,
+                        tool = %tc.function.name,
+                        "TOOL START"
+                    );
+                }
             }
 
             // Add assistant message with tool calls
@@ -298,6 +306,16 @@ impl AgentRunner {
                     duration_ms = *duration_ms,
                     "Tool call completed"
                 );
+                if let Some(ref tid) = self.trace_id {
+                    tracing::info!(
+                        target: "comm",
+                        trace_id = %tid,
+                        tool = %tc.function.name,
+                        duration_ms = *duration_ms,
+                        success = true,
+                        "TOOL END"
+                    );
+                }
             }
 
             // Add tool results to conversation

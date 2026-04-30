@@ -1711,6 +1711,9 @@ fn handle_status() -> String {
     if let Some(ref p) = config.providers.openai_codex {
         providers.push(format_key_status("openai_codex", p.api_key.as_deref()));
     }
+    if let Some(ref p) = config.providers.opencode_go {
+        providers.push(format_key_status("opencode_go", p.api_key.as_deref()));
+    }
     if let Some(ref p) = config.providers.glm_coding_plan {
         providers.push(format_key_status("glm_coding_plan", p.api_key.as_deref()));
     }

@@ -275,9 +275,10 @@ fn load_existing_config(path: &Path) -> Result<Config> {
 fn mask_token(token: &str) -> String {
     if token.is_empty() {
         "(not set)".to_string()
+    } else if token.len() <= 3 {
+        "(masked)".to_string()
     } else {
-        let visible = token.len().min(3);
-        format!("{}…(masked)", &token[..visible])
+        format!("{}…(masked)", &token[..3])
     }
 }
 
@@ -527,7 +528,9 @@ fn ensure_provider_entry(config: &mut Config, provider: &str) {
 }
 
 fn get_provider_url<'a>(config: &'a Config, provider: &str) -> Option<&'a str> {
-    provider_field!(config, provider)?.as_ref().and_then(|e| e.base_url.as_deref())
+    provider_field!(config, provider)?
+        .as_ref()
+        .and_then(|e| e.base_url.as_deref())
 }
 
 fn set_provider_url(config: &mut Config, provider: &str, url: &str) {
@@ -570,15 +573,9 @@ mod tests {
             prompt_contains: &'static str,
             result: bool,
         },
-        Select {
-            result: usize,
-        },
-        Input {
-            result: &'static str,
-        },
-        Password {
-            result: &'static str,
-        },
+        Select { result: usize },
+        Input { result: &'static str },
+        Password { result: &'static str },
     }
 
     struct MockWizard {
@@ -725,12 +722,8 @@ mod tests {
 
         let mock = MockWizard::new(vec![
             // Step 2: Provider
-            MockAction::Select {
-                result: 1,
-            }, // openai
-            MockAction::Input {
-                result: "gpt-4o",
-            },
+            MockAction::Select { result: 1 }, // openai
+            MockAction::Input { result: "gpt-4o" },
             MockAction::Input {
                 result: "https://api.openai.com/v1",
             },
@@ -779,9 +772,7 @@ mod tests {
                 result: true,
             },
             // Step 2: Provider
-            MockAction::Select {
-                result: 0,
-            }, // anthropic
+            MockAction::Select { result: 0 }, // anthropic
             MockAction::Input {
                 result: "claude-sonnet-4-20250514",
             },

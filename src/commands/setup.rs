@@ -573,9 +573,15 @@ mod tests {
             prompt_contains: &'static str,
             result: bool,
         },
-        Select { result: usize },
-        Input { result: &'static str },
-        Password { result: &'static str },
+        Select {
+            result: usize,
+        },
+        Input {
+            result: &'static str,
+        },
+        Password {
+            result: &'static str,
+        },
     }
 
     struct MockWizard {

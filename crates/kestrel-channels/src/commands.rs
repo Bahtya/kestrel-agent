@@ -16,7 +16,7 @@ use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
 use crate::platforms::telegram::{
-    InlineKeyboardBuilder, InlineKeyboardButton, InlineKeyboardMarkup,
+    InlineKeyboardBuilder, InlineKeyboardMarkup,
 };
 
 /// Fallback model names for cycling when dynamic discovery is unavailable.
@@ -1864,27 +1864,9 @@ pub async fn handle_models_provider_detail(provider: &str, page: usize) -> Comma
 
     // Navigation row: pagination | back
     if total_pages > 1 {
-        // Pagination buttons
-        let mut nav_row = Vec::new();
-        if page > 0 {
-            nav_row.push(InlineKeyboardButton {
-                text: "◀ Prev".to_string(),
-                callback_data: Some(format!("models:ppage:{}|{}", provider, page - 1)),
-                url: None,
-            });
-        }
-        nav_row.push(InlineKeyboardButton {
-            text: format!("{}/{}", page + 1, total_pages),
-            callback_data: Some(format!("models:ppage:{}|{}", provider, page)),
-            url: None,
+        let nav_row = InlineKeyboardBuilder::pagination_row(page, total_pages, |p| {
+            format!("models:ppage:{}|{}", provider, p)
         });
-        if page + 1 < total_pages {
-            nav_row.push(InlineKeyboardButton {
-                text: "Next ▶".to_string(),
-                callback_data: Some(format!("models:ppage:{}|{}", provider, page + 1)),
-                url: None,
-            });
-        }
         kb = kb.push_row(nav_row);
     }
 

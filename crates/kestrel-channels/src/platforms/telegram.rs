@@ -328,29 +328,38 @@ impl InlineKeyboardBuilder {
         )
     }
 
-    /// Build a pagination keyboard with previous/next buttons.
-    pub fn pagination(prefix: &str, page: usize, total_pages: usize) -> Self {
-        let mut builder = Self::new();
+    /// Build a single pagination button row (Prev / indicator / Next).
+    pub fn pagination_row<F>(page: usize, total_pages: usize, callback: F) -> Vec<InlineKeyboardButton>
+    where
+        F: Fn(usize) -> String,
+    {
         let mut row = Vec::new();
         if page > 0 {
             row.push(InlineKeyboardButton {
                 text: "◀ Prev".to_string(),
-                callback_data: Some(format!("{prefix}:page:{}", page - 1)),
+                callback_data: Some(callback(page - 1)),
                 url: None,
             });
         }
         row.push(InlineKeyboardButton {
             text: format!("{}/{}", page + 1, total_pages),
-            callback_data: Some(format!("{prefix}:page:{page}")),
+            callback_data: Some(callback(page)),
             url: None,
         });
         if page + 1 < total_pages {
             row.push(InlineKeyboardButton {
                 text: "Next ▶".to_string(),
-                callback_data: Some(format!("{prefix}:page:{}", page + 1)),
+                callback_data: Some(callback(page + 1)),
                 url: None,
             });
         }
+        row
+    }
+
+    /// Build a pagination keyboard with previous/next buttons.
+    pub fn pagination(prefix: &str, page: usize, total_pages: usize) -> Self {
+        let row = Self::pagination_row(page, total_pages, |p| format!("{prefix}:page:{p}"));
+        let mut builder = Self::new();
         builder.rows.push(row);
         builder
     }
@@ -1696,7 +1705,7 @@ impl TelegramChannel {
                         "ppage" => {
                             let raw = payload.as_deref().unwrap_or("");
                             let (provider, page) = raw
-                                .split_once('|')
+                                .rsplit_once('|')
                                 .map(|(p, n)| (p, n.parse::<usize>().unwrap_or(0)))
                                 .unwrap_or((raw, 0));
                             let response =

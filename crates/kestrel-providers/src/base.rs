@@ -63,6 +63,10 @@ pub struct CompletionResponse {
     /// The text content of the response.
     pub content: Option<String>,
 
+    /// Reasoning / thinking content (e.g. DeepSeek `reasoning_content`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+
     /// Tool calls requested by the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<kestrel_core::ToolCall>>,
@@ -82,6 +86,10 @@ pub struct CompletionChunk {
     /// Incremental content delta.
     #[serde(default)]
     pub delta: Option<String>,
+
+    /// Reasoning / thinking content delta (e.g. DeepSeek `reasoning_content`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 
     /// Tool call deltas (for streaming tool calls).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +162,7 @@ mod tests {
     fn test_completion_response_serde() {
         let resp = CompletionResponse {
             content: Some("hi there".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(10),
@@ -165,6 +174,7 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let back: CompletionResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.content.as_deref(), Some("hi there"));
+        assert!(back.reasoning_content.is_none());
         assert!(back.tool_calls.is_none());
         assert_eq!(back.usage.unwrap().total_tokens, Some(15));
         assert_eq!(back.finish_reason.as_deref(), Some("stop"));
@@ -174,11 +184,13 @@ mod tests {
     fn test_completion_chunk_default() {
         let chunk = CompletionChunk {
             delta: None,
+            reasoning_content: None,
             tool_call_deltas: None,
             usage: None,
             done: false,
         };
         assert!(chunk.delta.is_none());
+        assert!(chunk.reasoning_content.is_none());
         assert!(chunk.tool_call_deltas.is_none());
         assert!(chunk.usage.is_none());
         assert!(!chunk.done);

@@ -36,6 +36,7 @@ impl MockProvider {
         Self {
             responses: vec![CompletionResponse {
                 content: Some(text.to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: Some(Usage {
                     prompt_tokens: Some(10),
@@ -97,6 +98,7 @@ impl LlmProvider for MockProvider {
 
         let chunk = CompletionChunk {
             delta: resp.content.clone(),
+            reasoning_content: None,
             tool_call_deltas,
             usage: resp.usage.clone(),
             done: true,
@@ -281,6 +283,7 @@ async fn test_e2e_tool_call_flow() {
         // Step 1: LLM requests a tool call
         CompletionResponse {
             content: Some("Let me check the weather.".to_string()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_weather_1".to_string(),
                 call_type: "function".to_string(),
@@ -299,6 +302,7 @@ async fn test_e2e_tool_call_flow() {
         // Step 2: LLM produces the final response after seeing tool result
         CompletionResponse {
             content: Some("The weather in Berlin is Sunny, 22C.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(40),
@@ -378,6 +382,7 @@ async fn test_e2e_parallel_tool_calls() {
     let provider = MockProvider::multi_step(vec![
         CompletionResponse {
             content: Some("Checking both.".to_string()),
+            reasoning_content: None,
             tool_calls: Some(vec![
                 ToolCall {
                     id: "call_tokyo".to_string(),
@@ -401,6 +406,7 @@ async fn test_e2e_parallel_tool_calls() {
         },
         CompletionResponse {
             content: Some("Tokyo: Sunny, 22C. Paris: Sunny, 22C.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -445,12 +451,14 @@ async fn test_e2e_session_persistence() {
     let provider = MockProvider::multi_step(vec![
         CompletionResponse {
             content: Some("Async Rust uses futures and an executor to manage concurrent tasks efficiently.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
         },
         CompletionResponse {
             content: Some("Tokyo has humid summers and mild winters, while Paris has oceanic climate with steady rainfall.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -510,6 +518,8 @@ async fn test_e2e_echo_tool_flow() {
     let provider = MockProvider::multi_step(vec![
         CompletionResponse {
             content: None,
+            reasoning_content: None,
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_echo".to_string(),
                 call_type: "function".to_string(),
@@ -523,6 +533,7 @@ async fn test_e2e_echo_tool_flow() {
         },
         CompletionResponse {
             content: Some("Got: ECHO: hello world".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -614,6 +625,8 @@ async fn test_e2e_tool_not_found_graceful() {
         // LLM requests a nonexistent tool
         CompletionResponse {
             content: None,
+            reasoning_content: None,
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_missing".to_string(),
                 call_type: "function".to_string(),
@@ -628,6 +641,7 @@ async fn test_e2e_tool_not_found_graceful() {
         // Provider sees error result and gives text response
         CompletionResponse {
             content: Some("Sorry, that tool is not available.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),

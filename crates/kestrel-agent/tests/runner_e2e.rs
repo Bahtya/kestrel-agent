@@ -50,6 +50,7 @@ async fn test_agent_simple_response() {
     let config = Arc::new(make_config());
     let providers = make_providers(vec![CompletionResponse {
         content: Some("Hello! I am a mock assistant.".to_string()),
+        reasoning_content: None,
         tool_calls: None,
         usage: Some(Usage {
             prompt_tokens: Some(10),
@@ -86,6 +87,7 @@ async fn test_agent_tool_call_then_response() {
     let providers = make_providers(vec![
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".to_string(),
                 call_type: "function".to_string(),
@@ -99,6 +101,7 @@ async fn test_agent_tool_call_then_response() {
         },
         CompletionResponse {
             content: Some("Found 3 Rust files.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(20),
@@ -139,6 +142,7 @@ async fn test_agent_max_iterations() {
     let providers = make_providers(vec![
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_loop".to_string(),
                 call_type: "function".to_string(),
@@ -291,6 +295,7 @@ async fn test_agent_tool_arg_error_includes_details() {
             let resp = self.complete(request).await?;
             let chunk = CompletionChunk {
                 delta: resp.content,
+                reasoning_content: None,
                 tool_call_deltas: None,
                 usage: resp.usage,
                 done: true,

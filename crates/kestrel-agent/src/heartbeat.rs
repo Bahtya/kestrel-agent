@@ -1291,6 +1291,7 @@ mod tests {
         ) -> anyhow::Result<kestrel_providers::base::CompletionResponse> {
             Ok(kestrel_providers::base::CompletionResponse {
                 content: Some("ok".to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: None,
                 finish_reason: None,
@@ -1303,6 +1304,7 @@ mod tests {
             let resp = self.complete(req).await?;
             let chunk = kestrel_providers::base::CompletionChunk {
                 delta: resp.content,
+                reasoning_content: None,
                 tool_call_deltas: None,
                 usage: resp.usage,
                 done: true,

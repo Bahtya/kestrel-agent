@@ -41,6 +41,7 @@ pub use subagent::{
 /// Result from a streaming LLM completion (internal type).
 pub(crate) struct StreamingResult {
     pub content: Option<String>,
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<kestrel_core::ToolCall>>,
     pub usage: Option<kestrel_core::Usage>,
     pub finish_reason: Option<String>,
@@ -50,6 +51,7 @@ impl From<StreamingResult> for kestrel_providers::CompletionResponse {
     fn from(r: StreamingResult) -> Self {
         Self {
             content: r.content,
+            reasoning_content: r.reasoning_content,
             tool_calls: r.tool_calls,
             usage: r.usage,
             finish_reason: r.finish_reason,

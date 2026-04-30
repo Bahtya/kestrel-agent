@@ -444,6 +444,7 @@ mod tests {
                 *self.last_model.lock() = Some(request.model);
                 Ok(kestrel_providers::CompletionResponse {
                     content: Some("ok".to_string()),
+                    reasoning_content: None,
                     tool_calls: None,
                     usage: None,
                     finish_reason: None,
@@ -457,6 +458,7 @@ mod tests {
                 let resp = self.complete(request).await?;
                 let chunk = kestrel_providers::base::CompletionChunk {
                     delta: resp.content,
+                    reasoning_content: None,
                     tool_call_deltas: None,
                     usage: None,
                     done: true,

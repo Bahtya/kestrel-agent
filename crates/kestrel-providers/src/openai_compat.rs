@@ -228,6 +228,7 @@ impl OpenAiCompatProvider {
                         let _ = tx
                             .send(Ok(CompletionChunk {
                                 delta: None,
+                                reasoning_content: None,
                                 tool_call_deltas,
                                 usage: None,
                                 done: true,
@@ -247,6 +248,14 @@ impl OpenAiCompatProvider {
                         .and_then(|c| c.get(0))
                         .and_then(|c| c.get("delta"))
                         .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str());
+
+                    // Extract reasoning content delta (DeepSeek thinking mode)
+                    let reasoning_text = chunk_data
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("reasoning_content"))
                         .and_then(|c| c.as_str());
 
                     // Extract tool call deltas
@@ -295,7 +304,11 @@ impl OpenAiCompatProvider {
                         total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()),
                     });
 
-                    if delta_text.is_some() || finish_reason.is_some() || usage.is_some() {
+                    if delta_text.is_some()
+                        || reasoning_text.is_some()
+                        || finish_reason.is_some()
+                        || usage.is_some()
+                    {
                         let tool_call_deltas = if finish_reason.is_some() {
                             build_openai_tool_call_deltas(&tc_acc)
                         } else {
@@ -307,6 +320,7 @@ impl OpenAiCompatProvider {
                         let _ = tx
                             .send(Ok(CompletionChunk {
                                 delta: delta_text.map(String::from),
+                                reasoning_content: reasoning_text.map(String::from),
                                 tool_call_deltas,
                                 usage,
                                 done: finish_reason == Some("stop")
@@ -368,6 +382,7 @@ struct OpenAiChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiMessage {
     content: Option<String>,
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
@@ -461,6 +476,7 @@ impl LlmProvider for OpenAiCompatProvider {
 
                 Ok(CompletionResponse {
                     content: choice.message.content,
+                    reasoning_content: choice.message.reasoning_content,
                     tool_calls,
                     usage: api_resp.usage.map(|u| Usage {
                         prompt_tokens: u.prompt_tokens,

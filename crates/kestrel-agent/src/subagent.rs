@@ -1406,6 +1406,7 @@ mod tests {
                 } else {
                     Ok(CompletionResponse {
                         content: Some(format!("Success on call {}", n)),
+                        reasoning_content: None,
                         tool_calls: None,
                         usage: Some(Usage {
                             prompt_tokens: Some(10),
@@ -1420,6 +1421,7 @@ mod tests {
                 let resp = self.complete(req).await?;
                 let chunk = CompletionChunk {
                     delta: resp.content,
+                    reasoning_content: None,
                     tool_call_deltas: None,
                     usage: resp.usage,
                     done: true,

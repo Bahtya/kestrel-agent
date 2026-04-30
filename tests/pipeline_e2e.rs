@@ -35,6 +35,7 @@ impl MockProvider {
         Self {
             responses: vec![CompletionResponse {
                 content: Some(text.to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: Some(Usage {
                     prompt_tokens: Some(10),
@@ -112,6 +113,7 @@ impl LlmProvider for MockProvider {
         });
         let chunk = CompletionChunk {
             delta: resp.content.clone(),
+            reasoning_content: None,
             tool_call_deltas,
             usage: resp.usage.clone(),
             done: true,
@@ -350,6 +352,7 @@ async fn test_pipeline_tool_call_conversation_cycle() {
     let provider = MockProvider::multi_step(vec![
         CompletionResponse {
             content: Some("Let me echo that.".to_string()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_echo_1".to_string(),
                 call_type: "function".to_string(),
@@ -367,6 +370,7 @@ async fn test_pipeline_tool_call_conversation_cycle() {
         },
         CompletionResponse {
             content: Some("Tool returned: ECHO: hello pipeline".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(40),
@@ -541,6 +545,7 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
         // Turn 1: simple
         CompletionResponse {
             content: Some("Welcome!".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -548,6 +553,7 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
         // Turn 2: tool call
         CompletionResponse {
             content: Some("Checking counter.".to_string()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_counter".to_string(),
                 call_type: "function".to_string(),
@@ -562,6 +568,7 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
         // Turn 2: final response after tool
         CompletionResponse {
             content: Some("Counter is at 1.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -569,6 +576,7 @@ async fn test_pipeline_multi_turn_with_tool_calls() {
         // Turn 3: simple
         CompletionResponse {
             content: Some("Done!".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -757,6 +765,7 @@ async fn test_pipeline_subagent_error_isolation() {
             let resp = self.complete(req).await?;
             let chunk = CompletionChunk {
                 delta: resp.content,
+                reasoning_content: None,
                 tool_call_deltas: None,
                 usage: resp.usage,
                 done: true,
@@ -788,6 +797,7 @@ async fn test_pipeline_subagent_error_isolation() {
             } else {
                 Ok(CompletionResponse {
                     content: Some(format!("Sub-agent {} ok", n)),
+                    reasoning_content: None,
                     tool_calls: None,
                     usage: Some(Usage {
                         prompt_tokens: Some(10),
@@ -802,6 +812,7 @@ async fn test_pipeline_subagent_error_isolation() {
             let resp = self.complete(req).await?;
             let chunk = CompletionChunk {
                 delta: resp.content,
+                reasoning_content: None,
                 tool_call_deltas: None,
                 usage: resp.usage,
                 done: true,

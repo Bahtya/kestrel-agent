@@ -84,6 +84,7 @@ impl LlmProvider for MockProvider {
             if let Some(ref tc) = self.first_tool_call {
                 return Ok(CompletionResponse {
                     content: Some(String::new()),
+                    reasoning_content: None,
                     tool_calls: Some(vec![kestrel_core::ToolCall {
                         id: tc.2.clone(),
                         call_type: "function".to_string(),
@@ -105,6 +106,7 @@ impl LlmProvider for MockProvider {
         // Regular text response
         Ok(CompletionResponse {
             content: Some(self.response.clone()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(kestrel_core::Usage {
                 prompt_tokens: Some(10),
@@ -135,6 +137,7 @@ impl LlmProvider for MockProvider {
         });
         let chunk = CompletionChunk {
             delta: resp.content.clone(),
+            reasoning_content: None,
             tool_call_deltas,
             usage: resp.usage.clone(),
             done: true,

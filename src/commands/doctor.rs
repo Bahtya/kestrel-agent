@@ -4,7 +4,7 @@ use anyhow::Result;
 use kestrel_config::paths::get_config_path;
 use kestrel_config::schema::Config;
 use kestrel_config::validate;
-use kestrel_providers::{CompletionRequest, LlmProvider, ProviderRegistry};
+use kestrel_providers::{CompletionRequest, ProviderRegistry};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,10 @@ fn check_config_file(config: &Config, errors: &mut usize, warnings: &mut usize) 
                 }
             } else {
                 *warnings += 1;
-                println!("  Config file:    not found at {} (using defaults)", path.display());
+                println!(
+                    "  Config file:    not found at {} (using defaults)",
+                    path.display()
+                );
             }
         }
         Err(e) => {
@@ -83,7 +86,15 @@ fn check_config_file(config: &Config, errors: &mut usize, warnings: &mut usize) 
         println!("  Schema:         pass");
     } else {
         for f in report.findings() {
-            println!("  Schema {:?}: [{}] {} — {}", f.severity, f.path, f.message, if f.severity == validate::Severity::Error { "FAIL" } else { "WARN" });
+            let label = if f.severity == validate::Severity::Error {
+                "FAIL"
+            } else {
+                "WARN"
+            };
+            println!(
+                "  Schema {:?}: [{}] {} — {}",
+                f.severity, f.path, f.message, label
+            );
         }
     }
 
@@ -127,11 +138,15 @@ fn check_websocket(config: &Config, errors: &mut usize, warnings: &mut usize) {
                 .unwrap_or("127.0.0.1:8090");
             print!("  Port {} (disabled): ", default_addr);
             match default_addr.parse::<std::net::SocketAddr>() {
-                Ok(sock_addr) => match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(3))
-                {
-                    Ok(_) => println!("listening (but disabled in config)"),
-                    Err(_) => println!("nothing listening"),
-                },
+                Ok(sock_addr) => {
+                    match TcpStream::connect_timeout(
+                        &sock_addr,
+                        Duration::from_secs(3),
+                    ) {
+                        Ok(_) => println!("listening (but disabled in config)"),
+                        Err(_) => println!("nothing listening"),
+                    }
+                }
                 Err(_) => println!("invalid address"),
             }
         }
@@ -201,13 +216,9 @@ async fn check_providers(config: &Config, errors: &mut usize, warnings: &mut usi
         match tokio::time::timeout(Duration::from_secs(30), provider.complete(req)).await {
             Ok(Ok(resp)) => {
                 let elapsed = start.elapsed();
-                let content_preview = resp
-                    .content
-                    .as_deref()
-                    .unwrap_or("(empty)")
-                    .chars()
-                    .take(30)
-                    .collect::<String>();
+                let content_preview = resp.content.as_deref().unwrap_or("(empty)");
+                let content_preview: String =
+                    content_preview.chars().take(30).collect();
                 println!(
                     "pass ({:.1}s) — {}",
                     elapsed.as_secs_f64(),
@@ -235,7 +246,7 @@ async fn check_providers(config: &Config, errors: &mut usize, warnings: &mut usi
 // 4. Telegram API health
 // ---------------------------------------------------------------------------
 
-async fn check_telegram(config: &Config, errors: &mut usize, warnings: &mut usize) {
+async fn check_telegram(config: &Config, errors: &mut usize, _warnings: &mut usize) {
     println!("[4/4] Telegram API health");
 
     let tg = match &config.channels.telegram {
@@ -276,8 +287,8 @@ async fn check_telegram(config: &Config, errors: &mut usize, warnings: &mut usiz
                     Ok(body) => {
                         // Try to extract bot username from response
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                            let username = val
-                                .pointer("/result/username")
+                            let username = val.pointer("/result/username");
+                            let username = username
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown");
                             println!(
@@ -289,7 +300,10 @@ async fn check_telegram(config: &Config, errors: &mut usize, warnings: &mut usiz
                             println!("pass ({:.1}s)", elapsed.as_secs_f64());
                         }
                     }
-                    Err(_) => println!("pass ({:.1}s) — could not read body", elapsed.as_secs_f64()),
+                    Err(_) => println!(
+                        "pass ({:.1}s) — could not read body",
+                        elapsed.as_secs_f64()
+                    ),
                 }
             } else {
                 *errors += 1;

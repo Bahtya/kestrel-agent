@@ -1335,7 +1335,7 @@ mod tests {
     async fn test_deep_config_missing_model() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, "agent:\n  max_iterations: 10\n").unwrap();
+        std::fs::write(&config_path, "[agent]\nmax_iterations = 10\n").unwrap();
 
         let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
         let result = check.report_health().await;

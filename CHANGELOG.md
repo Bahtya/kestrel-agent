@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.5.9] - 2026-04-30
+
+### New Features
+- Communication log system with trace_id tracking for HTTP/WS/tool calls (#214)
+- Configurable comm_log level and separate comm.log file
+
 ## [v0.5.6] - 2026-04-29
 
 ### Bug Fixes

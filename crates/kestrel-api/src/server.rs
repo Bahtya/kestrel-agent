@@ -553,6 +553,7 @@ async fn chat_completions(
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         })
         .collect();
 
@@ -2290,6 +2291,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }];
 
         let resp = stream_completion(
@@ -2349,6 +2351,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }];
 
         let resp = stream_completion(

@@ -180,6 +180,7 @@ impl AgentRunner {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }];
         conversation.extend(messages);
 
@@ -285,6 +286,7 @@ impl AgentRunner {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Some(tool_calls.clone()),
+                reasoning_content: reasoning_content.clone(),
             };
             conversation.push(assistant_msg);
 
@@ -308,6 +310,7 @@ impl AgentRunner {
                     name: Some(tool_call.function.name.clone()),
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
+                    reasoning_content: None,
                 });
             }
         }

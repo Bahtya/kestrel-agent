@@ -390,6 +390,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
             timestamp: None,
         }
     }
@@ -412,6 +413,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
             }]),
+            reasoning_content: None,
             timestamp: None,
         }
     }

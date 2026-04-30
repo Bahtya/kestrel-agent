@@ -147,6 +147,9 @@ pub struct Message {
     /// Tool calls requested by the assistant in this message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Reasoning / thinking content (e.g. DeepSeek `reasoning_content`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// A tool call from the LLM.
@@ -380,6 +383,7 @@ mod tests {
             name: Some("alice".to_string()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         };
         assert_eq!(msg.role, MessageRole::User);
         assert_eq!(msg.content, "hello");

@@ -467,6 +467,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             }],
             tools: None,
             max_tokens: Some(100),

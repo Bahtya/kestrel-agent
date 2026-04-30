@@ -139,6 +139,7 @@ fn make_request(stream: bool) -> kestrel_providers::CompletionRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }],
         tools: None,
         max_tokens: Some(100),

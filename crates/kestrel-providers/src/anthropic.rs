@@ -598,6 +598,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
             Message {
                 role: MessageRole::User,
@@ -605,6 +606,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
         ];
 
@@ -631,6 +633,7 @@ mod tests {
             name: Some("get_weather".to_string()),
             tool_call_id: Some("call_123".to_string()),
             tool_calls: None,
+            reasoning_content: None,
         }];
 
         let (system, converted) = provider.convert_messages(&messages);
@@ -665,6 +668,7 @@ mod tests {
                     arguments: r#"{"query":"test"}"#.to_string(),
                 },
             }]),
+            reasoning_content: None,
         }];
 
         let (system, converted) = provider.convert_messages(&messages);
@@ -718,6 +722,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 Message {
                     role: MessageRole::User,
@@ -725,6 +730,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
             ],
             tools: None,

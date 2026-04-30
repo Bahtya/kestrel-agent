@@ -136,6 +136,7 @@ impl Session {
                 name: entry.name.clone(),
                 tool_call_id: entry.tool_call_id.clone(),
                 tool_calls: entry.tool_calls.clone(),
+                reasoning_content: entry.reasoning_content.clone(),
             })
             .collect()
     }
@@ -337,6 +338,9 @@ pub struct SessionEntry {
     /// Tool calls requested by the assistant in this message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<kestrel_core::ToolCall>>,
+    /// Reasoning / thinking content (e.g. DeepSeek `reasoning_content`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// When this entry was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Local>>,
@@ -350,6 +354,7 @@ impl Default for SessionEntry {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
             timestamp: Some(chrono::Local::now()),
         }
     }

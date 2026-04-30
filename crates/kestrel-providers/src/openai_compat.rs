@@ -124,6 +124,9 @@ impl OpenAiCompatProvider {
             if let Some(tool_calls) = &msg.tool_calls {
                 m["tool_calls"] = json!(tool_calls);
             }
+            if let Some(reasoning_content) = &msg.reasoning_content {
+                m["reasoning_content"] = json!(reasoning_content);
+            }
             messages.push(m);
         }
 
@@ -633,6 +636,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 Message {
                     role: MessageRole::User,
@@ -640,6 +644,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
             ],
             tools: None,
@@ -679,6 +684,7 @@ mod tests {
                 name: Some("search".to_string()),
                 tool_call_id: Some("call_1".to_string()),
                 tool_calls: None,
+                reasoning_content: None,
             }],
             tools: None,
             max_tokens: None,

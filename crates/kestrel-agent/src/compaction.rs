@@ -193,6 +193,7 @@ fn compact_summarize(session: &mut Session, config: &CompactionConfig) -> Result
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        reasoning_content: None,
         timestamp: Some(chrono::Local::now()),
     });
 

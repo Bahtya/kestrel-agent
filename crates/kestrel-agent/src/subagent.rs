@@ -498,6 +498,7 @@ impl SubAgentManager {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             });
         }
         messages.push(Message {
@@ -506,6 +507,7 @@ impl SubAgentManager {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         });
 
         let system_prompt = "You are a focused sub-agent executing a specific task. \
@@ -972,6 +974,7 @@ async fn run_single_task(
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         });
     }
     messages.push(Message {
@@ -980,6 +983,7 @@ async fn run_single_task(
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        reasoning_content: None,
     });
 
     // Execute with timeout

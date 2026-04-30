@@ -1353,6 +1353,7 @@ async fn post_task_reflect(task: ReflectionTask) {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
             Message {
                 role: MessageRole::User,
@@ -1360,6 +1361,7 @@ async fn post_task_reflect(task: ReflectionTask) {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
         ],
         tools: None,

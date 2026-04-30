@@ -97,34 +97,34 @@ impl WizardIo for TermWizard<'_> {
 macro_rules! provider_field {
     ($config:expr, $provider:expr, mut) => {
         match $provider {
-            "anthropic" => &mut $config.providers.anthropic,
-            "openai" => &mut $config.providers.openai,
-            "openrouter" => &mut $config.providers.openrouter,
-            "ollama" => &mut $config.providers.ollama,
-            "deepseek" => &mut $config.providers.deepseek,
-            "gemini" => &mut $config.providers.gemini,
-            "groq" => &mut $config.providers.groq,
-            "moonshot" => &mut $config.providers.moonshot,
-            "minimax" => &mut $config.providers.minimax,
-            "github_copilot" => &mut $config.providers.github_copilot,
-            "openai_codex" => &mut $config.providers.openai_codex,
-            _ => return None,
+            "anthropic" => Some(&mut $config.providers.anthropic),
+            "openai" => Some(&mut $config.providers.openai),
+            "openrouter" => Some(&mut $config.providers.openrouter),
+            "ollama" => Some(&mut $config.providers.ollama),
+            "deepseek" => Some(&mut $config.providers.deepseek),
+            "gemini" => Some(&mut $config.providers.gemini),
+            "groq" => Some(&mut $config.providers.groq),
+            "moonshot" => Some(&mut $config.providers.moonshot),
+            "minimax" => Some(&mut $config.providers.minimax),
+            "github_copilot" => Some(&mut $config.providers.github_copilot),
+            "openai_codex" => Some(&mut $config.providers.openai_codex),
+            _ => None,
         }
     };
     ($config:expr, $provider:expr) => {
         match $provider {
-            "anthropic" => &$config.providers.anthropic,
-            "openai" => &$config.providers.openai,
-            "openrouter" => &$config.providers.openrouter,
-            "ollama" => &$config.providers.ollama,
-            "deepseek" => &$config.providers.deepseek,
-            "gemini" => &$config.providers.gemini,
-            "groq" => &$config.providers.groq,
-            "moonshot" => &$config.providers.moonshot,
-            "minimax" => &$config.providers.minimax,
-            "github_copilot" => &$config.providers.github_copilot,
-            "openai_codex" => &$config.providers.openai_codex,
-            _ => return None,
+            "anthropic" => Some(&$config.providers.anthropic),
+            "openai" => Some(&$config.providers.openai),
+            "openrouter" => Some(&$config.providers.openrouter),
+            "ollama" => Some(&$config.providers.ollama),
+            "deepseek" => Some(&$config.providers.deepseek),
+            "gemini" => Some(&$config.providers.gemini),
+            "groq" => Some(&$config.providers.groq),
+            "moonshot" => Some(&$config.providers.moonshot),
+            "minimax" => Some(&$config.providers.minimax),
+            "github_copilot" => Some(&$config.providers.github_copilot),
+            "openai_codex" => Some(&$config.providers.openai_codex),
+            _ => None,
         }
     };
 }
@@ -133,7 +133,7 @@ macro_rules! provider_field {
 
 pub fn run(_config: Config) -> Result<()> {
     let term = Term::stdout();
-    if !term.features().is_atty() {
+    if !term.is_term() {
         bail!(
             "Setup requires an interactive terminal. \
              Run this command in a terminal, not in a pipe or CI environment."
@@ -517,18 +517,17 @@ fn get_provider_entry_mut<'a>(
     config: &'a mut Config,
     provider: &str,
 ) -> Option<&'a mut ProviderEntry> {
-    let field: &mut Option<ProviderEntry> = provider_field!(config, provider, mut);
-    Some(field.as_mut()?)
+    provider_field!(config, provider, mut)?.as_mut()
 }
 
 fn ensure_provider_entry(config: &mut Config, provider: &str) {
-    let field: &mut Option<ProviderEntry> = provider_field!(config, provider, mut);
-    field.get_or_insert_with(ProviderEntry::default);
+    if let Some(field) = provider_field!(config, provider, mut) {
+        field.get_or_insert_with(ProviderEntry::default);
+    }
 }
 
 fn get_provider_url<'a>(config: &'a Config, provider: &str) -> Option<&'a str> {
-    let field: &Option<ProviderEntry> = provider_field!(config, provider);
-    field.as_ref().and_then(|e| e.base_url.as_deref())
+    provider_field!(config, provider)?.as_ref().and_then(|e| e.base_url.as_deref())
 }
 
 fn set_provider_url(config: &mut Config, provider: &str, url: &str) {
@@ -571,9 +570,15 @@ mod tests {
             prompt_contains: &'static str,
             result: bool,
         },
-        Select { result: usize },
-        Input { result: &'static str },
-        Password { result: &'static str },
+        Select {
+            result: usize,
+        },
+        Input {
+            result: &'static str,
+        },
+        Password {
+            result: &'static str,
+        },
     }
 
     struct MockWizard {
@@ -720,10 +725,18 @@ mod tests {
 
         let mock = MockWizard::new(vec![
             // Step 2: Provider
-            MockAction::Select { result: 1 }, // openai
-            MockAction::Input { result: "gpt-4o" },
-            MockAction::Input { result: "https://api.openai.com/v1" },
-            MockAction::Password { result: "sk-test-key" },
+            MockAction::Select {
+                result: 1,
+            }, // openai
+            MockAction::Input {
+                result: "gpt-4o",
+            },
+            MockAction::Input {
+                result: "https://api.openai.com/v1",
+            },
+            MockAction::Password {
+                result: "sk-test-key",
+            },
             // Step 3: Telegram (skip)
             MockAction::Confirm {
                 prompt_contains: "Telegram",
@@ -766,14 +779,18 @@ mod tests {
                 result: true,
             },
             // Step 2: Provider
-            MockAction::Select { result: 0 }, // anthropic
+            MockAction::Select {
+                result: 0,
+            }, // anthropic
             MockAction::Input {
                 result: "claude-sonnet-4-20250514",
             },
             MockAction::Input {
                 result: "https://api.anthropic.com",
             },
-            MockAction::Password { result: "sk-ant-test" },
+            MockAction::Password {
+                result: "sk-ant-test",
+            },
             // Step 3: Telegram (skip)
             MockAction::Confirm {
                 prompt_contains: "Telegram",

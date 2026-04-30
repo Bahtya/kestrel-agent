@@ -68,6 +68,7 @@ async fn test_agent_simple_response() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        reasoning_content: None,
     }];
 
     let result = runner
@@ -120,6 +121,7 @@ async fn test_agent_tool_call_then_response() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        reasoning_content: None,
     }];
 
     let result = runner
@@ -165,6 +167,7 @@ async fn test_agent_max_iterations() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        reasoning_content: None,
     }];
 
     let result = runner
@@ -220,6 +223,7 @@ async fn test_agent_tool_call_malformed_args_returns_error() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        reasoning_content: None,
     }];
 
     let result = runner
@@ -359,6 +363,7 @@ async fn test_agent_tool_arg_error_includes_details() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        reasoning_content: None,
     }];
 
     let result = runner

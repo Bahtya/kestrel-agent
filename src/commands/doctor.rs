@@ -5,6 +5,7 @@ use kestrel_config::paths::get_config_path;
 use kestrel_config::schema::Config;
 use kestrel_config::validate;
 use kestrel_providers::{CompletionRequest, ProviderRegistry};
+use std::io::Write;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,10 @@ pub async fn run(config: &Config) -> Result<()> {
         if warnings > 0 {
             println!("{} warning(s) found.", warnings);
         }
+    }
+
+    if errors > 0 {
+        std::process::exit(1);
     }
 
     Ok(())
@@ -114,6 +119,7 @@ fn check_websocket(config: &Config, errors: &mut usize, warnings: &mut usize) {
             match addr.parse::<std::net::SocketAddr>() {
                 Ok(sock_addr) => {
                     print!("  Port {}: ", addr);
+                    let _ = std::io::stdout().flush();
                     match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5)) {
                         Ok(_) => println!("listening"),
                         Err(e) => {
@@ -137,6 +143,7 @@ fn check_websocket(config: &Config, errors: &mut usize, warnings: &mut usize) {
                 .map(|ws| ws.listen_addr.as_str())
                 .unwrap_or("127.0.0.1:8090");
             print!("  Port {} (disabled): ", default_addr);
+            let _ = std::io::stdout().flush();
             match default_addr.parse::<std::net::SocketAddr>() {
                 Ok(sock_addr) => {
                     match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(3)) {
@@ -191,6 +198,7 @@ async fn check_providers(config: &Config, errors: &mut usize, warnings: &mut usi
         };
 
         print!("  {} ({}): ", name, model_display);
+        let _ = std::io::stdout().flush();
 
         let req = CompletionRequest {
             model: model_display.to_string(),
@@ -248,8 +256,14 @@ async fn check_telegram(config: &Config, errors: &mut usize, _warnings: &mut usi
 
     let tg = match &config.channels.telegram {
         Some(tg) if tg.enabled && !tg.token.is_empty() => tg,
-        Some(tg) if !tg.token.is_empty() => {
+        Some(tg) if !tg.enabled && !tg.token.is_empty() => {
             println!("  Telegram disabled in config — skipping");
+            println!();
+            return;
+        }
+        Some(tg) if tg.token.is_empty() => {
+            *errors += 1;
+            println!("  Token:          FAIL — empty bot token");
             println!();
             return;
         }
@@ -274,6 +288,7 @@ async fn check_telegram(config: &Config, errors: &mut usize, _warnings: &mut usi
     };
 
     print!("  getMe:          ");
+    let _ = std::io::stdout().flush();
     let start = Instant::now();
     match tokio::time::timeout(Duration::from_secs(15), client.get(&url).send()).await {
         Ok(Ok(resp)) => {

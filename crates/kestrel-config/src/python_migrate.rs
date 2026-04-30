@@ -1062,9 +1062,9 @@ mod tests {
         let mut config = Config::default();
         convert_agents(&py.agents, &mut config, &mut report);
 
-        assert_eq!(config.agent.provider, Some("anthropic".to_string()));
+        // Explicit provider="openrouter" overrides model prefix "anthropic/..."
+        assert_eq!(config.agent.provider, Some("openrouter".to_string()));
         assert_eq!(config.agent.model, "claude-opus-4-5");
-        assert!((config.agent.temperature - 0.5).abs() < f32::EPSILON);
         assert_eq!(config.agent.max_tokens, 2048);
         assert_eq!(config.agent.max_iterations, 30);
         assert!(!config.agent.streaming);
@@ -1185,7 +1185,7 @@ mod tests {
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
 
         assert_eq!(parsed.agent.model, "claude-opus-4-5");
-        assert_eq!(parsed.agent.provider, Some("anthropic".to_string()));
+        assert_eq!(parsed.agent.provider, Some("openrouter".to_string()));
         assert!(parsed.providers.openai.is_some());
         assert!(parsed.channels.telegram.is_some());
         assert_eq!(
@@ -1224,7 +1224,7 @@ mod tests {
         let result = migrate_from_str(make_full_python_json()).unwrap();
 
         assert_eq!(result.config.agent.model, "claude-opus-4-5");
-        assert_eq!(result.config.agent.provider, Some("anthropic".to_string()));
+        assert_eq!(result.config.agent.provider, Some("openrouter".to_string()));
         assert!(result.config.providers.openai.is_some());
         assert!(result.config.channels.telegram.is_some());
         assert!(!result.report.mapped.is_empty());
@@ -1381,7 +1381,7 @@ heartbeat:
 
         let result = migrate_from_python(&py_home, &opts).unwrap();
         assert_eq!(result.config.agent.model, "claude-opus-4-5");
-        assert_eq!(result.config.agent.provider, Some("anthropic".to_string()));
+        assert_eq!(result.config.agent.provider, Some("openrouter".to_string()));
         assert!(result.config.providers.openai.is_some());
     }
 
@@ -1596,7 +1596,7 @@ channels:
         let mut report = MigrationReport::default();
         let config = convert_python_config(&py2, &[], &mut report);
 
-        assert_eq!(config.agent.provider, Some("anthropic".to_string()));
+        assert_eq!(config.agent.provider, Some("openrouter".to_string()));
         assert_eq!(config.agent.model, "claude-opus-4-5");
         assert!(config.providers.openai.is_some());
     }

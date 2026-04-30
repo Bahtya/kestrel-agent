@@ -2557,14 +2557,17 @@ mod tests {
 
     #[test]
     fn test_dream_model_cross_check_mismatch() {
+        // Provider validation is now explicit — dream.model is no longer
+        // cross-checked against providers via keyword matching.
+        // This test verifies that no spurious warnings are emitted for dream.model.
         let mut config = make_valid_config();
         config.dream.enabled = true;
-        config.dream.model = Some("claude-3".to_string()); // only openai configured
+        config.dream.model = Some("claude-3".to_string());
         let report = validate(&config);
         assert!(report
             .warnings()
             .iter()
-            .any(|w| w.path == "dream.model" && w.message.contains("may not match")));
+            .all(|w| w.path != "dream.model"));
     }
 
     #[test]

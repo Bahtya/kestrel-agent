@@ -139,10 +139,7 @@ fn check_websocket(config: &Config, errors: &mut usize, warnings: &mut usize) {
             print!("  Port {} (disabled): ", default_addr);
             match default_addr.parse::<std::net::SocketAddr>() {
                 Ok(sock_addr) => {
-                    match TcpStream::connect_timeout(
-                        &sock_addr,
-                        Duration::from_secs(3),
-                    ) {
+                    match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(3)) {
                         Ok(_) => println!("listening (but disabled in config)"),
                         Err(_) => println!("nothing listening"),
                     }
@@ -216,14 +213,8 @@ async fn check_providers(config: &Config, errors: &mut usize, warnings: &mut usi
         match tokio::time::timeout(Duration::from_secs(30), provider.complete(req)).await {
             Ok(Ok(resp)) => {
                 let elapsed = start.elapsed();
-                let content_preview = resp.content.as_deref().unwrap_or("(empty)");
-                let content_preview: String =
-                    content_preview.chars().take(30).collect();
-                println!(
-                    "pass ({:.1}s) — {}",
-                    elapsed.as_secs_f64(),
-                    content_preview
-                );
+                let content_preview: String = content_preview.chars().take(30).collect();
+                println!("pass ({:.1}s) — {}", elapsed.as_secs_f64(), content_preview);
             }
             Ok(Err(e)) => {
                 *errors += 1;
@@ -288,22 +279,15 @@ async fn check_telegram(config: &Config, errors: &mut usize, _warnings: &mut usi
                         // Try to extract bot username from response
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
                             let username = val.pointer("/result/username");
-                            let username = username
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
-                            println!(
-                                "pass ({:.1}s) — bot @{}",
-                                elapsed.as_secs_f64(),
-                                username
-                            );
+                            let username = username.and_then(|v| v.as_str()).unwrap_or("unknown");
+                            println!("pass ({:.1}s) — bot @{}", elapsed.as_secs_f64(), username);
                         } else {
                             println!("pass ({:.1}s)", elapsed.as_secs_f64());
                         }
                     }
-                    Err(_) => println!(
-                        "pass ({:.1}s) — could not read body",
-                        elapsed.as_secs_f64()
-                    ),
+                    Err(_) => {
+                        println!("pass ({:.1}s) — could not read body", elapsed.as_secs_f64())
+                    }
                 }
             } else {
                 *errors += 1;
@@ -329,9 +313,7 @@ async fn check_telegram(config: &Config, errors: &mut usize, _warnings: &mut usi
     println!();
 }
 
-fn build_telegram_http_client(
-    proxy: Option<&str>,
-) -> Result<reqwest::Client> {
+fn build_telegram_http_client(proxy: Option<&str>) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .dns_resolver(kestrel_core::dns::build_dns_resolver());

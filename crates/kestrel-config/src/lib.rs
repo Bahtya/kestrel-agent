@@ -3,6 +3,7 @@
 //! Configuration loading and schema for kestrel.
 //! Uses TOML format for the config file (`config.toml`).
 
+pub mod crypto;
 pub mod loader;
 pub mod migration;
 pub mod paths;

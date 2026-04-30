@@ -519,7 +519,6 @@ async fn test_e2e_echo_tool_flow() {
         CompletionResponse {
             content: None,
             reasoning_content: None,
-            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_echo".to_string(),
                 call_type: "function".to_string(),
@@ -625,7 +624,6 @@ async fn test_e2e_tool_not_found_graceful() {
         // LLM requests a nonexistent tool
         CompletionResponse {
             content: None,
-            reasoning_content: None,
             reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_missing".to_string(),

@@ -503,8 +503,7 @@ impl AgentRunner {
             }
         };
 
-        let (full_content, full_reasoning, usage, tool_calls_map, send_start) =
-            result?;
+        let (full_content, full_reasoning, usage, tool_calls_map, send_start) = result?;
 
         debug!(
             total_ms = send_start.elapsed().as_millis() as u64,

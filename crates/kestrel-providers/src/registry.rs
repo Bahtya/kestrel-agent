@@ -183,10 +183,9 @@ impl ProviderRegistry {
             if let Some(api_key) = &entry.api_key {
                 let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
                     api_key: api_key.clone(),
-                    base_url: entry
-                        .base_url
-                        .clone()
-                        .unwrap_or_else(|| "https://open.bigmodel.cn/api/coding/paas/v4".to_string()),
+                    base_url: entry.base_url.clone().unwrap_or_else(|| {
+                        "https://open.bigmodel.cn/api/coding/paas/v4".to_string()
+                    }),
                     model: entry.model.clone().unwrap_or_default(),
                     organization: None,
                     no_proxy: entry.no_proxy.unwrap_or(false),

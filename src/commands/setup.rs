@@ -95,6 +95,7 @@ impl WizardIo for TermWizard<'_> {
 
 // ── Provider dispatch macro (single source of truth) ───────────
 
+#[allow(unused_macros)]
 macro_rules! provider_field {
     ($config:expr, $provider:expr, mut) => {
         match $provider {

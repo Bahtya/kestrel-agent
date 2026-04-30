@@ -16,7 +16,6 @@ tracing = { workspace = true }
 ipnet = "2"
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
-rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

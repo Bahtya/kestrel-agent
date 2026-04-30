@@ -461,7 +461,7 @@ fn handle_help() -> String {
         "/status   - Show bot status, channels, and config summary"
     );
     let _ = writeln!(out, "/skill    - List, view, and search registered skills");
-    let _ = writeln!(out, "/validate - Validate config.yaml and show results");
+    let _ = writeln!(out, "/validate - Validate config.toml and show results");
     let _ = writeln!(out, "/settings - Toggle preferences (notifications, model)");
     let _ = writeln!(out, "/models   - Browse and select models from providers");
     let _ = writeln!(out, "/history  - Browse recent conversation history");
@@ -695,7 +695,7 @@ async fn ws_models_provider_list() -> String {
     let models = catalog.list_all_models().await;
 
     if models.is_empty() {
-        return "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml."
+        return "No models discovered. Configure a provider (e.g. opencode_go) in config.toml."
             .to_string();
     }
 
@@ -895,7 +895,7 @@ async fn ws_settings_models_list(arg: &str) -> String {
 
     let models = catalog.list_all_models().await;
     if models.is_empty() {
-        return "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml."
+        return "No models discovered. Configure a provider (e.g. opencode_go) in config.toml."
             .to_string();
     }
 
@@ -1456,7 +1456,7 @@ fn handle_validate() -> String {
             return format!(
                 "Failed to load configuration.\n\n\
                  Error: {e}\n\n\
-                 Create one at ~/.kestrel/config.yaml or run `kestrel setup`."
+                 Create one at ~/.kestrel/config.toml or run `kestrel setup`."
             );
         }
     };
@@ -1780,7 +1780,7 @@ pub async fn handle_models_provider_list() -> CommandResponse {
 
     if models.is_empty() {
         return CommandResponse::text(
-            "No models discovered. Configure a provider (e.g. opencode_go) in config.yaml.",
+            "No models discovered. Configure a provider (e.g. opencode_go) in config.toml.",
         );
     }
 
@@ -2108,17 +2108,17 @@ mod tests {
 
     // -- helpers -------------------------------------------------------------
 
-    /// Helper: create a temp dir with a config.yaml and set KESTREL_HOME.
+    /// Helper: create a temp dir with a config.toml and set KESTREL_HOME.
     struct TestHome {
         _dir: tempfile::TempDir,
         _env: EnvVarGuard,
     }
 
-    fn with_temp_config(yaml: &str) -> TestHome {
+    fn with_temp_config(toml_str: &str) -> TestHome {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.yaml");
+        let config_path = dir.path().join("config.toml");
         let mut f = std::fs::File::create(&config_path).unwrap();
-        f.write_all(yaml.as_bytes()).unwrap();
+        f.write_all(toml_str.as_bytes()).unwrap();
         let env = EnvVarGuard::set("KESTREL_HOME", dir.path());
         TestHome {
             _dir: dir,
@@ -2152,15 +2152,14 @@ mod tests {
 
     #[test]
     fn test_handle_validate_valid_config() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test123"
-channels:
-  telegram:
-    token: "123456:ABC"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test123"
+
+[channels.telegram]
+token = "123456:ABC"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         // With a valid provider and channel, the config should be valid or
         // at least parseable.
@@ -2173,50 +2172,49 @@ channels:
     #[test]
     fn test_handle_validate_invalid_config() {
         // Empty agent model triggers an error.
-        let yaml = r#"
-agent:
-  model: ""
+        let toml_str = r#"
+[agent]
+model = ""
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("error(s)") || result.contains("[ERROR]"));
     }
 
     #[test]
     fn test_handle_validate_summary_shows_name() {
-        let yaml = r#"
-name: "testbot"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+name = "testbot"
+
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("Name: testbot"));
     }
 
     #[test]
     fn test_handle_validate_summary_shows_unnamed() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("Name: unnamed"));
     }
 
     #[test]
     fn test_handle_validate_summary_shows_providers() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
-  anthropic:
-    api_key: "sk-ant-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
+
+[providers.anthropic]
+api_key = "sk-ant-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("openai"));
         assert!(result.contains("anthropic"));
@@ -2224,14 +2222,14 @@ providers:
 
     #[test]
     fn test_handle_validate_summary_shows_channels() {
-        let yaml = r#"
-channels:
-  telegram:
-    token: "123:ABC"
-  discord:
-    token: "discord-token"
+        let toml_str = r#"
+[channels.telegram]
+token = "123:ABC"
+
+[channels.discord]
+token = "discord-token"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("telegram (enabled)"));
         assert!(result.contains("discord (enabled)"));
@@ -2239,35 +2237,33 @@ channels:
 
     #[test]
     fn test_handle_validate_summary_channels_disabled() {
-        let yaml = r#"
-channels:
-  telegram:
-    token: "123:ABC"
-    enabled: false
+        let toml_str = r#"
+[channels.telegram]
+token = "123:ABC"
+enabled = false
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("telegram (disabled)"));
     }
 
     #[test]
     fn test_handle_validate_no_providers() {
-        let yaml = r#"
+        let toml_str = r#"
 # empty config
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("Providers: (none)") || result.contains("error"));
     }
 
     #[test]
     fn test_handle_validate_no_channels() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_validate();
         assert!(result.contains("Channels: (none)") || result.contains("Channel"));
     }
@@ -2309,23 +2305,22 @@ providers:
 
     #[test]
     fn test_handle_status_no_key() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: ""
+        let toml_str = r#"
+[providers.openai]
+api_key = ""
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_status();
         assert!(result.contains("openai: no key"));
     }
 
     #[test]
     fn test_handle_status_heartbeat_disabled() {
-        let yaml = r#"
-heartbeat:
-  enabled: false
+        let toml_str = r#"
+[heartbeat]
+enabled = false
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_status();
         assert!(result.contains("Heartbeat: disabled"));
     }
@@ -2377,7 +2372,7 @@ heartbeat:
 
     #[test]
     fn test_handle_menu_callback_status() {
-        let _dir = with_temp_config("providers:\n  openai:\n    api_key: sk-test\n");
+        let _dir = with_temp_config("[providers.openai]\napi_key = \"sk-test\"\n");
         let (text, kb) = handle_menu_callback("status");
         assert!(text.contains("Agent:"));
         assert!(kb.is_some());
@@ -2393,7 +2388,7 @@ heartbeat:
 
     #[test]
     fn test_handle_menu_callback_validate() {
-        let _dir = with_temp_config("providers:\n  openai:\n    api_key: sk-test\n");
+        let _dir = with_temp_config("[providers.openai]\napi_key = \"sk-test\"\n");
         let (text, kb) = handle_menu_callback("validate");
         assert!(text.contains("Configuration"));
         assert!(kb.is_some());
@@ -2417,12 +2412,11 @@ heartbeat:
 
     #[test]
     fn test_handle_settings_has_keyboard() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let r = handle_settings();
         assert!(r.text.contains("Settings"));
         assert!(r.text.contains("Model:"));
@@ -2431,12 +2425,11 @@ providers:
 
     #[tokio::test]
     async fn test_try_handle_command_settings() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let r = expect_response(try_handle_command("/settings").await.unwrap());
         assert!(r.text.contains("Settings"));
         assert!(r.keyboard.is_some());
@@ -2444,12 +2437,11 @@ providers:
 
     #[test]
     fn test_settings_keyboard_buttons() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let r = handle_settings();
         let kb = r.keyboard.unwrap();
         // Should have the row with models picker + streaming toggle.
@@ -2464,12 +2456,11 @@ providers:
 
     #[test]
     fn test_handle_settings_single_page() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let resp = handle_settings_callback(0);
         // Page 0 contains Name, Model, Streaming, Max tokens, Temperature.
         assert!(resp.text.contains("Model:"));
@@ -2495,27 +2486,27 @@ providers:
 
     #[test]
     fn test_handle_settings_shows_name() {
-        let yaml = r#"
-name: "mybot"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+name = "mybot"
+
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let resp = handle_settings_callback(0);
         assert!(resp.text.contains("mybot"));
     }
 
     #[test]
     fn test_handle_settings_shows_providers() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
-  anthropic:
-    api_key: "sk-ant-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
+
+[providers.anthropic]
+api_key = "sk-ant-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         // Providers are on page 1 (index 5+ out of 7 settings with page size 5).
         let resp = handle_settings_callback(1);
         assert!(resp.text.contains("openai"));
@@ -2524,9 +2515,8 @@ providers:
 
     #[test]
     fn test_handle_settings_no_providers() {
-        let yaml = "# empty\n";
-        let _dir = with_temp_config(yaml);
-        // Providers on page 1.
+        let toml_str = "# empty\n";
+        let _dir = with_temp_config(toml_str);
         let resp = handle_settings_callback(1);
         assert!(resp.text.contains("(none)") || resp.text.contains("Providers:"));
     }
@@ -2862,14 +2852,14 @@ providers:
     #[test]
     fn test_handle_callback_settings_model_switch() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
-  streaming: true
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
+streaming = true
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let resp = handle_callback("settings:model:switch").unwrap();
         assert!(resp.text.contains("Model:"));
@@ -2880,14 +2870,14 @@ agent:
     #[test]
     fn test_handle_callback_settings_streaming_toggle() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
-  streaming: true
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
+streaming = true
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let resp = handle_callback("settings:streaming:toggle").unwrap();
         assert!(resp.text.contains("Streaming: off"));
@@ -2949,12 +2939,11 @@ agent:
 
     #[tokio::test]
     async fn test_ws_settings_shows_current() {
-        let yaml = r#"
-providers:
-  openai:
-    api_key: "sk-test"
+        let toml_str = r#"
+[providers.openai]
+api_key = "sk-test"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_ws_settings("/settings").await;
         assert!(result.contains("Settings"));
         assert!(result.contains("Model:"));
@@ -2966,11 +2955,11 @@ providers:
 
     #[tokio::test]
     async fn test_ws_settings_model_show_current() {
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = handle_ws_settings("/settings model").await;
         assert!(result.contains("gpt-4o"));
     }
@@ -2978,13 +2967,13 @@ agent:
     #[tokio::test]
     async fn test_ws_settings_model_next_cycles() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let result = handle_ws_settings("/settings model next").await;
         assert!(result.contains("Model switched to:"));
@@ -2994,13 +2983,13 @@ agent:
     #[tokio::test]
     async fn test_ws_settings_model_set_by_name() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let result = handle_ws_settings("/settings model my-custom-model").await;
         assert!(result.contains("gpt-4o"));
@@ -3010,14 +2999,14 @@ agent:
     #[tokio::test]
     async fn test_ws_settings_streaming_toggle() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
-  streaming: true
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
+streaming = true
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let result = handle_ws_settings("/settings streaming").await;
         assert!(result.contains("Streaming: off"));
@@ -3036,16 +3025,16 @@ agent:
 
     #[test]
     fn test_ws_settings_gateway_shows_config() {
-        let yaml = r#"
-api:
-  host: "0.0.0.0"
-  port: 9090
-channels:
-  websocket:
-    enabled: true
-    listen_addr: "0.0.0.0:9091"
+        let toml_str = r#"
+[api]
+host = "0.0.0.0"
+port = 9090
+
+[channels.websocket]
+enabled = true
+listen_addr = "0.0.0.0:9091"
 "#;
-        let _dir = with_temp_config(yaml);
+        let _dir = with_temp_config(toml_str);
         let result = ws_settings_gateway();
         assert!(result.contains("Gateway settings"));
         assert!(result.contains("API host: 0.0.0.0"));
@@ -3070,14 +3059,14 @@ channels:
     #[test]
     fn test_ws_settings_timeout_set_valid() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
-  tool_timeout: 120
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
+tool_timeout = 120
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let result = ws_settings_timeout("tool_timeout 300");
         assert!(result.contains("tool_timeout: 120s → 300s"));
@@ -3125,13 +3114,13 @@ agent:
     #[test]
     fn test_handle_models_select_sets_model() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let resp = handle_models_select("opencode_go/kimi-k2.6");
         assert!(resp.text.contains("Model changed"));
@@ -3151,13 +3140,13 @@ agent:
     #[test]
     fn test_handle_models_callback_select() {
         let dir = tempfile::tempdir().unwrap();
-        let yaml = r#"
-agent:
-  model: "gpt-4o"
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
 "#;
         let _env = EnvVarGuard::set("KESTREL_HOME", dir.path());
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, yaml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml_str).unwrap();
 
         let resp = handle_models_callback("select", Some("openai/gpt-4o-mini")).unwrap();
         assert!(resp.text.contains("Model changed"));

@@ -1,26 +1,26 @@
 //! Standalone Python kestrel config migration tool.
 //!
 //! Reads a Python kestrel `config.json` (plus per-channel configs) and converts
-//! it to kestrel `config.yaml`.
+//! it to kestrel `config.toml`.
 //!
 //! # Usage
 //!
 //! ```sh
-//! # Dry run — print YAML to stdout
+//! # Dry run — print TOML to stdout
 //! cargo run -p kestrel-config --example migrate -- --from ~/.kestrel --dry-run
 //!
-//! # Write to auto-detected config path (~/.kestrel/config.yaml)
+//! # Write to auto-detected config path (~/.kestrel/config.toml)
 //! cargo run -p kestrel-config --example migrate -- --from ~/.kestrel
 //!
 //! # Write to a specific output file
-//! cargo run -p kestrel-config --example migrate -- --from ~/.kestrel --output ./config.yaml
+//! cargo run -p kestrel-config --example migrate -- --from ~/.kestrel --output ./config.toml
 //! ```
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
-/// Migrate Python kestrel config to kestrel YAML format.
+/// Migrate Python kestrel config to kestrel TOML format.
 #[derive(Parser)]
 #[command(
     name = "migrate",
@@ -31,12 +31,12 @@ struct Cli {
     #[arg(long)]
     from: PathBuf,
 
-    /// Output path for config.yaml.
-    /// Defaults to auto-detected path (~/.kestrel/config.yaml).
+    /// Output path for config.toml.
+    /// Defaults to auto-detected path (~/.kestrel/config.toml).
     #[arg(long)]
     output: Option<PathBuf>,
 
-    /// Dry run: print YAML to stdout instead of writing to file.
+    /// Dry run: print TOML to stdout instead of writing to file.
     #[arg(long)]
     dry_run: bool,
 }
@@ -65,11 +65,10 @@ fn main() -> Result<()> {
     // Print migration report to stderr so stdout stays clean for --dry-run
     print_report(&result.report);
 
-    let yaml =
-        serde_yaml::to_string(&result.config).context("Failed to serialize config to YAML")?;
+    let toml_str = toml::to_string(&result.config).context("Failed to serialize config to TOML")?;
 
     if cli.dry_run {
-        println!("{}", yaml);
+        println!("{}", toml_str);
     } else {
         let output_path = match cli.output {
             Some(ref p) => p.clone(),
@@ -80,7 +79,7 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
-        std::fs::write(&output_path, &yaml)
+        std::fs::write(&output_path, &toml_str)
             .with_context(|| format!("Failed to write config to {}", output_path.display()))?;
         eprintln!("\nConfig written to: {}", output_path.display());
     }

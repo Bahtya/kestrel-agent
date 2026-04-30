@@ -1,4 +1,4 @@
-//! Python kestrel config migration to kestrel YAML format.
+//! Python kestrel config migration to kestrel TOML format.
 //!
 //! Reads Python JSON/YAML configs, converts to kestrel [`Config`],
 //! validates the result, and reports mapped/unmapped/ignored fields.
@@ -37,8 +37,8 @@ pub struct MigrationOptions {
     /// Explicit path to the Python config file (JSON or YAML).
     /// If `None`, auto-detects `config.json` then `config.yaml` in `python_home`.
     pub input_file: Option<std::path::PathBuf>,
-    /// Output path for the kestrel config.yaml.
-    /// If `None`, writes to `<KESTREL_HOME>/config.yaml`.
+    /// Output path for the kestrel config.toml.
+    /// If `None`, writes to `<KESTREL_HOME>/config.toml`.
     pub output_file: Option<std::path::PathBuf>,
     /// Whether to fill defaults before validating.
     pub fill_defaults: bool,
@@ -212,8 +212,9 @@ const KNOWN_CHANNELS: &[&str] = &[
 /// Migrate Python kestrel config directory to kestrel Config.
 ///
 /// `python_home` is the Python kestrel config directory (e.g., `~/.kestrel`).
-/// Reads `config.json` (or `config.yaml`) from that directory, plus any
-/// per-channel configs at sibling directories like `~/.kestrel-telegram/config.json`.
+/// Reads `config.json` (or `config.yaml`) from that directory (Python format),
+/// plus any per-channel configs at sibling directories like `~/.kestrel-telegram/config.json`.
+/// Outputs the result as TOML.
 ///
 /// Validates the result and optionally writes to disk (unless dry-run).
 pub fn migrate_from_python(
@@ -896,10 +897,10 @@ mod tests {
 
     #[test]
     fn test_migration_options_with_output() {
-        let opts = MigrationOptions::with_output("/tmp/test-config.yaml");
+        let opts = MigrationOptions::with_output("/tmp/test-config.toml");
         assert_eq!(
             opts.output_file.unwrap().to_str(),
-            Some("/tmp/test-config.yaml")
+            Some("/tmp/test-config.toml")
         );
     }
 
@@ -1172,17 +1173,17 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // YAML output roundtrip
+    // TOML output roundtrip
     // -------------------------------------------------------------------
 
     #[test]
-    fn test_migrate_yaml_output_valid() {
+    fn test_migrate_toml_output_valid() {
         let py = make_full_python_config();
         let mut report = MigrationReport::default();
         let config = convert_python_config(&py, &[], &mut report);
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
 
         assert_eq!(parsed.agent.model, "claude-opus-4-5");
         assert_eq!(parsed.agent.provider, Some("openrouter".to_string()));
@@ -1503,7 +1504,7 @@ channels:
         )
         .unwrap();
 
-        let output = tmp.path().join("output.yaml");
+        let output = tmp.path().join("output.toml");
         let opts = MigrationOptions {
             dry_run: true,
             output_file: Some(output.clone()),
@@ -1532,7 +1533,7 @@ channels:
         )
         .unwrap();
 
-        let output = tmp.path().join("migrated.yaml");
+        let output = tmp.path().join("migrated.toml");
         let opts = MigrationOptions {
             dry_run: false,
             output_file: Some(output.clone()),
@@ -1541,10 +1542,10 @@ channels:
 
         migrate_from_python(&py_home, &opts).unwrap();
 
-        // Output file should exist and be valid YAML
+        // Output file should exist and be valid TOML
         assert!(output.exists());
         let content = fs::read_to_string(&output).unwrap();
-        let parsed: Config = serde_yaml::from_str(&content).unwrap();
+        let parsed: Config = toml::from_str(&content).unwrap();
         assert!(parsed.providers.openai.is_some());
     }
 

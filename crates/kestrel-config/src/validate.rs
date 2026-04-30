@@ -1,4 +1,4 @@
-//! Configuration validation — schema checks for config.yaml.
+//! Configuration validation — schema checks for config.toml.
 //!
 //! Validates field types, required fields, value ranges, and cross-field
 //! constraints. Returns a structured [`ValidationReport`] with warnings
@@ -237,36 +237,36 @@ pub fn validate_and_fill(config: &mut Config) -> (ValidationReport, Vec<String>)
 }
 
 // ---------------------------------------------------------------------------
-// Raw YAML env-var validation
+// Raw TOML env-var validation
 // ---------------------------------------------------------------------------
 
-/// Check raw config YAML for unresolved environment variable templates.
+/// Check raw config TOML for unresolved environment variable templates.
 ///
 /// Detects `${VAR}` patterns (without a `:-default` fallback) and warns
 /// if the referenced env var is not set. Returns a list of (path, message)
-/// findings. This should be called on the raw YAML string **before**
+/// findings. This should be called on the raw TOML string **before**
 /// [`crate::loader::expand_env_vars`] so unresolved vars are still visible.
 ///
 /// Only emits warnings (not errors) because missing env vars may be
 /// intentional (e.g., set at deploy time).
-pub fn validate_raw_env_vars(raw_yaml: &str) -> Vec<ValidationFinding> {
+pub fn validate_raw_env_vars(raw_toml: &str) -> Vec<ValidationFinding> {
     let mut findings = Vec::new();
 
     // Match ${VAR} without :-default
     let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
         .expect("static regex is valid");
-    for cap in re.captures_iter(raw_yaml) {
+    for cap in re.captures_iter(raw_toml) {
         let var_name = &cap[1];
         let has_default = cap.get(2).is_some();
 
         if !has_default && std::env::var(var_name).is_err() {
             // Find which line contains this variable for a useful path hint
             let full_match = cap.get(0).expect("capture group 0 always exists").as_str();
-            for (line_num, line) in raw_yaml.lines().enumerate() {
+            for (line_num, line) in raw_toml.lines().enumerate() {
                 if line.contains(full_match) {
-                    // Try to extract the YAML key from the line
+                    // Try to extract the TOML key from the line (key = value)
                     let key_hint = line
-                        .split(':')
+                        .split('=')
                         .next()
                         .map(|k| k.trim().to_string())
                         .unwrap_or_default();
@@ -2606,12 +2606,11 @@ mod tests {
     fn test_raw_env_vars_unresolved_var() {
         // Ensure THIS_VAR_DOES_NOT_EXIST is not in the environment
         std::env::remove_var("THIS_VAR_DOES_NOT_EXIST_XYZ");
-        let yaml = r#"
-providers:
-  openai:
-    api_key: ${THIS_VAR_DOES_NOT_EXIST_XYZ}
+        let toml_str = r#"
+[providers.openai]
+api_key = "${THIS_VAR_DOES_NOT_EXIST_XYZ}"
 "#;
-        let findings = validate_raw_env_vars(yaml);
+        let findings = validate_raw_env_vars(toml_str);
         assert!(!findings.is_empty());
         assert!(findings
             .iter()
@@ -2623,12 +2622,11 @@ providers:
     fn test_raw_env_vars_with_default_ok() {
         // Var with a default should NOT produce a warning
         std::env::remove_var("PROBABLY_MISSING_VAR_ABC");
-        let yaml = r#"
-providers:
-  openai:
-    api_key: ${PROBABLY_MISSING_VAR_ABC:-fallback-key}
+        let toml_str = r#"
+[providers.openai]
+api_key = "${PROBABLY_MISSING_VAR_ABC:-fallback-key}"
 "#;
-        let findings = validate_raw_env_vars(yaml);
+        let findings = validate_raw_env_vars(toml_str);
         assert!(
             findings.is_empty(),
             "Expected no findings for var with default, got: {:?}",
@@ -2640,12 +2638,11 @@ providers:
     fn test_raw_env_vars_set_in_env_ok() {
         // Var that IS set should NOT produce a warning
         std::env::set_var("KESTREL_TEST_SET_VAR", "hello");
-        let yaml = r#"
-providers:
-  openai:
-    api_key: ${KESTREL_TEST_SET_VAR}
+        let toml_str = r#"
+[providers.openai]
+api_key = "${KESTREL_TEST_SET_VAR}"
 "#;
-        let findings = validate_raw_env_vars(yaml);
+        let findings = validate_raw_env_vars(toml_str);
         std::env::remove_var("KESTREL_TEST_SET_VAR");
         assert!(
             findings.is_empty(),
@@ -2656,12 +2653,12 @@ providers:
 
     #[test]
     fn test_raw_env_vars_no_vars() {
-        let yaml = r#"
-agent:
-  model: gpt-4o
-  temperature: 0.7
+        let toml_str = r#"
+[agent]
+model = "gpt-4o"
+temperature = 0.7
 "#;
-        let findings = validate_raw_env_vars(yaml);
+        let findings = validate_raw_env_vars(toml_str);
         assert!(findings.is_empty());
     }
 
@@ -2669,15 +2666,14 @@ agent:
     fn test_raw_env_vars_multiple_unresolved() {
         std::env::remove_var("MISSING_AAA");
         std::env::remove_var("MISSING_BBB");
-        let yaml = r#"
-providers:
-  openai:
-    api_key: ${MISSING_AAA}
-channels:
-  telegram:
-    token: ${MISSING_BBB}
+        let toml_str = r#"
+[providers.openai]
+api_key = "${MISSING_AAA}"
+
+[channels.telegram]
+token = "${MISSING_BBB}"
 "#;
-        let findings = validate_raw_env_vars(yaml);
+        let findings = validate_raw_env_vars(toml_str);
         assert_eq!(findings.len(), 2);
         let names: Vec<&str> = findings
             .iter()
@@ -2691,10 +2687,10 @@ channels:
     }
 
     #[test]
-    fn test_raw_env_vars_path_is_yaml_key() {
+    fn test_raw_env_vars_path_is_toml_key() {
         std::env::remove_var("MISSING_KEY_FOR_PATH_TEST");
-        let yaml = "api_key: ${MISSING_KEY_FOR_PATH_TEST}\n";
-        let findings = validate_raw_env_vars(yaml);
+        let toml_str = "api_key = \"${MISSING_KEY_FOR_PATH_TEST}\"\n";
+        let findings = validate_raw_env_vars(toml_str);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].path, "api_key");
     }
@@ -2703,8 +2699,8 @@ channels:
     fn test_raw_env_vars_empty_default_no_warn() {
         // ${VAR:-} has an empty default, should NOT warn
         std::env::remove_var("MISSING_WITH_EMPTY_DEFAULT");
-        let yaml = "key: ${MISSING_WITH_EMPTY_DEFAULT:-}\n";
-        let findings = validate_raw_env_vars(yaml);
+        let toml_str = "key = \"${MISSING_WITH_EMPTY_DEFAULT:-}\"\n";
+        let findings = validate_raw_env_vars(toml_str);
         assert!(
             findings.is_empty(),
             "Expected no warning for var with empty default, got: {:?}",

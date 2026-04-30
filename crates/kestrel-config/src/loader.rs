@@ -24,8 +24,8 @@ pub fn load_config(config_path: Option<&Path>) -> Result<Config> {
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
         let expanded = expand_env_vars(&raw);
-        let mut config: Config = serde_yaml::from_str(&expanded)
-            .with_context(|| format!("Failed to parse config YAML: {}", path.display()))?;
+        let mut config: Config = toml::from_str(&expanded)
+            .with_context(|| format!("Failed to parse config TOML: {}", path.display()))?;
 
         migrate_config(&mut config)?;
         config
@@ -54,10 +54,10 @@ pub fn expand_env_vars(input: &str) -> String {
     .into_owned()
 }
 
-/// Save configuration to a YAML file.
+/// Save configuration to a TOML file.
 pub fn save_config(config: &Config, path: &Path) -> Result<()> {
-    let yaml = serde_yaml::to_string(config)?;
-    std::fs::write(path, yaml)
+    let toml_str = toml::to_string(config)?;
+    std::fs::write(path, toml_str)
         .with_context(|| format!("Failed to write config to {}", path.display()))?;
     Ok(())
 }
@@ -69,34 +69,34 @@ mod tests {
     #[test]
     fn test_expand_env_vars_simple() {
         std::env::set_var("TEST_KESTREL_KEY", "secret123");
-        let result = expand_env_vars("key: ${TEST_KESTREL_KEY}");
-        assert_eq!(result, "key: secret123");
+        let result = expand_env_vars("key = ${TEST_KESTREL_KEY}");
+        assert_eq!(result, "key = secret123");
     }
 
     #[test]
     fn test_expand_env_vars_with_default() {
-        let result = expand_env_vars("key: ${NONEXISTENT_VAR:-fallback}");
-        assert_eq!(result, "key: fallback");
+        let result = expand_env_vars("key = ${NONEXISTENT_VAR:-fallback}");
+        assert_eq!(result, "key = fallback");
     }
 
     #[test]
     fn test_expand_env_vars_missing_no_default() {
-        let result = expand_env_vars("key: ${NONEXISTENT_VAR_NO_DEFAULT}");
-        assert_eq!(result, "key: ");
+        let result = expand_env_vars("key = ${NONEXISTENT_VAR_NO_DEFAULT}");
+        assert_eq!(result, "key = ");
     }
 
     #[test]
     fn test_default_config_roundtrip() {
         let config = Config::default();
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.agent.model, config.agent.model);
     }
 
     #[test]
     fn test_save_and_load_config() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.yaml");
+        let config_path = tmp.path().join("config.toml");
 
         let config = Config::default();
         save_config(&config, &config_path).unwrap();
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn test_load_config_missing_file_returns_default() {
         let config = load_config(Some(std::path::Path::new(
-            "/tmp/nonexistent_kestrel_config_9999.yaml",
+            "/tmp/nonexistent_kestrel_config_9999.toml",
         )))
         .unwrap();
         // Should return default config
@@ -120,19 +120,19 @@ mod tests {
     #[test]
     fn test_load_config_with_env_vars() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join("config.yaml");
+        let config_path = tmp.path().join("config.toml");
 
         std::env::set_var("TEST_KESTREL_LOAD_KEY", "my-secret-key");
 
-        let yaml_content = r#"
-providers:
-  openai:
-    api_key: ${TEST_KESTREL_LOAD_KEY}
-    model: gpt-4o
-agent:
-  model: ${NONEXISTENT_MODEL:-gpt-4o}
+        let toml_content = r#"
+[providers.openai]
+api_key = "${TEST_KESTREL_LOAD_KEY}"
+model = "gpt-4o"
+
+[agent]
+model = "${NONEXISTENT_MODEL:-gpt-4o}"
 "#;
-        std::fs::write(&config_path, yaml_content).unwrap();
+        std::fs::write(&config_path, toml_content).unwrap();
 
         let config = load_config(Some(&config_path)).unwrap();
         assert_eq!(

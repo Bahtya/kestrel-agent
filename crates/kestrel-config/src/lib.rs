@@ -1,7 +1,7 @@
 //! # kestrel-config
 //!
 //! Configuration loading and schema for kestrel.
-//! Maintains YAML compatibility with the Python kestrel config format.
+//! Uses TOML format for the config file (`config.toml`).
 
 pub mod loader;
 pub mod migration;

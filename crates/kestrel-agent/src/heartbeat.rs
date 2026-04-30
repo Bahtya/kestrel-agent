@@ -655,7 +655,7 @@ impl HealthCheck for ReadinessCheck {
 ///
 /// In addition to file readability and data-dir writability (handled by
 /// [`ConfigStoreHealthCheck`]), this check optionally:
-/// - Parses the YAML config and reports parse errors
+/// - Parses the TOML config and reports parse errors
 /// - Validates that critical keys (`agent.model`) are present
 pub struct DeepConfigStoreHealthCheck {
     config_path: std::path::PathBuf,
@@ -685,8 +685,8 @@ impl HealthCheck for DeepConfigStoreHealthCheck {
         if self.config_path.exists() {
             match std::fs::read_to_string(&self.config_path) {
                 Ok(content) => {
-                    // 2. YAML parse validation
-                    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                    // 2. TOML parse validation
+                    match toml::from_str::<toml::Value>(&content) {
                         Ok(parsed) => {
                             // 3. Check critical key: agent.model
                             if let Some(agent) = parsed.get("agent") {
@@ -699,7 +699,7 @@ impl HealthCheck for DeepConfigStoreHealthCheck {
                             // If no agent section at all, that's acceptable (defaults)
                         }
                         Err(e) => {
-                            issues.push(format!("config YAML parse error: {}", e));
+                            issues.push(format!("config TOML parse error: {}", e));
                         }
                     }
                 }
@@ -1080,8 +1080,8 @@ mod tests {
     #[tokio::test]
     async fn test_config_store_healthy() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, "agent:\n  model: test\n").unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[agent]\nmodel = \"test\"\n").unwrap();
 
         let check = ConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
         let result = check.report_health().await;
@@ -1094,7 +1094,7 @@ mod tests {
     #[tokio::test]
     async fn test_config_store_healthy_no_config_file() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("nonexistent.yaml");
+        let config_path = dir.path().join("nonexistent.toml");
 
         let check = ConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
         let result = check.report_health().await;
@@ -1106,7 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn test_config_store_unreadable_config() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.yaml");
+        let config_path = dir.path().join("config.toml");
         std::fs::write(&config_path, "test").unwrap();
         std::fs::set_permissions(
             &config_path,
@@ -1143,7 +1143,7 @@ mod tests {
         )
         .unwrap();
 
-        let check = ConfigStoreHealthCheck::new(dir.path().join("config.yaml"), data_dir.clone());
+        let check = ConfigStoreHealthCheck::new(dir.path().join("config.toml"), data_dir.clone());
         let result = check.report_health().await;
 
         // On some systems running as root, the permission restriction doesn't apply
@@ -1164,7 +1164,7 @@ mod tests {
     async fn test_config_store_name() {
         let dir = tempfile::tempdir().unwrap();
         let check =
-            ConfigStoreHealthCheck::new(dir.path().join("config.yaml"), dir.path().to_path_buf());
+            ConfigStoreHealthCheck::new(dir.path().join("config.toml"), dir.path().to_path_buf());
         assert_eq!(check.component_name(), "config_store");
     }
 
@@ -1319,10 +1319,10 @@ mod tests {
     // === DeepConfigStoreHealthCheck ===
 
     #[tokio::test]
-    async fn test_deep_config_valid_yaml() {
+    async fn test_deep_config_valid_toml() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, "agent:\n  model: gpt-4\n").unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[agent]\nmodel = \"gpt-4\"\n").unwrap();
 
         let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
         let result = check.report_health().await;
@@ -1334,8 +1334,8 @@ mod tests {
     #[tokio::test]
     async fn test_deep_config_missing_model() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, "agent:\n  max_iterations: 10\n").unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[agent]\nmax_iterations = 10\n").unwrap();
 
         let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
         let result = check.report_health().await;
@@ -1346,10 +1346,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_deep_config_invalid_yaml() {
+    async fn test_deep_config_invalid_toml() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.yaml");
-        std::fs::write(&config_path, "agent:\n  model: [broken\n").unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[agent\nmodel = [broken\n").unwrap();
 
         let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
         let result = check.report_health().await;
@@ -1361,7 +1361,7 @@ mod tests {
     #[tokio::test]
     async fn test_deep_config_no_file() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("nonexistent.yaml");
+        let config_path = dir.path().join("nonexistent.toml");
 
         let check = DeepConfigStoreHealthCheck::new(config_path, dir.path().to_path_buf());
         let result = check.report_health().await;
@@ -1382,7 +1382,7 @@ mod tests {
         .unwrap();
 
         let check =
-            DeepConfigStoreHealthCheck::new(dir.path().join("config.yaml"), data_dir.clone());
+            DeepConfigStoreHealthCheck::new(dir.path().join("config.toml"), data_dir.clone());
         let result = check.report_health().await;
 
         assert!(matches!(
@@ -1402,7 +1402,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing_dir = dir.path().join("does_not_exist");
 
-        let check = DeepConfigStoreHealthCheck::new(dir.path().join("config.yaml"), missing_dir);
+        let check = DeepConfigStoreHealthCheck::new(dir.path().join("config.toml"), missing_dir);
         let result = check.report_health().await;
 
         assert_eq!(result.status, CheckStatus::Unhealthy);
@@ -1413,7 +1413,7 @@ mod tests {
     async fn test_deep_config_name() {
         let dir = tempfile::tempdir().unwrap();
         let check = DeepConfigStoreHealthCheck::new(
-            dir.path().join("config.yaml"),
+            dir.path().join("config.toml"),
             dir.path().to_path_buf(),
         );
         assert_eq!(check.component_name(), "config_store");
@@ -1436,7 +1436,7 @@ mod tests {
         let tool_check = ToolRegistryHealthCheck::new(kestrel_tools::ToolRegistry::new());
         let agent_check = AgentLoopHealthCheck::new(Arc::new(parking_lot::RwLock::new(None)), 60);
         let config_check =
-            ConfigStoreHealthCheck::new(dir.path().join("config.yaml"), dir.path().to_path_buf());
+            ConfigStoreHealthCheck::new(dir.path().join("config.toml"), dir.path().to_path_buf());
 
         let checks: Vec<&dyn HealthCheck> = vec![
             &provider_check,

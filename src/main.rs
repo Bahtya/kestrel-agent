@@ -100,7 +100,7 @@ enum CronSubcommand {
 
 #[derive(Subcommand)]
 enum ConfigSubcommand {
-    /// Validate the config.yaml schema.
+    /// Validate the config.toml schema.
     Validate,
 
     /// Migrate Python kestrel config to kestrel format.

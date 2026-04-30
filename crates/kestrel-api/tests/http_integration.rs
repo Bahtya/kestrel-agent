@@ -265,7 +265,7 @@ async fn test_chat_completions_no_provider_configured() {
         .body(Body::from(serde_json::to_string(&req_body).unwrap()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    // No provider configured → model not found (404)
+    // No provider configured → provider not found (404)
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -273,8 +273,8 @@ async fn test_chat_completions_no_provider_configured() {
     assert!(v["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("not found"));
-    assert_eq!(v["error"]["code"].as_str(), Some("model_not_found"));
+        .contains("No provider"));
+    assert_eq!(v["error"]["code"].as_str(), Some("provider_not_found"));
 }
 
 #[tokio::test]

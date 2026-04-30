@@ -22,7 +22,7 @@ const MODEL_CYCLE: &[&str] = &[
     "gpt-4o",
     "claude-sonnet-4-6",
     "deepseek-chat",
-    "deepseek/deepseek-v4-flash",
+    "deepseek-v4-flash",
 ];
 
 static MODEL_CATALOG: OnceCell<ModelCatalog> = OnceCell::const_new();
@@ -553,6 +553,11 @@ fn handle_settings() -> CommandResponse {
 fn build_settings_response(config: &Config) -> CommandResponse {
     let mut out = String::new();
     let _ = writeln!(out, "Settings");
+    let _ = writeln!(
+        out,
+        "Provider: {}",
+        config.agent.provider.as_deref().unwrap_or("(auto)")
+    );
     let _ = writeln!(out, "Model: {}", config.agent.model);
     let _ = writeln!(
         out,
@@ -618,6 +623,22 @@ fn save_config_to_default(config: &Config) -> Result<(), String> {
     kestrel_config::loader::save_config(config, &path).map_err(|e| e.to_string())
 }
 
+/// Format provider and model for display, e.g. "opencode_go/glm-5.1".
+fn fmt_provider_model(config: &Config) -> String {
+    fmt_provider_model_raw(
+        config.agent.provider.as_deref().unwrap_or(""),
+        &config.agent.model,
+    )
+}
+
+fn fmt_provider_model_raw(provider: &str, model: &str) -> String {
+    if provider.is_empty() {
+        model.to_string()
+    } else {
+        format!("{}/{}", provider, model)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // /settings text-based implementation (for WebSocket and other non-keyboard channels)
 // ---------------------------------------------------------------------------
@@ -668,7 +689,7 @@ async fn ws_models_provider_list() -> String {
         Err(e) => return format!("Failed to load config: {e}"),
     };
 
-    let current_model = config.agent.model.clone();
+    let current = fmt_provider_model(&config);
 
     let catalog = get_model_catalog().await;
     let models = catalog.list_all_models().await;
@@ -685,7 +706,7 @@ async fn ws_models_provider_list() -> String {
     }
 
     let mut out = String::new();
-    let _ = writeln!(out, "Providers (current: {}):\n", current_model);
+    let _ = writeln!(out, "Providers (current: {}):\n", current);
     for (provider, count) in &provider_counts {
         let _ = writeln!(out, "  {} ({} models)", provider, count);
     }
@@ -700,10 +721,10 @@ async fn ws_models_detail(provider: &str, models: &[&ModelInfo]) -> String {
         Ok(c) => c,
         Err(e) => return format!("Failed to load config: {e}"),
     };
-    let current_model = config.agent.model.clone();
+    let current = fmt_provider_model(&config);
 
     let mut out = String::new();
-    let _ = writeln!(out, "[{}] models (current: {}):\n", provider, current_model);
+    let _ = writeln!(out, "[{}] models (current: {}):\n", provider, current);
     for m in models {
         let ctx = m
             .context_length
@@ -716,8 +737,26 @@ async fn ws_models_detail(provider: &str, models: &[&ModelInfo]) -> String {
 }
 
 fn ws_models_select(provider: &str, model_id: &str) -> String {
-    let qualified_id = format!("{}/{}", provider, model_id);
-    handle_models_select(&qualified_id).text
+    let mut config = match load_config(None) {
+        Ok(c) => c,
+        Err(e) => return format!("Failed to load config: {e}"),
+    };
+
+    let old_provider = config.agent.provider.clone().unwrap_or_default();
+    let old_model = config.agent.model.clone();
+    config.agent.provider = Some(provider.to_string());
+    config.agent.model = model_id.to_string();
+
+    if let Err(e) = save_config_to_default(&config) {
+        return format!("Failed to save config: {e}");
+    }
+
+    format!(
+        "Model changed: {} → {} ({})",
+        fmt_provider_model_raw(&old_provider, &old_model),
+        model_id,
+        provider
+    )
 }
 
 /// Handle `/settings` for text-only channels (WebSocket, etc.) that lack inline keyboards.
@@ -740,6 +779,11 @@ pub async fn handle_ws_settings(text: &str) -> String {
         };
         let mut out = String::new();
         let _ = writeln!(out, "Settings");
+        let _ = writeln!(
+            out,
+            "Provider: {}",
+            config.agent.provider.as_deref().unwrap_or("(auto)")
+        );
         let _ = writeln!(out, "Model: {}", config.agent.model);
         let _ = writeln!(
             out,
@@ -771,7 +815,7 @@ pub async fn handle_ws_settings(text: &str) -> String {
                     Ok(c) => c,
                     Err(e) => return format!("Failed to load config: {e}"),
                 };
-                return format!("Current model: {}", config.agent.model);
+                return format!("Current: {}", fmt_provider_model(&config));
             }
             if rest.eq_ignore_ascii_case("next") {
                 return ws_settings_model_switch().await;
@@ -799,34 +843,47 @@ async fn ws_settings_model_switch() -> String {
         Err(e) => return format!("Failed to load config: {e}"),
     };
 
-    let current = config.agent.model.to_lowercase();
+    let current_provider = config.agent.provider.as_deref().unwrap_or("");
+    let current_model = &config.agent.model;
 
-    // Build cycle from discovered models + fallback list.
+    // Build cycle from discovered models, scoped to current provider.
     let catalog = get_model_catalog().await;
     let discovered = catalog.list_all_models().await;
-    let cycle: Vec<String> = if discovered.is_empty() {
-        MODEL_CYCLE.iter().map(|s| s.to_string()).collect()
+
+    let candidates: Vec<ModelInfo> = if !current_provider.is_empty() {
+        discovered
+            .into_iter()
+            .filter(|m| m.provider == current_provider)
+            .collect()
     } else {
-        let mut ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
-        // Also include qualified IDs for disambiguation.
-        for m in &discovered {
-            ids.push(m.qualified_id());
-        }
-        ids
+        discovered
     };
 
-    let idx = cycle
-        .iter()
-        .position(|m| m.eq_ignore_ascii_case(&current))
-        .map(|i| (i + 1) % cycle.len())
-        .unwrap_or(0);
-    config.agent.model = cycle[idx].clone();
+    // Fallback to MODEL_CYCLE if no discovered models.
+    if candidates.is_empty() {
+        let cycle: Vec<&str> = MODEL_CYCLE.to_vec();
+        let idx = cycle
+            .iter()
+            .position(|m| m.eq_ignore_ascii_case(current_model))
+            .map(|i| (i + 1) % cycle.len())
+            .unwrap_or(0);
+        config.agent.model = cycle[idx].to_string();
+    } else {
+        let idx = candidates
+            .iter()
+            .position(|m| m.id.eq_ignore_ascii_case(current_model))
+            .map(|i| (i + 1) % candidates.len())
+            .unwrap_or(0);
+        let next = &candidates[idx];
+        config.agent.provider = Some(next.provider.clone());
+        config.agent.model = next.id.clone();
+    }
 
     if let Err(e) = save_config_to_default(&config) {
         return format!("Failed to save config: {e}");
     }
 
-    format!("Model switched to: {}", config.agent.model)
+    format!("Model switched to: {}", fmt_provider_model(&config))
 }
 
 async fn ws_settings_models_list(arg: &str) -> String {
@@ -856,7 +913,7 @@ async fn ws_settings_models_list(arg: &str) -> String {
             .context_length
             .map(|c| format!(" ({}K ctx)", c / 1024))
             .unwrap_or_default();
-        let _ = writeln!(out, "  {}{}", m.qualified_id(), ctx);
+        let _ = writeln!(out, "  {}{}", m.id, ctx);
     }
 
     let _ = writeln!(out, "\nUse /settings model <id> to select.");
@@ -864,18 +921,25 @@ async fn ws_settings_models_list(arg: &str) -> String {
 }
 
 fn ws_settings_model_set(name: &str) -> String {
+    // If name contains a /, treat it as provider/model and use the full selection flow.
+    if let Some((provider, model_id)) = name.split_once('/') {
+        if !provider.is_empty() && !model_id.is_empty() {
+            return ws_models_select(provider, model_id);
+        }
+    }
+
     let mut config = match load_config(None) {
         Ok(c) => c,
         Err(e) => return format!("Failed to load config: {e}"),
     };
-    let old = config.agent.model.clone();
+    let old = fmt_provider_model(&config);
     config.agent.model = name.to_string();
 
     if let Err(e) = save_config_to_default(&config) {
         return format!("Failed to save config: {e}");
     }
 
-    format!("Model changed: {} → {}", old, config.agent.model)
+    format!("Model changed: {} → {}", old, fmt_provider_model(&config))
 }
 
 fn ws_settings_streaming_toggle() -> String {
@@ -1052,6 +1116,10 @@ fn collect_settings(config: &Config) -> Vec<String> {
 
     let name = config.name.as_deref().unwrap_or("(unnamed)");
     settings.push(format!("Name: {}", name));
+    settings.push(format!(
+        "Provider: {}",
+        config.agent.provider.as_deref().unwrap_or("(auto)")
+    ));
     settings.push(format!("Model: {}", config.agent.model));
     settings.push(format!("Streaming: {}", config.agent.streaming));
     settings.push(format!("Max tokens: {}", config.agent.max_tokens));
@@ -1566,7 +1634,7 @@ fn handle_status() -> String {
 
     // Agent info.
     let name = config.name.as_deref().unwrap_or("unnamed");
-    let _ = writeln!(out, "Agent: {} ({})", config.agent.model, name);
+    let _ = writeln!(out, "Agent: {} ({})", fmt_provider_model(&config), name);
 
     // Channel status.
     let mut channels: Vec<String> = Vec::new();
@@ -1705,7 +1773,7 @@ pub async fn handle_models_provider_list() -> CommandResponse {
         Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
     };
 
-    let current_model = config.agent.model.clone();
+    let current = fmt_provider_model(&config);
 
     let catalog = get_model_catalog().await;
     let models = catalog.list_all_models().await;
@@ -1725,7 +1793,7 @@ pub async fn handle_models_provider_list() -> CommandResponse {
 
     let mut out = String::new();
     let _ = writeln!(out, "Select a provider:");
-    let _ = writeln!(out, "Current: {}", current_model);
+    let _ = writeln!(out, "Current: {}", current);
 
     let mut kb = InlineKeyboardBuilder::new();
     for (provider, count) in &provider_counts {
@@ -1748,7 +1816,7 @@ pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
         Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
     };
 
-    let current_model = config.agent.model.clone();
+    let current = fmt_provider_model(&config);
 
     let catalog = get_model_catalog().await;
     let models = catalog.list_provider_models(provider).await;
@@ -1759,15 +1827,16 @@ pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
 
     let mut out = String::new();
     let _ = writeln!(out, "[{}] models:", provider);
-    let _ = writeln!(out, "Current: {}", current_model);
+    let _ = writeln!(out, "Current: {}", current);
 
     let mut kb = InlineKeyboardBuilder::new();
     for m in &models {
-        let marker = if m.qualified_id() == current_model || m.id == current_model {
-            " *"
-        } else {
-            ""
-        };
+        let marker =
+            if m.id == config.agent.model && config.agent.provider.as_deref() == Some(provider) {
+                " *"
+            } else {
+                ""
+            };
         let ctx = m
             .context_length
             .map(|c| format!(" ({}K)", c / 1024))
@@ -1784,13 +1853,25 @@ pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
 
 /// Select a model (provider/model_id format) and persist to config.
 pub fn handle_models_select(qualified_id: &str) -> CommandResponse {
+    // Split "provider/model_id" into separate fields.
+    let (provider, model_id) = match qualified_id.split_once('/') {
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => (p.to_string(), m.to_string()),
+        _ => {
+            return CommandResponse::text(format!(
+                "Invalid model format: '{}'. Expected provider/model_id",
+                qualified_id
+            ))
+        }
+    };
+
     let mut config = match load_config(None) {
         Ok(c) => c,
         Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
     };
 
-    let old = config.agent.model.clone();
-    config.agent.model = qualified_id.to_string();
+    let old = fmt_provider_model(&config);
+    config.agent.provider = Some(provider.clone());
+    config.agent.model = model_id.clone();
 
     if let Err(e) = save_config_to_default(&config) {
         return CommandResponse::text(format!("Failed to save config: {e}"));
@@ -1798,7 +1879,7 @@ pub fn handle_models_select(qualified_id: &str) -> CommandResponse {
 
     let mut out = String::new();
     let _ = writeln!(out, "Model changed:");
-    let _ = writeln!(out, "  {} -> {}", old, qualified_id);
+    let _ = writeln!(out, "  {} -> {}/{}", old, provider, model_id);
 
     let keyboard = InlineKeyboardBuilder::new()
         .button("Select another model", "models:providers")
@@ -3055,7 +3136,8 @@ agent:
         let resp = handle_models_select("opencode_go/kimi-k2.6");
         assert!(resp.text.contains("Model changed"));
         assert!(resp.text.contains("gpt-4o"));
-        assert!(resp.text.contains("opencode_go/kimi-k2.6"));
+        assert!(resp.text.contains("opencode_go"));
+        assert!(resp.text.contains("kimi-k2.6"));
         assert!(resp.keyboard.is_some());
     }
 

@@ -523,12 +523,10 @@ pub struct AgentDefaults {
     #[serde(default = "default_model")]
     pub model: String,
 
-    /// Explicit provider override.
+    /// Explicit provider name (e.g. "opencode_go", "anthropic").
     ///
-    /// When set, the agent routes all requests to this provider regardless of
-    /// model name keyword matching.  The provider prefix in `model` (e.g.
-    /// `"opencode_go/deepseek-v4-flash"`) still takes precedence over this
-    /// field — this field acts as a fallback when no prefix is present.
+    /// When set, the agent routes all requests to this provider.
+    /// If unset, the first registered provider is used as default.
     #[serde(default)]
     pub provider: Option<String>,
 

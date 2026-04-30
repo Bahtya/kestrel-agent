@@ -1086,27 +1086,6 @@ fn validate_mcp_servers(
 // Cross-field validation
 // ---------------------------------------------------------------------------
 
-/// Model keyword to provider name mapping (mirrors ProviderRegistry).
-const MODEL_KEYWORD_MAP: &[(&str, &str)] = &[
-    ("claude", "anthropic"),
-    ("anthropic", "anthropic"),
-    ("gpt", "openai"),
-    ("o1", "openai"),
-    ("o3", "openai"),
-    ("o4", "openai"),
-    ("chatgpt", "openai"),
-    ("deepseek", "deepseek"),
-    ("gemini", "gemini"),
-    ("groq", "groq"),
-    ("moonshot", "moonshot"),
-    ("kimi", "moonshot"),
-    ("minimax", "minimax"),
-    ("llama", "ollama"),
-    ("mistral", "ollama"),
-    ("qwen", "ollama"),
-    ("codestral", "ollama"),
-];
-
 // ---------------------------------------------------------------------------
 // API server validation
 // ---------------------------------------------------------------------------
@@ -1146,7 +1125,7 @@ fn validate_cross_field(
     providers: &ProvidersConfig,
     custom: &[CustomProviderConfig],
     agent: &AgentDefaults,
-    dream: &DreamConfig,
+    _dream: &DreamConfig,
     channels: &ChannelsConfig,
     report: &mut ValidationReport,
 ) {
@@ -1195,7 +1174,6 @@ fn validate_cross_field(
     }
 
     // Cross-check: if any channel is enabled, verify at least one provider is configured.
-    // (This produces a more specific warning than the generic "no provider" error.)
     let has_enabled_channel = [
         channels.telegram.as_ref().is_some_and(|t| t.enabled),
         channels.discord.as_ref().is_some_and(|d| d.enabled),
@@ -1221,109 +1199,25 @@ fn validate_cross_field(
         );
     }
 
-    // Check if the agent model matches any configured provider
-    let model_lower = agent.model.to_lowercase();
-    let mut matched = false;
-    for (keyword, provider_name) in MODEL_KEYWORD_MAP {
-        if model_lower.contains(keyword) && configured.contains(provider_name) {
-            matched = true;
-            break;
+    // Check that agent.provider (if set) references a configured provider.
+    if let Some(ref provider_name) = agent.provider {
+        if !configured.contains(&provider_name.as_str()) {
+            report.warning(
+                "agent.provider",
+                format!(
+                    "Provider '{}' is not configured. Available: [{}]",
+                    provider_name,
+                    configured.join(", ")
+                ),
+            );
         }
-    }
-
-    // Custom providers match by model_patterns
-    if !matched {
-        for cp in custom {
-            if cp
-                .model_patterns
-                .iter()
-                .any(|p| model_lower.contains(&p.to_lowercase()))
-            {
-                matched = true;
-                break;
-            }
-        }
-    }
-
-    // If the model doesn't match any provider by keyword, check if there's
-    // exactly one provider (it'll be the default fallback)
-    if !matched && configured.len() == 1 {
-        // Single provider will handle any model — OK, unless the model
-        // keyword explicitly targets a different provider
-        let mut explicit_mismatch = false;
-        for (keyword, provider_name) in MODEL_KEYWORD_MAP {
-            if model_lower.contains(keyword) {
-                // The model keyword points to a specific provider that isn't configured
-                if !configured.contains(provider_name) {
-                    explicit_mismatch = true;
-                    break;
-                }
-            }
-        }
-        if !explicit_mismatch {
-            matched = true;
-        }
-    }
-
-    if !matched {
+    } else if !configured.is_empty() {
+        // No explicit provider set — warn that explicit selection is recommended.
         report.warning(
-            "agent.model",
-            format!(
-                "Model '{}' may not match any configured provider. Configured: [{}]",
-                agent.model,
-                configured.join(", ")
-            ),
+            "agent.provider",
+            "No explicit provider set. The first configured provider will be used as default. \
+             Consider setting agent.provider explicitly.",
         );
-    }
-
-    // Dream model cross-check — verify the dream model also has a matching provider
-    if dream.enabled {
-        if let Some(ref dream_model) = dream.model {
-            if !dream_model.is_empty() {
-                let dm_lower = dream_model.to_lowercase();
-                let mut dream_matched = false;
-                for (keyword, provider_name) in MODEL_KEYWORD_MAP {
-                    if dm_lower.contains(keyword) && configured.contains(provider_name) {
-                        dream_matched = true;
-                        break;
-                    }
-                }
-                if !dream_matched {
-                    for cp in custom {
-                        if cp
-                            .model_patterns
-                            .iter()
-                            .any(|p| dm_lower.contains(&p.to_lowercase()))
-                        {
-                            dream_matched = true;
-                            break;
-                        }
-                    }
-                }
-                if !dream_matched && configured.len() == 1 {
-                    // Single provider fallback — only OK if no explicit keyword mismatch
-                    let mut explicit_mismatch = false;
-                    for (keyword, provider_name) in MODEL_KEYWORD_MAP {
-                        if dm_lower.contains(keyword) && !configured.contains(provider_name) {
-                            explicit_mismatch = true;
-                            break;
-                        }
-                    }
-                    if !explicit_mismatch {
-                        dream_matched = true;
-                    }
-                }
-                if !dream_matched {
-                    report.warning(
-                        "dream.model",
-                        format!(
-                            "Dream model '{}' may not match any configured provider",
-                            dream_model
-                        ),
-                    );
-                }
-            }
-        }
     }
 }
 
@@ -2156,14 +2050,15 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
-    fn test_cross_field_model_matches_provider() {
-        let config = make_valid_config(); // model=gpt-4o, openai configured
+    fn test_cross_field_provider_configured() {
+        let mut config = make_valid_config();
+        config.agent.provider = Some("openai".to_string());
         let report = validate(&config);
-        assert!(report.warnings().iter().all(|w| w.path != "agent.model"));
+        assert!(report.warnings().iter().all(|w| w.path != "agent.provider"));
     }
 
     #[test]
-    fn test_cross_field_model_no_match() {
+    fn test_cross_field_provider_not_configured() {
         let mut config = Config::default();
         config.providers.anthropic = Some(ProviderEntry {
             api_key: Some("sk-ant-valid".to_string()),
@@ -2171,16 +2066,16 @@ mod tests {
             model: None,
             no_proxy: None,
         });
-        config.agent.model = "gpt-4o".to_string(); // gpt keywords → openai, but only anthropic configured
+        config.agent.provider = Some("openai".to_string()); // not configured
         let report = validate(&config);
         assert!(report
             .warnings()
             .iter()
-            .any(|w| w.path == "agent.model" && w.message.contains("may not match")));
+            .any(|w| w.path == "agent.provider" && w.message.contains("not configured")));
     }
 
     #[test]
-    fn test_cross_field_single_provider_any_model() {
+    fn test_cross_field_no_explicit_provider_warns() {
         let mut config = Config::default();
         config.providers.openai = Some(ProviderEntry {
             api_key: Some("sk-test".to_string()),
@@ -2188,10 +2083,10 @@ mod tests {
             model: None,
             no_proxy: None,
         });
-        config.agent.model = "some-unknown-model".to_string();
+        config.agent.model = "gpt-4o".to_string();
         let report = validate(&config);
-        // Single provider → no warning (will be used as default)
-        assert!(report.warnings().iter().all(|w| w.path != "agent.model"));
+        // No explicit provider set → info-level warning
+        assert!(report.warnings().iter().any(|w| w.path == "agent.provider"));
     }
 
     // -------------------------------------------------------------------
@@ -2662,14 +2557,14 @@ mod tests {
 
     #[test]
     fn test_dream_model_cross_check_mismatch() {
+        // Provider validation is now explicit — dream.model is no longer
+        // cross-checked against providers via keyword matching.
+        // This test verifies that no spurious warnings are emitted for dream.model.
         let mut config = make_valid_config();
         config.dream.enabled = true;
-        config.dream.model = Some("claude-3".to_string()); // only openai configured
+        config.dream.model = Some("claude-3".to_string());
         let report = validate(&config);
-        assert!(report
-            .warnings()
-            .iter()
-            .any(|w| w.path == "dream.model" && w.message.contains("may not match")));
+        assert!(report.warnings().iter().all(|w| w.path != "dream.model"));
     }
 
     #[test]

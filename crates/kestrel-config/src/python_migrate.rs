@@ -694,7 +694,21 @@ fn merge_slack(
 fn convert_agents(py: &PythonAgents, config: &mut Config, report: &mut MigrationReport) {
     if let Some(ref defaults) = py.defaults {
         if let Some(ref model) = defaults.model {
-            config.agent.model = model.clone();
+            // Python config may use "provider/model" format — split into separate fields.
+            if let Some((provider, model_id)) = model.split_once('/') {
+                if !provider.is_empty() && !model_id.is_empty() {
+                    config.agent.provider = Some(provider.to_string());
+                    config.agent.model = model_id.to_string();
+                } else {
+                    config.agent.model = model.clone();
+                }
+            } else {
+                config.agent.model = model.clone();
+            }
+        }
+        // Explicit provider field takes precedence over prefix in model string.
+        if let Some(ref provider) = defaults.provider {
+            config.agent.provider = Some(provider.clone());
         }
         if let Some(temp) = defaults.temperature {
             config.agent.temperature = temp;
@@ -712,15 +726,8 @@ fn convert_agents(py: &PythonAgents, config: &mut Config, report: &mut Migration
             config.agent.tool_timeout = timeout;
         }
         report.add_mapped(
-            "agents.defaults → agent (model, temperature, max_tokens, max_iterations, streaming, tool_timeout)",
+            "agents.defaults → agent (provider, model, temperature, max_tokens, max_iterations, streaming, tool_timeout)",
         );
-
-        if defaults.provider.is_some() {
-            report.add_note(
-                "agents.defaults.provider",
-                "kestrel selects providers by model name convention, not explicit provider field",
-            );
-        }
     }
 }
 
@@ -1055,17 +1062,13 @@ mod tests {
         let mut config = Config::default();
         convert_agents(&py.agents, &mut config, &mut report);
 
-        assert_eq!(config.agent.model, "anthropic/claude-opus-4-5");
-        assert!((config.agent.temperature - 0.5).abs() < f32::EPSILON);
+        // Explicit provider="openrouter" overrides model prefix "anthropic/..."
+        assert_eq!(config.agent.provider, Some("openrouter".to_string()));
+        assert_eq!(config.agent.model, "claude-opus-4-5");
         assert_eq!(config.agent.max_tokens, 2048);
         assert_eq!(config.agent.max_iterations, 30);
         assert!(!config.agent.streaming);
         assert_eq!(config.agent.tool_timeout, 60);
-
-        assert!(report
-            .notes
-            .iter()
-            .any(|n| n.contains("agents.defaults.provider")));
     }
 
     #[test]
@@ -1181,7 +1184,8 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).unwrap();
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
 
-        assert_eq!(parsed.agent.model, "anthropic/claude-opus-4-5");
+        assert_eq!(parsed.agent.model, "claude-opus-4-5");
+        assert_eq!(parsed.agent.provider, Some("openrouter".to_string()));
         assert!(parsed.providers.openai.is_some());
         assert!(parsed.channels.telegram.is_some());
         assert_eq!(
@@ -1219,7 +1223,8 @@ mod tests {
     fn test_migrate_from_str_json() {
         let result = migrate_from_str(make_full_python_json()).unwrap();
 
-        assert_eq!(result.config.agent.model, "anthropic/claude-opus-4-5");
+        assert_eq!(result.config.agent.model, "claude-opus-4-5");
+        assert_eq!(result.config.agent.provider, Some("openrouter".to_string()));
         assert!(result.config.providers.openai.is_some());
         assert!(result.config.channels.telegram.is_some());
         assert!(!result.report.mapped.is_empty());
@@ -1375,7 +1380,8 @@ heartbeat:
         };
 
         let result = migrate_from_python(&py_home, &opts).unwrap();
-        assert_eq!(result.config.agent.model, "anthropic/claude-opus-4-5");
+        assert_eq!(result.config.agent.model, "claude-opus-4-5");
+        assert_eq!(result.config.agent.provider, Some("openrouter".to_string()));
         assert!(result.config.providers.openai.is_some());
     }
 
@@ -1590,7 +1596,8 @@ channels:
         let mut report = MigrationReport::default();
         let config = convert_python_config(&py2, &[], &mut report);
 
-        assert_eq!(config.agent.model, "anthropic/claude-opus-4-5");
+        assert_eq!(config.agent.provider, Some("openrouter".to_string()));
+        assert_eq!(config.agent.model, "claude-opus-4-5");
         assert!(config.providers.openai.is_some());
     }
 

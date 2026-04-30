@@ -505,15 +505,24 @@ async fn chat_completions(
     }
 
     // Check provider availability early
-    if state.provider_registry.get_provider(&req.model).is_none() {
+    let provider_name = state
+        .config
+        .agent
+        .provider
+        .as_deref()
+        .or_else(|| state.provider_registry.default_provider_name());
+    if provider_name
+        .map(|name| state.provider_registry.get_provider(name).is_none())
+        .unwrap_or(true)
+    {
         let error = ErrorResponse {
             error: ErrorDetail {
                 message: format!(
-                    "Model '{}' not found. Check available models at GET /v1/models.",
-                    req.model
+                    "No provider available (configured: {:?}). Check available models at GET /v1/models.",
+                    provider_name
                 ),
                 r#type: "invalid_request_error".to_string(),
-                code: Some("model_not_found".to_string()),
+                code: Some("provider_not_found".to_string()),
             },
         };
         return (StatusCode::NOT_FOUND, Json(error)).into_response();
@@ -951,6 +960,7 @@ mod tests {
     fn test_state_with_provider() -> AppState {
         let mut config = Config::default();
         config.agent.model = "mock-model".to_string();
+        config.agent.provider = Some("mock".to_string());
         let bus = MessageBus::new();
         let tmp = tempfile::tempdir().unwrap();
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
@@ -1401,16 +1411,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_chat_completions_model_not_found() {
-        // Use a registry with a provider but NO default set, and a model name
-        // that doesn't match any keyword — so get_provider returns None.
-        let mut config = Config::default();
-        config.agent.model = "mock-model".to_string();
+        // No provider configured — should return NOT_FOUND.
+        let config = Config::default();
         let bus = MessageBus::new();
         let tmp = tempfile::tempdir().unwrap();
         let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
-        let mut reg = ProviderRegistry::new();
-        reg.register("mock", MockProvider::simple("Mock response"));
-        // Intentionally do NOT call set_default — no fallback for unknown models
+        let reg = ProviderRegistry::new();
         let state = AppState {
             config: Arc::new(config),
             bus: Arc::new(bus),
@@ -1445,8 +1451,8 @@ mod tests {
         assert!(v["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not found"));
-        assert_eq!(v["error"]["code"].as_str(), Some("model_not_found"));
+            .contains("No provider"));
+        assert_eq!(v["error"]["code"].as_str(), Some("provider_not_found"));
     }
 
     // ─── Chat completions: success with mock provider ───

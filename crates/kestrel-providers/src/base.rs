@@ -55,6 +55,10 @@ pub struct CompletionRequest {
     /// Whether to stream the response.
     #[serde(default)]
     pub stream: bool,
+
+    /// Reasoning effort: "disabled"/"none" disables thinking mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// A non-streaming completion response.
@@ -147,6 +151,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.7),
             stream: false,
+            reasoning_effort: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: CompletionRequest = serde_json::from_str(&json).unwrap();

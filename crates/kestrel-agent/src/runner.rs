@@ -220,6 +220,7 @@ impl AgentRunner {
                 max_tokens: Some(max_tokens),
                 temperature: Some(temperature),
                 stream: use_streaming,
+                reasoning_effort: self.config.agent.reasoning_effort.clone(),
             };
 
             // Use streaming or non-streaming based on configuration

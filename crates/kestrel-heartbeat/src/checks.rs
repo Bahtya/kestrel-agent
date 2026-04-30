@@ -84,6 +84,7 @@ impl HealthCheck for ProviderHealthCheck {
                     max_tokens: Some(1),
                     temperature: Some(0.0),
                     stream: false,
+                    reasoning_effort: None,
                 };
 
                 match tokio::time::timeout(self.timeout, provider.complete(request)).await {

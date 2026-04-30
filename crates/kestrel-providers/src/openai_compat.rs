@@ -155,6 +155,17 @@ impl OpenAiCompatProvider {
             body["tools"] = json!(tool_defs);
         }
 
+        // Disable thinking/reasoning mode when reasoning_effort is "disabled" or "none".
+        // DeepSeek uses "thinking": {"type": "disabled"}.
+        // OpenAI-compatible APIs use "reasoning": {"effort": "none"}.
+        // We emit the DeepSeek form; providers that follow the OpenAI reasoning
+        // spec will ignore unknown top-level keys.
+        if let Some(ref effort) = request.reasoning_effort {
+            if effort == "disabled" || effort == "none" {
+                body["thinking"] = json!({"type": "disabled"});
+            }
+        }
+
         body
     }
 
@@ -635,6 +646,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.7),
             stream: false,
+            reasoning_effort: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -672,6 +684,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stream: false,
+            reasoning_effort: None,
         };
 
         let body = provider.build_request_body(&request);

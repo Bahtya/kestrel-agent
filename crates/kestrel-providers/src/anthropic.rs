@@ -731,6 +731,7 @@ mod tests {
             max_tokens: Some(2048),
             temperature: Some(0.5),
             stream: false,
+            reasoning_effort: None,
         };
 
         let body = provider.build_request_body(&request);

@@ -472,6 +472,7 @@ mod tests {
             max_tokens: Some(100),
             temperature: Some(0.7),
             stream: false,
+            reasoning_effort: None,
         }
     }
 

@@ -223,10 +223,11 @@ impl ProviderRegistry {
 
     /// Get a provider by name, falling back to the default provider.
     pub fn get_provider_by_name(&self, name: &str) -> Option<Arc<dyn LlmProvider>> {
-        self.providers
-            .get(name)
-            .cloned()
-            .or_else(|| self.default_provider.as_ref().and_then(|n| self.providers.get(n).cloned()))
+        self.providers.get(name).cloned().or_else(|| {
+            self.default_provider
+                .as_ref()
+                .and_then(|n| self.providers.get(n).cloned())
+        })
     }
 
     /// Get the provider for the given provider name string.

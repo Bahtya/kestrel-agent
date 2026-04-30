@@ -553,7 +553,11 @@ fn handle_settings() -> CommandResponse {
 fn build_settings_response(config: &Config) -> CommandResponse {
     let mut out = String::new();
     let _ = writeln!(out, "Settings");
-    let _ = writeln!(out, "Provider: {}", config.agent.provider.as_deref().unwrap_or("(auto)"));
+    let _ = writeln!(
+        out,
+        "Provider: {}",
+        config.agent.provider.as_deref().unwrap_or("(auto)")
+    );
     let _ = writeln!(out, "Model: {}", config.agent.model);
     let _ = writeln!(
         out,
@@ -775,7 +779,11 @@ pub async fn handle_ws_settings(text: &str) -> String {
         };
         let mut out = String::new();
         let _ = writeln!(out, "Settings");
-        let _ = writeln!(out, "Provider: {}", config.agent.provider.as_deref().unwrap_or("(auto)"));
+        let _ = writeln!(
+            out,
+            "Provider: {}",
+            config.agent.provider.as_deref().unwrap_or("(auto)")
+        );
         let _ = writeln!(out, "Model: {}", config.agent.model);
         let _ = writeln!(
             out,
@@ -1108,7 +1116,10 @@ fn collect_settings(config: &Config) -> Vec<String> {
 
     let name = config.name.as_deref().unwrap_or("(unnamed)");
     settings.push(format!("Name: {}", name));
-    settings.push(format!("Provider: {}", config.agent.provider.as_deref().unwrap_or("(auto)")));
+    settings.push(format!(
+        "Provider: {}",
+        config.agent.provider.as_deref().unwrap_or("(auto)")
+    ));
     settings.push(format!("Model: {}", config.agent.model));
     settings.push(format!("Streaming: {}", config.agent.streaming));
     settings.push(format!("Max tokens: {}", config.agent.max_tokens));
@@ -1820,11 +1831,12 @@ pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
 
     let mut kb = InlineKeyboardBuilder::new();
     for m in &models {
-        let marker = if m.id == config.agent.model && config.agent.provider.as_deref() == Some(provider) {
-            " *"
-        } else {
-            ""
-        };
+        let marker =
+            if m.id == config.agent.model && config.agent.provider.as_deref() == Some(provider) {
+                " *"
+            } else {
+                ""
+            };
         let ctx = m
             .context_length
             .map(|c| format!(" ({}K)", c / 1024))

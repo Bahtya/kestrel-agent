@@ -1125,7 +1125,7 @@ fn validate_cross_field(
     providers: &ProvidersConfig,
     custom: &[CustomProviderConfig],
     agent: &AgentDefaults,
-    dream: &DreamConfig,
+    _dream: &DreamConfig,
     channels: &ChannelsConfig,
     report: &mut ValidationReport,
 ) {
@@ -2086,10 +2086,7 @@ mod tests {
         config.agent.model = "gpt-4o".to_string();
         let report = validate(&config);
         // No explicit provider set → info-level warning
-        assert!(report
-            .warnings()
-            .iter()
-            .any(|w| w.path == "agent.provider"));
+        assert!(report.warnings().iter().any(|w| w.path == "agent.provider"));
     }
 
     // -------------------------------------------------------------------

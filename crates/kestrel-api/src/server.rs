@@ -1451,7 +1451,7 @@ mod tests {
         assert!(v["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not found"));
+            .contains("No provider"));
         assert_eq!(v["error"]["code"].as_str(), Some("provider_not_found"));
     }
 

@@ -15,7 +15,7 @@ use std::sync::{Arc, LazyLock};
 use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
-use crate::platforms::telegram::{InlineKeyboardBuilder, InlineKeyboardMarkup};
+use crate::platforms::telegram::{InlineKeyboardBuilder, InlineKeyboardButton, InlineKeyboardMarkup};
 
 /// Fallback model names for cycling when dynamic discovery is unavailable.
 const MODEL_CYCLE: &[&str] = &[
@@ -1807,10 +1807,13 @@ pub async fn handle_models_provider_list() -> CommandResponse {
     CommandResponse::with_keyboard(out, kb.build())
 }
 
-/// Show models for a specific provider as an inline keyboard.
+/// Models per page for the provider detail keyboard.
+const MODELS_PER_PAGE: usize = 15;
+
+/// Show models for a specific provider as an inline keyboard (paginated).
 ///
 /// Level 2: User picks a model to set as active.
-pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
+pub async fn handle_models_provider_detail(provider: &str, page: usize) -> CommandResponse {
     let config = match load_config(None) {
         Ok(c) => c,
         Err(e) => return CommandResponse::text(format!("Failed to load config: {e}")),
@@ -1825,12 +1828,22 @@ pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
         return CommandResponse::text(format!("No models found for provider: {}", provider));
     }
 
+    let total = models.len();
+    let total_pages = (total + MODELS_PER_PAGE - 1) / MODELS_PER_PAGE;
+    let page = page.min(total_pages.saturating_sub(1));
+    let start = page * MODELS_PER_PAGE;
+    let end = (start + MODELS_PER_PAGE).min(total);
+    let page_models = &models[start..end];
+
     let mut out = String::new();
-    let _ = writeln!(out, "[{}] models:", provider);
+    let _ = writeln!(out, "[{}] models ({} total):", provider, total);
     let _ = writeln!(out, "Current: {}", current);
+    if total_pages > 1 {
+        let _ = writeln!(out, "Page {} of {}", page + 1, total_pages);
+    }
 
     let mut kb = InlineKeyboardBuilder::new();
-    for m in &models {
+    for m in page_models {
         let marker =
             if m.id == config.agent.model && config.agent.provider.as_deref() == Some(provider) {
                 " *"
@@ -1846,6 +1859,33 @@ pub async fn handle_models_provider_detail(provider: &str) -> CommandResponse {
         kb = kb.button(&label, &data);
         kb = kb.new_row();
     }
+
+    // Navigation row: pagination | back
+    if total_pages > 1 {
+        // Pagination buttons
+        let mut nav_row = Vec::new();
+        if page > 0 {
+            nav_row.push(InlineKeyboardButton {
+                text: "◀ Prev".to_string(),
+                callback_data: Some(format!("models:ppage:{}|{}", provider, page - 1)),
+                url: None,
+            });
+        }
+        nav_row.push(InlineKeyboardButton {
+            text: format!("{}/{}", page + 1, total_pages),
+            callback_data: Some(format!("models:ppage:{}|{}", provider, page)),
+            url: None,
+        });
+        if page + 1 < total_pages {
+            nav_row.push(InlineKeyboardButton {
+                text: "Next ▶".to_string(),
+                callback_data: Some(format!("models:ppage:{}|{}", provider, page + 1)),
+                url: None,
+            });
+        }
+        kb = kb.push_row(nav_row);
+    }
+
     kb = kb.button("<< Back to providers", "models:providers");
 
     CommandResponse::with_keyboard(out, kb.build())
@@ -1881,13 +1921,7 @@ pub fn handle_models_select(qualified_id: &str) -> CommandResponse {
     let _ = writeln!(out, "Model changed:");
     let _ = writeln!(out, "  {} -> {}/{}", old, provider, model_id);
 
-    let keyboard = InlineKeyboardBuilder::new()
-        .button("Select another model", "models:providers")
-        .new_row()
-        .button("Settings", "settings:show")
-        .build();
-
-    CommandResponse::with_keyboard(out, keyboard)
+    CommandResponse::text(out)
 }
 
 /// Handle a callback from the /models inline keyboard.

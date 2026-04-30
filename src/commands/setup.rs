@@ -4,11 +4,8 @@ use anyhow::{Context, Result};
 use console::Term;
 use dialoguer::{Confirm, Input, Select};
 use kestrel_config::{
-    schema::{
-        AgentDefaults, ChannelsConfig, Config, ProviderEntry, ProvidersConfig, TelegramConfig,
-        WebSocketConfig,
-    },
-    paths, loader,
+    loader, paths,
+    schema::{Config, ProviderEntry, TelegramConfig, WebSocketConfig},
 };
 use owo_colors::OwoColorize;
 use std::path::Path;
@@ -98,10 +95,7 @@ fn run_wizard(term: &Term) -> Result<()> {
     // ── Step 5: Validate & write ─────────────────────────────────
     print_step(term, 5, "Save Configuration")?;
 
-    term.write_line(&format!(
-        "  Config path: {}",
-        config_path.display()
-    ))?;
+    term.write_line(&format!("  Config path: {}", config_path.display()))?;
     term.write_line("")?;
     show_config_summary(term, &config)?;
     term.write_line("")?;
@@ -165,18 +159,15 @@ fn print_step(term: &Term, step: usize, title: &str) -> Result<()> {
         TOTAL_STEPS,
         title.bold()
     ))?;
-    term.write_line(&format!(
-        "  {}",
-        "─".repeat(40).dimmed()
-    ))?;
+    term.write_line(&format!("  {}", "─".repeat(40).dimmed()))?;
     Ok(())
 }
 
 fn load_existing_config(path: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    let config: Config = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let config: Config =
+        toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(config)
 }
 
@@ -185,18 +176,9 @@ fn show_config_summary(term: &Term, config: &Config) -> Result<()> {
     let provider = config.agent.provider.as_deref().unwrap_or("default");
     term.write_line(&format!("  Model:        {}", model))?;
     term.write_line(&format!("  Provider:     {}", provider))?;
-    term.write_line(&format!(
-        "  Temperature:  {}",
-        config.agent.temperature
-    ))?;
-    term.write_line(&format!(
-        "  Max tokens:   {}",
-        config.agent.max_tokens
-    ))?;
-    term.write_line(&format!(
-        "  Streaming:    {}",
-        config.agent.streaming
-    ))?;
+    term.write_line(&format!("  Temperature:  {}", config.agent.temperature))?;
+    term.write_line(&format!("  Max tokens:   {}", config.agent.max_tokens))?;
+    term.write_line(&format!("  Streaming:    {}", config.agent.streaming))?;
 
     if let Some(ref tg) = config.channels.telegram {
         term.write_line(&format!(
@@ -401,7 +383,7 @@ fn configure_websocket(term: &Term, config: &mut Config) -> Result<()> {
 
 // ── Provider field helpers ───────────────────────────────────
 
-fn get_provider_entry_mut(config: &mut Config, provider: &str) -> Option<&mut ProviderEntry> {
+fn get_provider_entry_mut<'a>(config: &'a mut Config, provider: &str) -> Option<&'a mut ProviderEntry> {
     match provider {
         "anthropic" => config.providers.anthropic.as_mut(),
         "openai" => config.providers.openai.as_mut(),
@@ -421,43 +403,76 @@ fn get_provider_entry_mut(config: &mut Config, provider: &str) -> Option<&mut Pr
 fn ensure_provider_entry(config: &mut Config, provider: &str) {
     match provider {
         "anthropic" => {
-            config.providers.anthropic.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .anthropic
+                .get_or_insert_with(ProviderEntry::default);
         }
         "openai" => {
-            config.providers.openai.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .openai
+                .get_or_insert_with(ProviderEntry::default);
         }
         "openrouter" => {
-            config.providers.openrouter.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .openrouter
+                .get_or_insert_with(ProviderEntry::default);
         }
         "ollama" => {
-            config.providers.ollama.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .ollama
+                .get_or_insert_with(ProviderEntry::default);
         }
         "deepseek" => {
-            config.providers.deepseek.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .deepseek
+                .get_or_insert_with(ProviderEntry::default);
         }
         "gemini" => {
-            config.providers.gemini.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .gemini
+                .get_or_insert_with(ProviderEntry::default);
         }
         "groq" => {
-            config.providers.groq.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .groq
+                .get_or_insert_with(ProviderEntry::default);
         }
         "moonshot" => {
-            config.providers.moonshot.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .moonshot
+                .get_or_insert_with(ProviderEntry::default);
         }
         "minimax" => {
-            config.providers.minimax.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .minimax
+                .get_or_insert_with(ProviderEntry::default);
         }
         "github_copilot" => {
-            config.providers.github_copilot.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .github_copilot
+                .get_or_insert_with(ProviderEntry::default);
         }
         "openai_codex" => {
-            config.providers.openai_codex.get_or_insert_with(ProviderEntry::default);
+            config
+                .providers
+                .openai_codex
+                .get_or_insert_with(ProviderEntry::default);
         }
         _ => {}
     }
 }
 
-fn get_provider_url(config: &Config, provider: &str) -> Option<&str> {
+fn get_provider_url<'a>(config: &'a Config, provider: &str) -> Option<&'a str> {
     let entry = match provider {
         "anthropic" => config.providers.anthropic.as_ref(),
         "openai" => config.providers.openai.as_ref(),

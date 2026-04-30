@@ -15,9 +15,7 @@ use std::sync::{Arc, LazyLock};
 use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
-use crate::platforms::telegram::{
-    InlineKeyboardBuilder, InlineKeyboardMarkup,
-};
+use crate::platforms::telegram::{InlineKeyboardBuilder, InlineKeyboardMarkup};
 
 /// Fallback model names for cycling when dynamic discovery is unavailable.
 const MODEL_CYCLE: &[&str] = &[

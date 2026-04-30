@@ -329,7 +329,11 @@ impl InlineKeyboardBuilder {
     }
 
     /// Build a single pagination button row (Prev / indicator / Next).
-    pub fn pagination_row<F>(page: usize, total_pages: usize, callback: F) -> Vec<InlineKeyboardButton>
+    pub fn pagination_row<F>(
+        page: usize,
+        total_pages: usize,
+        callback: F,
+    ) -> Vec<InlineKeyboardButton>
     where
         F: Fn(usize) -> String,
     {

@@ -1721,9 +1721,9 @@ impl TelegramChannel {
                             let response = crate::commands::handle_models_select(qualified_id);
                             CallbackResponse::EditMessage {
                                 text: response.text,
-                                keyboard: response.keyboard.or_else(|| {
-                                    Some(InlineKeyboardBuilder::new().build())
-                                }),
+                                keyboard: response
+                                    .keyboard
+                                    .or_else(|| Some(InlineKeyboardBuilder::new().build())),
                             }
                         }
                         _ => CallbackResponse::Acknowledged,

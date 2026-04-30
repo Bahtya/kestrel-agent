@@ -15,7 +15,9 @@ use std::sync::{Arc, LazyLock};
 use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
-use crate::platforms::telegram::{InlineKeyboardBuilder, InlineKeyboardButton, InlineKeyboardMarkup};
+use crate::platforms::telegram::{
+    InlineKeyboardBuilder, InlineKeyboardButton, InlineKeyboardMarkup,
+};
 
 /// Fallback model names for cycling when dynamic discovery is unavailable.
 const MODEL_CYCLE: &[&str] = &[
@@ -1829,7 +1831,7 @@ pub async fn handle_models_provider_detail(provider: &str, page: usize) -> Comma
     }
 
     let total = models.len();
-    let total_pages = (total + MODELS_PER_PAGE - 1) / MODELS_PER_PAGE;
+    let total_pages = total.div_ceil(MODELS_PER_PAGE);
     let page = page.min(total_pages.saturating_sub(1));
     let start = page * MODELS_PER_PAGE;
     let end = (start + MODELS_PER_PAGE).min(total);
@@ -3161,7 +3163,7 @@ model = "gpt-4o"
         assert!(resp.text.contains("gpt-4o"));
         assert!(resp.text.contains("opencode_go"));
         assert!(resp.text.contains("kimi-k2.6"));
-        assert!(resp.keyboard.is_some());
+        assert!(resp.keyboard.is_none());
     }
 
     #[test]

@@ -173,7 +173,7 @@ pub struct ProvidersConfig {
 }
 
 /// A generic provider entry with API key and optional base URL.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderEntry {
     /// API key for authentication.

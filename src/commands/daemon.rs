@@ -96,18 +96,16 @@ fn do_start(config: &Config) -> Result<DaemonHandles> {
     let pid_file = kestrel_daemon::pid_file::PidFile::create(pid_file_path)?;
 
     // Setup file logging in the daemon process
-    let comm_level = config
-        .daemon
-        .comm_log
-        .as_ref()
-        .filter(|c| c.enabled)
-        .map(|c| c.level.as_str());
+    let comm_config = config.daemon.comm_log.as_ref().filter(|c| c.enabled);
+    let comm_level = comm_config.map(|c| c.level.as_str());
+    let comm_separate_file = comm_config.map(|c| c.separate_file).unwrap_or(false);
 
     let (log_guard, comm_log_guard) = kestrel_daemon::logging::setup_file_logging(
         log_dir,
         &config.daemon.log_level,
         &config.daemon.log_format,
         comm_level,
+        comm_separate_file,
     )?;
     tracing::info!("Daemon started (pid={})", std::process::id());
 

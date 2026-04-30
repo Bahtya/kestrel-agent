@@ -42,6 +42,7 @@ pub fn setup_file_logging(
     level: &str,
     log_format: &str,
     comm_log_level: Option<&str>,
+    comm_separate_file: bool,
 ) -> Result<(LogGuard, Option<CommLogGuard>)> {
     let log_path = Path::new(log_dir);
     std::fs::create_dir_all(log_path).context("create log directory")?;
@@ -66,38 +67,65 @@ pub fn setup_file_logging(
     let mut comm_guard: Option<CommLogGuard> = None;
 
     if let Some(comm_level) = comm_log_level {
-        let comm_appender = tracing_appender::rolling::daily(log_path, "comm.log");
-        let (comm_nb, cg) = tracing_appender::non_blocking(comm_appender);
-        comm_guard = Some(cg);
-
         let comm_filter = Targets::new().with_target("comm", parse_level(comm_level));
 
-        if effective_format == "json" {
-            let main_layer = tracing_subscriber::fmt::layer()
-                .with_writer(non_blocking)
-                .with_ansi(false)
-                .json()
-                .with_filter(filter);
-            let comm_layer = tracing_subscriber::fmt::layer()
-                .with_writer(comm_nb)
-                .with_ansi(false)
-                .json()
-                .with_filter(comm_filter);
-            let subscriber = Registry::default().with(main_layer).with(comm_layer);
-            tracing::subscriber::set_global_default(subscriber)
-                .context("set global tracing subscriber")?;
+        if comm_separate_file {
+            // Separate file: main layer excludes "comm", comm layer writes to comm.log.
+            let comm_appender = tracing_appender::rolling::daily(log_path, "comm.log");
+            let (comm_nb, cg) = tracing_appender::non_blocking(comm_appender);
+            comm_guard = Some(cg);
+
+            // Main filter: everything except target "comm".
+            let main_filter =
+                EnvFilter::new(level).add_directive("comm=off".parse().expect("valid directive"));
+
+            if effective_format == "json" {
+                let main_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false)
+                    .json()
+                    .with_filter(main_filter.clone());
+                let comm_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(comm_nb)
+                    .with_ansi(false)
+                    .json()
+                    .with_filter(comm_filter);
+                let subscriber = Registry::default().with(main_layer).with(comm_layer);
+                tracing::subscriber::set_global_default(subscriber)
+                    .context("set global tracing subscriber")?;
+            } else {
+                let main_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false)
+                    .with_filter(main_filter);
+                let comm_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(comm_nb)
+                    .with_ansi(false)
+                    .with_filter(comm_filter);
+                let subscriber = Registry::default().with(main_layer).with(comm_layer);
+                tracing::subscriber::set_global_default(subscriber)
+                    .context("set global tracing subscriber")?;
+            }
         } else {
-            let main_layer = tracing_subscriber::fmt::layer()
-                .with_writer(non_blocking)
-                .with_ansi(false)
-                .with_filter(filter);
-            let comm_layer = tracing_subscriber::fmt::layer()
-                .with_writer(comm_nb)
-                .with_ansi(false)
-                .with_filter(comm_filter);
-            let subscriber = Registry::default().with(main_layer).with(comm_layer);
-            tracing::subscriber::set_global_default(subscriber)
-                .context("set global tracing subscriber")?;
+            // Mixed into main log: single layer, comm events flow to kestrel.log.
+            if effective_format == "json" {
+                let main_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false)
+                    .json()
+                    .with_filter(filter);
+                let subscriber = Registry::default().with(main_layer);
+                tracing::subscriber::set_global_default(subscriber)
+                    .context("set global tracing subscriber")?;
+            } else {
+                let main_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false)
+                    .with_filter(filter);
+                let subscriber = Registry::default().with(main_layer);
+                tracing::subscriber::set_global_default(subscriber)
+                    .context("set global tracing subscriber")?;
+            }
         }
     } else if effective_format == "json" {
         let main_layer = tracing_subscriber::fmt::layer()
@@ -124,8 +152,10 @@ pub fn setup_file_logging(
         effective_format
     );
 
-    if comm_log_level.is_some() {
+    if comm_log_level.is_some() && comm_separate_file {
         tracing::info!("Comm logging initialized: {}/comm.log", log_dir);
+    } else if comm_log_level.is_some() {
+        tracing::info!("Comm logging initialized: mixed into kestrel.log");
     }
 
     Ok((guard, comm_guard))
@@ -133,7 +163,7 @@ pub fn setup_file_logging(
 
 /// Backward-compatible wrapper: setup file logging without comm-log.
 pub fn setup_file_logging_simple(log_dir: &str, level: &str, log_format: &str) -> Result<LogGuard> {
-    let (guard, _) = setup_file_logging(log_dir, level, log_format, None)?;
+    let (guard, _) = setup_file_logging(log_dir, level, log_format, None, false)?;
     Ok(guard)
 }
 
@@ -225,7 +255,7 @@ mod tests {
 
         // Test directory creation — ignore the global subscriber conflict
         // (set_global_default can only be called once per process)
-        let result = setup_file_logging(log_dir_str, "info", "text", None);
+        let result = setup_file_logging(log_dir_str, "info", "text", None, false);
         assert!(log_dir.exists(), "log directory should be created");
 
         // The guard may fail on re-install, but directory must exist regardless
@@ -241,7 +271,7 @@ mod tests {
         let log_dir_str = log_dir.to_str().unwrap();
 
         // The function creates the directory before attempting to set subscriber
-        let _ = setup_file_logging(log_dir_str, "info", "text", None);
+        let _ = setup_file_logging(log_dir_str, "info", "text", None, false);
         assert!(
             log_dir.exists(),
             "directory must be created even if subscriber fails"
@@ -303,7 +333,7 @@ mod tests {
         let log_dir_str = log_dir.to_str().unwrap();
 
         // "xml" is not a valid format — should fall back to "text"
-        let result = setup_file_logging(log_dir_str, "info", "xml", None);
+        let result = setup_file_logging(log_dir_str, "info", "xml", None, false);
         assert!(log_dir.exists());
         if let Ok((_guard, _comm_guard)) = result {
             // Subscriber may conflict with other tests; that's OK

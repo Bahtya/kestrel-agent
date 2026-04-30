@@ -300,7 +300,7 @@ impl AgentRunner {
             let results = self.execute_tools(&tool_calls).await;
             tool_calls_made += tool_calls.len();
 
-            for (tc, (_, duration_ms)) in tool_calls.iter().zip(&results) {
+            for (tc, (_, duration_ms, success)) in tool_calls.iter().zip(&results) {
                 debug!(
                     tool_name = %tc.function.name,
                     duration_ms = *duration_ms,
@@ -312,14 +312,14 @@ impl AgentRunner {
                         trace_id = %tid,
                         tool = %tc.function.name,
                         duration_ms = *duration_ms,
-                        success = true,
+                        success = *success,
                         "TOOL END"
                     );
                 }
             }
 
             // Add tool results to conversation
-            for (tool_call, (result, _)) in tool_calls.iter().zip(results) {
+            for (tool_call, (result, _, _)) in tool_calls.iter().zip(results) {
                 conversation.push(Message {
                     role: MessageRole::Tool,
                     content: result,
@@ -578,7 +578,7 @@ impl AgentRunner {
     /// Read-only tools run concurrently as before. Mutating tools each
     /// acquire a shared mutex before executing, guaranteeing they run
     /// one at a time even when the LLM issues several in a single turn.
-    async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<(String, u64)> {
+    async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<(String, u64, bool)> {
         let mut handles = Vec::new();
 
         for tc in tool_calls {
@@ -600,6 +600,7 @@ impl AgentRunner {
                                 tool_name, e, args_str
                             ),
                             start.elapsed().as_millis() as u64,
+                            false,
                         );
                     }
                 };
@@ -616,7 +617,9 @@ impl AgentRunner {
                         Err(e) => format!("Tool error: {}", e),
                     }
                 };
-                (result, start.elapsed().as_millis() as u64)
+                let ok = !result.starts_with("Tool error:")
+                    && !result.starts_with("Tool argument error");
+                (result, start.elapsed().as_millis() as u64, ok)
             });
 
             handles.push(handle);
@@ -635,7 +638,7 @@ impl AgentRunner {
         }
 
         let total = handles.len();
-        let mut results: Vec<(String, u64)> = Vec::with_capacity(total);
+        let mut results: Vec<(String, u64, bool)> = Vec::with_capacity(total);
         let overall_start = std::time::Instant::now();
         let heartbeat_interval = std::time::Duration::from_secs(10);
 
@@ -646,14 +649,14 @@ impl AgentRunner {
                 match tokio::time::timeout(heartbeat_interval, &mut h).await {
                     Ok(join_res) => {
                         match join_res {
-                            Ok((result, duration)) => {
+                            Ok((result, duration, ok)) => {
                                 self.emit_event(AgentEvent::ToolResult {
                                     session_key: self.session_key.clone().unwrap_or_default(),
                                     tool_name: tool_calls[i].function.name.clone(),
                                     duration_ms: duration,
                                     trace_id: self.trace_id.clone(),
                                 });
-                                results.push((result, duration));
+                                results.push((result, duration, ok));
                             }
                             Err(e) => {
                                 self.emit_event(AgentEvent::ToolResult {
@@ -662,7 +665,7 @@ impl AgentRunner {
                                     duration_ms: 0,
                                     trace_id: self.trace_id.clone(),
                                 });
-                                results.push((format!("Tool execution failed: {}", e), 0));
+                                results.push((format!("Tool execution failed: {}", e), 0, false));
                             }
                         }
                         break;

@@ -383,7 +383,10 @@ fn configure_websocket(term: &Term, config: &mut Config) -> Result<()> {
 
 // ── Provider field helpers ───────────────────────────────────
 
-fn get_provider_entry_mut<'a>(config: &'a mut Config, provider: &str) -> Option<&'a mut ProviderEntry> {
+fn get_provider_entry_mut<'a>(
+    config: &'a mut Config,
+    provider: &str,
+) -> Option<&'a mut ProviderEntry> {
     match provider {
         "anthropic" => config.providers.anthropic.as_mut(),
         "openai" => config.providers.openai.as_mut(),

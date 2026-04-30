@@ -142,6 +142,7 @@ fn make_request(stream: bool) -> kestrel_providers::CompletionRequest {
         max_tokens: Some(100),
         temperature: Some(0.7),
         stream,
+        reasoning_effort: None,
     }
 }
 

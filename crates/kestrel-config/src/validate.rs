@@ -920,6 +920,19 @@ fn validate_agent(agent: &AgentDefaults, report: &mut ValidationReport) {
             report.warning("agent.workspace", "Workspace path is set but empty");
         }
     }
+
+    if let Some(ref effort) = agent.reasoning_effort {
+        let e = effort.to_lowercase();
+        if !e.is_empty() && e != "disabled" && e != "none" {
+            report.error(
+                "agent.reasoning_effort",
+                format!(
+                    "reasoning_effort must be \"disabled\", \"none\", or empty — got \"{}\"",
+                    effort
+                ),
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

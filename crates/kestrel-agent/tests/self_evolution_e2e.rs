@@ -120,6 +120,7 @@ impl LlmProvider for MockProvider {
             .cloned()
             .unwrap_or(CompletionResponse {
                 content: Some("default mock response".to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: None,
                 finish_reason: None,
@@ -142,6 +143,7 @@ impl LlmProvider for MockProvider {
         });
         let chunk = CompletionChunk {
             delta: resp.content,
+            reasoning_content: None,
             tool_call_deltas,
             usage: resp.usage,
             done: true,
@@ -365,6 +367,7 @@ async fn test_self_evolution_full_loop() {
     let mock_provider = Arc::new(MockProvider::new(vec![
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_e2e_1".to_string(),
                 call_type: "function".to_string(),
@@ -378,6 +381,7 @@ async fn test_self_evolution_full_loop() {
         },
         CompletionResponse {
             content: Some("Deployed to k8s successfully.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(50),
@@ -388,6 +392,7 @@ async fn test_self_evolution_full_loop() {
         },
         CompletionResponse {
             content: Some("Task completed with one tool call.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -631,12 +636,14 @@ async fn test_self_evolution_empty_reflection_skips_task_reflection_event() {
     let mock_provider = Arc::new(MockProvider::new(vec![
         CompletionResponse {
             content: Some("All set.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
         },
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -708,6 +715,7 @@ async fn test_self_evolution_no_memory() {
 
     let mock_provider = Arc::new(MockProvider::new(vec![CompletionResponse {
         content: Some("Deployed.".to_string()),
+        reasoning_content: None,
         tool_calls: None,
         usage: None,
         finish_reason: Some("stop".to_string()),
@@ -903,6 +911,7 @@ async fn test_self_evolution_multi_turn() {
         // Turn 1: main agent response
         CompletionResponse {
             content: Some("Rust is a systems programming language.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -910,6 +919,7 @@ async fn test_self_evolution_multi_turn() {
         // Turn 1: post-task reflection
         CompletionResponse {
             content: Some("Clear and concise answer.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -917,6 +927,7 @@ async fn test_self_evolution_multi_turn() {
         // Turn 2: main agent response
         CompletionResponse {
             content: Some("Cargo is Rust's build system.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -924,6 +935,7 @@ async fn test_self_evolution_multi_turn() {
         // Turn 2: post-task reflection
         CompletionResponse {
             content: Some("Good factual response.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -1005,6 +1017,7 @@ async fn test_self_evolution_prompt_assembler_custom_separator() {
 
     let mock_provider = Arc::new(MockProvider::new(vec![CompletionResponse {
         content: Some("Done.".to_string()),
+        reasoning_content: None,
         tool_calls: None,
         usage: None,
         finish_reason: Some("stop".to_string()),
@@ -1077,6 +1090,7 @@ async fn test_self_evolution_no_skill_match() {
 
     let mock_provider = Arc::new(MockProvider::new(vec![CompletionResponse {
         content: Some("The weather is sunny.".to_string()),
+        reasoning_content: None,
         tool_calls: None,
         usage: None,
         finish_reason: Some("stop".to_string()),
@@ -1158,6 +1172,7 @@ async fn test_task_reflection_success_false_on_max_iterations() {
     let mock_provider = Arc::new(MockProvider::new(vec![
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_loop".to_string(),
                 call_type: "function".to_string(),
@@ -1171,6 +1186,7 @@ async fn test_task_reflection_success_false_on_max_iterations() {
         },
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_loop2".to_string(),
                 call_type: "function".to_string(),
@@ -1185,6 +1201,7 @@ async fn test_task_reflection_success_false_on_max_iterations() {
         // Reflection call
         CompletionResponse {
             content: Some("Hit iteration limit.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
@@ -1297,6 +1314,7 @@ async fn test_task_reflection_success_false_on_provider_error() {
             // Second call (reflection): succeed
             Ok(CompletionResponse {
                 content: Some("Agent error occurred.".to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: None,
                 finish_reason: Some("stop".to_string()),

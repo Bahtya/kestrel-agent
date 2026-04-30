@@ -291,6 +291,7 @@ mod tests {
         ) -> anyhow::Result<CompletionResponse> {
             Ok(CompletionResponse {
                 content: Some("mock".to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: None,
                 finish_reason: None,
@@ -300,6 +301,7 @@ mod tests {
             let response = self.complete(request).await?;
             let chunk = CompletionChunk {
                 delta: response.content,
+                reasoning_content: None,
                 tool_call_deltas: None,
                 usage: None,
                 done: true,

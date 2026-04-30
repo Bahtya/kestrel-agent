@@ -84,6 +84,7 @@ impl HealthCheck for ProviderHealthCheck {
                     max_tokens: Some(1),
                     temperature: Some(0.0),
                     stream: false,
+                    reasoning_effort: None,
                 };
 
                 match tokio::time::timeout(self.timeout, provider.complete(request)).await {
@@ -444,6 +445,7 @@ mod tests {
                 *self.last_model.lock() = Some(request.model);
                 Ok(kestrel_providers::CompletionResponse {
                     content: Some("ok".to_string()),
+                    reasoning_content: None,
                     tool_calls: None,
                     usage: None,
                     finish_reason: None,
@@ -457,6 +459,7 @@ mod tests {
                 let resp = self.complete(request).await?;
                 let chunk = kestrel_providers::base::CompletionChunk {
                     delta: resp.content,
+                    reasoning_content: None,
                     tool_call_deltas: None,
                     usage: None,
                     done: true,

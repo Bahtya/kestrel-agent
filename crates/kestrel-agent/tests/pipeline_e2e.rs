@@ -54,6 +54,7 @@ impl LlmProvider for MockProvider {
             .cloned()
             .unwrap_or(CompletionResponse {
                 content: Some("default mock response".to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: None,
                 finish_reason: None,
@@ -79,6 +80,7 @@ impl LlmProvider for MockProvider {
 
         let chunk = CompletionChunk {
             delta: resp.content,
+            reasoning_content: None,
             tool_call_deltas,
             usage: resp.usage,
             done: true,
@@ -153,6 +155,7 @@ async fn test_pipeline_simple_response() {
     let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
     let providers = make_providers(vec![CompletionResponse {
         content: Some("Hello from the agent!".to_string()),
+        reasoning_content: None,
         tool_calls: None,
         usage: Some(Usage {
             prompt_tokens: Some(10),
@@ -209,6 +212,7 @@ async fn test_pipeline_with_tool_call() {
     let providers = make_providers(vec![
         CompletionResponse {
             content: Some(String::new()),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".to_string(),
                 call_type: "function".to_string(),
@@ -222,6 +226,7 @@ async fn test_pipeline_with_tool_call() {
         },
         CompletionResponse {
             content: Some("Found several Rust files in the workspace.".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(30),
@@ -269,6 +274,7 @@ async fn test_pipeline_events_emitted() {
     let session_manager = SessionManager::new(tmp.path().to_path_buf()).unwrap();
     let providers = make_providers(vec![CompletionResponse {
         content: Some("Done!".to_string()),
+        reasoning_content: None,
         tool_calls: None,
         usage: None,
         finish_reason: Some("stop".to_string()),
@@ -321,12 +327,14 @@ async fn test_pipeline_multiple_messages() {
     let providers = make_providers(vec![
         CompletionResponse {
             content: Some("First response".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),
         },
         CompletionResponse {
             content: Some("Second response".to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".to_string()),

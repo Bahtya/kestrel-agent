@@ -576,6 +576,11 @@ pub struct AgentDefaults {
     /// timeout reply to the user instead of silently dropping the message.
     #[serde(default = "default_message_timeout")]
     pub message_timeout: u64,
+
+    /// Reasoning effort level. Set to "disabled" or "none" to suppress
+    /// thinking/reasoning output from models like DeepSeek.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for AgentDefaults {
@@ -594,6 +599,7 @@ impl Default for AgentDefaults {
             first_byte_timeout: default_first_byte_timeout(),
             idle_timeout: default_idle_timeout(),
             message_timeout: default_message_timeout(),
+            reasoning_effort: None,
         }
     }
 }

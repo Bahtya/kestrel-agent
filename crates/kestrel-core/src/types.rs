@@ -209,6 +209,8 @@ pub struct FunctionDefinition {
 pub struct RunResult {
     /// Final text content produced by the agent.
     pub content: String,
+    /// Reasoning / thinking content (e.g. DeepSeek `reasoning_content`).
+    pub reasoning_content: Option<String>,
     /// Token usage accumulated during the run.
     pub usage: Usage,
     /// Number of tool calls made during the run.
@@ -475,6 +477,7 @@ mod tests {
     fn test_run_result_construction() {
         let rr = RunResult {
             content: "done".to_string(),
+            reasoning_content: None,
             usage: Usage {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(20),

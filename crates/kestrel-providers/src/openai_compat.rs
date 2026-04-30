@@ -155,6 +155,17 @@ impl OpenAiCompatProvider {
             body["tools"] = json!(tool_defs);
         }
 
+        // Disable thinking/reasoning mode when reasoning_effort is "disabled" or "none".
+        // DeepSeek uses "thinking": {"type": "disabled"}.
+        // OpenAI-compatible APIs use "reasoning": {"effort": "none"}.
+        // We emit the DeepSeek form; providers that follow the OpenAI reasoning
+        // spec will ignore unknown top-level keys.
+        if let Some(ref effort) = request.reasoning_effort {
+            if effort == "disabled" || effort == "none" {
+                body["thinking"] = json!({"type": "disabled"});
+            }
+        }
+
         body
     }
 
@@ -228,6 +239,7 @@ impl OpenAiCompatProvider {
                         let _ = tx
                             .send(Ok(CompletionChunk {
                                 delta: None,
+                                reasoning_content: None,
                                 tool_call_deltas,
                                 usage: None,
                                 done: true,
@@ -247,6 +259,14 @@ impl OpenAiCompatProvider {
                         .and_then(|c| c.get(0))
                         .and_then(|c| c.get("delta"))
                         .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str());
+
+                    // Extract reasoning content delta (DeepSeek thinking mode)
+                    let reasoning_text = chunk_data
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("reasoning_content"))
                         .and_then(|c| c.as_str());
 
                     // Extract tool call deltas
@@ -295,7 +315,11 @@ impl OpenAiCompatProvider {
                         total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()),
                     });
 
-                    if delta_text.is_some() || finish_reason.is_some() || usage.is_some() {
+                    if delta_text.is_some()
+                        || reasoning_text.is_some()
+                        || finish_reason.is_some()
+                        || usage.is_some()
+                    {
                         let tool_call_deltas = if finish_reason.is_some() {
                             build_openai_tool_call_deltas(&tc_acc)
                         } else {
@@ -307,6 +331,7 @@ impl OpenAiCompatProvider {
                         let _ = tx
                             .send(Ok(CompletionChunk {
                                 delta: delta_text.map(String::from),
+                                reasoning_content: reasoning_text.map(String::from),
                                 tool_call_deltas,
                                 usage,
                                 done: finish_reason == Some("stop")
@@ -368,6 +393,7 @@ struct OpenAiChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAiMessage {
     content: Option<String>,
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
@@ -461,6 +487,7 @@ impl LlmProvider for OpenAiCompatProvider {
 
                 Ok(CompletionResponse {
                     content: choice.message.content,
+                    reasoning_content: choice.message.reasoning_content,
                     tool_calls,
                     usage: api_resp.usage.map(|u| Usage {
                         prompt_tokens: u.prompt_tokens,
@@ -619,6 +646,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.7),
             stream: false,
+            reasoning_effort: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -656,6 +684,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stream: false,
+            reasoning_effort: None,
         };
 
         let body = provider.build_request_body(&request);

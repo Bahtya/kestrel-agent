@@ -1366,6 +1366,7 @@ async fn post_task_reflect(task: ReflectionTask) {
         max_tokens: Some(100),
         temperature: Some(0.3),
         stream: false,
+        reasoning_effort: None,
     };
 
     let mut last_error = String::new();

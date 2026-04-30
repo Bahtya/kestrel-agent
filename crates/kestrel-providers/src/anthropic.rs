@@ -229,6 +229,7 @@ impl AnthropicProvider {
                         let _ = tx
                             .send(Ok(CompletionChunk {
                                 delta: None,
+                                reasoning_content: None,
                                 tool_call_deltas,
                                 usage: None,
                                 done: true,
@@ -255,6 +256,7 @@ impl AnthropicProvider {
                                 let _ = tx
                                     .send(Ok(CompletionChunk {
                                         delta: Some(delta_text.to_string()),
+                                        reasoning_content: None,
                                         tool_call_deltas: None,
                                         usage: None,
                                         done: false,
@@ -308,6 +310,7 @@ impl AnthropicProvider {
                             let _ = tx
                                 .send(Ok(CompletionChunk {
                                     delta: None,
+                                    reasoning_content: None,
                                     tool_call_deltas,
                                     usage,
                                     done: false,
@@ -469,6 +472,7 @@ impl LlmProvider for AnthropicProvider {
 
                 Ok(CompletionResponse {
                     content,
+                    reasoning_content: None,
                     tool_calls,
                     usage,
                     finish_reason: stop_reason,
@@ -727,6 +731,7 @@ mod tests {
             max_tokens: Some(2048),
             temperature: Some(0.5),
             stream: false,
+            reasoning_effort: None,
         };
 
         let body = provider.build_request_body(&request);

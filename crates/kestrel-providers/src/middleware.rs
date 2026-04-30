@@ -323,6 +323,7 @@ mod tests {
             }
             Ok(CompletionResponse {
                 content: Some(format!("response-{}", n)),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: Some(Usage {
                     prompt_tokens: Some(10),
@@ -337,6 +338,7 @@ mod tests {
             let resp = self.complete(req).await?;
             let chunk = CompletionChunk {
                 delta: resp.content,
+                reasoning_content: None,
                 tool_call_deltas: None,
                 usage: resp.usage,
                 done: true,
@@ -386,6 +388,7 @@ mod tests {
             }
             Ok(CompletionResponse {
                 content: Some(format!("response-{}", n)),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: Some(Usage {
                     prompt_tokens: Some(10),
@@ -400,6 +403,7 @@ mod tests {
             let resp = self.complete(req).await?;
             let chunk = CompletionChunk {
                 delta: resp.content,
+                reasoning_content: None,
                 tool_call_deltas: None,
                 usage: resp.usage,
                 done: true,
@@ -468,6 +472,7 @@ mod tests {
             max_tokens: Some(100),
             temperature: Some(0.7),
             stream: false,
+            reasoning_effort: None,
         }
     }
 

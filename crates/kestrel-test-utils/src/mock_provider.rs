@@ -56,6 +56,7 @@ impl MockProvider {
     pub fn simple(text: &str) -> Self {
         Self::from_response(CompletionResponse {
             content: Some(text.to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(10),
@@ -76,6 +77,7 @@ impl MockProvider {
                     .into_iter()
                     .map(|text| CompletionResponse {
                         content: Some(text.to_string()),
+                        reasoning_content: None,
                         tool_calls: None,
                         usage: Some(Usage {
                             prompt_tokens: Some(10),
@@ -202,6 +204,7 @@ impl LlmProvider for MockProvider {
             .cloned()
             .unwrap_or(CompletionResponse {
                 content: Some("default mock response".to_string()),
+                reasoning_content: None,
                 tool_calls: None,
                 usage: None,
                 finish_reason: None,
@@ -213,6 +216,7 @@ impl LlmProvider for MockProvider {
         let resp = self.complete(request).await?;
         let chunk = CompletionChunk {
             delta: resp.content,
+            reasoning_content: None,
             tool_call_deltas: None,
             usage: resp.usage,
             done: true,
@@ -251,6 +255,7 @@ impl MockProviderBuilder {
     pub fn text(self, text: &str) -> Self {
         self.response(CompletionResponse {
             content: Some(text.to_string()),
+            reasoning_content: None,
             tool_calls: None,
             usage: Some(Usage {
                 prompt_tokens: Some(10),

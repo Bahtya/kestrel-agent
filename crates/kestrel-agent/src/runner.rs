@@ -186,6 +186,7 @@ impl AgentRunner {
         let tool_definitions = self.tools.get_definitions();
         let mut total_usage = Usage::default();
         let mut tool_calls_made = 0;
+        let mut reasoning_content: Option<String> = None;
 
         let use_streaming = self.stream_tx.is_some();
 
@@ -197,6 +198,7 @@ impl AgentRunner {
                     self.emit_stream_chunk(String::new(), true);
                     return Ok(RunResult {
                         content: "Agent run was cancelled.".to_string(),
+                        reasoning_content: None,
                         usage: total_usage,
                         tool_calls_made,
                         iterations_used: iteration,
@@ -218,16 +220,21 @@ impl AgentRunner {
                 max_tokens: Some(max_tokens),
                 temperature: Some(temperature),
                 stream: use_streaming,
+                reasoning_effort: self.config.agent.reasoning_effort.clone(),
             };
 
             // Use streaming or non-streaming based on configuration
             let response: kestrel_providers::CompletionResponse = if use_streaming {
-                self.complete_streaming(&provider, request).await?.into()
+                let sr = self.complete_streaming(&provider, request).await?;
+                reasoning_content = sr.reasoning_content.clone();
+                sr.into()
             } else {
-                provider
+                let resp = provider
                     .complete(request)
                     .await
-                    .with_context(|| "LLM completion failed")?
+                    .with_context(|| "LLM completion failed")?;
+                reasoning_content = resp.reasoning_content.clone();
+                resp
             };
 
             // Track usage
@@ -252,6 +259,7 @@ impl AgentRunner {
                     );
                     return Ok(RunResult {
                         content,
+                        reasoning_content,
                         usage: total_usage,
                         tool_calls_made,
                         iterations_used: iteration + 1,
@@ -307,6 +315,7 @@ impl AgentRunner {
         warn!("Max iterations ({}) reached", max_iterations);
         Ok(RunResult {
             content: "I've reached the maximum number of iterations. Please continue the conversation if needed.".to_string(),
+            reasoning_content,
             usage: total_usage,
             tool_calls_made,
             iterations_used: max_iterations,
@@ -347,6 +356,7 @@ impl AgentRunner {
 
             let mut first_byte_logged = false;
             let mut full_content = String::new();
+            let mut full_reasoning = String::new();
             let mut usage: Option<Usage> = None;
             let mut tool_calls_map: std::collections::HashMap<usize, (String, String, String)> =
                 std::collections::HashMap::new();
@@ -378,7 +388,13 @@ impl AgentRunner {
                 let chunk_result = match chunk_result {
                     Ok(Some(r)) => r,
                     Ok(None) => {
-                        break 'stream_retry Ok((full_content, usage, tool_calls_map, send_start));
+                        break 'stream_retry Ok((
+                            full_content,
+                            full_reasoning,
+                            usage,
+                            tool_calls_map,
+                            send_start,
+                        ));
                     }
                     Err(_) => {
                         let err = anyhow::anyhow!(
@@ -440,6 +456,11 @@ impl AgentRunner {
                     self.emit_stream_chunk(delta.clone(), false);
                 }
 
+                // Accumulate reasoning content (no emit to channels — passthrough only)
+                if let Some(rc) = &chunk.reasoning_content {
+                    full_reasoning.push_str(rc);
+                }
+
                 // Accumulate tool call deltas and announce new tool names in real-time
                 if let Some(deltas) = &chunk.tool_call_deltas {
                     for delta in deltas {
@@ -472,12 +493,18 @@ impl AgentRunner {
                 }
 
                 if chunk.done {
-                    break 'stream_retry Ok((full_content, usage, tool_calls_map, send_start));
+                    break 'stream_retry Ok((
+                        full_content,
+                        full_reasoning,
+                        usage,
+                        tool_calls_map,
+                        send_start,
+                    ));
                 }
             }
         };
 
-        let (full_content, usage, tool_calls_map, send_start) = result?;
+        let (full_content, full_reasoning, usage, tool_calls_map, send_start) = result?;
 
         debug!(
             total_ms = send_start.elapsed().as_millis() as u64,
@@ -512,6 +539,11 @@ impl AgentRunner {
                 None
             } else {
                 Some(full_content)
+            },
+            reasoning_content: if full_reasoning.is_empty() {
+                None
+            } else {
+                Some(full_reasoning)
             },
             tool_calls: if tool_calls.is_empty() {
                 None

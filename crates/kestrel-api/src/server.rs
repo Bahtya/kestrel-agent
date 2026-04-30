@@ -281,6 +281,8 @@ struct Choice {
 struct ResponseMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -589,6 +591,7 @@ async fn non_stream_completion(
                     message: ResponseMessage {
                         role: "assistant".to_string(),
                         content: result.content,
+                        reasoning_content: result.reasoning_content,
                     },
                     finish_reason: "stop".to_string(),
                 }],
@@ -657,12 +660,13 @@ async fn stream_completion(
     {
         Ok(result) => {
             let content = result.content;
+            let reasoning = result.reasoning_content;
             let usage = result.usage;
             let id = completion_id;
             let mdl = model;
             let cr = created;
 
-            let events = futures::stream::iter(vec![
+            let mut chunks = vec![
                 // Chunk 1: role announcement
                 Ok(Event::default().data(
                     serde_json::json!({
@@ -678,7 +682,28 @@ async fn stream_completion(
                     })
                     .to_string(),
                 )),
-                // Chunk 2: content
+            ];
+
+            // Chunk 2 (optional): reasoning content
+            if let Some(ref rc) = reasoning {
+                chunks.push(Ok(Event::default().data(
+                    serde_json::json!({
+                        "id": id,
+                        "object": "chat.completion.chunk",
+                        "created": cr,
+                        "model": mdl,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"reasoning_content": rc},
+                            "finish_reason": null
+                        }]
+                    })
+                    .to_string(),
+                )));
+            }
+
+            chunks.push(
+                // Chunk 3: content
                 Ok(Event::default().data(
                     serde_json::json!({
                         "id": id,
@@ -694,7 +719,10 @@ async fn stream_completion(
                     })
                     .to_string(),
                 )),
-                // Chunk 3: stop with usage
+            );
+
+            chunks.push(
+                // Chunk 4: stop with usage
                 Ok(Event::default().data(
                     serde_json::json!({
                         "id": id,
@@ -714,7 +742,9 @@ async fn stream_completion(
                     })
                     .to_string(),
                 )),
-            ]);
+            );
+
+            let events = futures::stream::iter(chunks);
 
             // On graceful shutdown, emit [DONE] then terminate.
             // take_until truncates when the cancel token fires; chain appends

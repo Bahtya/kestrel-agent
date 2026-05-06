@@ -2956,10 +2956,7 @@ token = "${MISSING_BBB}"
         });
         let report = validate(&config);
         assert!(!report.is_valid());
-        assert!(report
-            .errors()
-            .iter()
-            .any(|e| e.path == "channels.weixin"));
+        assert!(report.errors().iter().any(|e| e.path == "channels.weixin"));
     }
 
     #[test]

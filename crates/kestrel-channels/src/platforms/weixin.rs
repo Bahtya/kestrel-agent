@@ -205,13 +205,19 @@ struct GetConfigResponse {
 
 fn random_wechat_uin() -> String {
     let value = rand::random::<u32>();
-    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, value.to_string())
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        value.to_string(),
+    )
 }
 
 fn api_headers(token: Option<&str>, body: &str) -> HashMap<String, String> {
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
-    headers.insert("AuthorizationType".to_string(), "ilink_bot_token".to_string());
+    headers.insert(
+        "AuthorizationType".to_string(),
+        "ilink_bot_token".to_string(),
+    );
     headers.insert("Content-Length".to_string(), body.len().to_string());
     headers.insert("X-WECHAT-UIN".to_string(), random_wechat_uin());
     headers.insert("iLink-App-Id".to_string(), ILINK_APP_ID.to_string());
@@ -229,7 +235,9 @@ fn is_stale_session_ret(ret: Option<i64>, errcode: Option<i64>, errmsg: Option<&
     if ret != Some(RATE_LIMIT_ERRCODE) && errcode != Some(RATE_LIMIT_ERRCODE) {
         return false;
     }
-    errmsg.map(|s| s.to_lowercase() == "unknown error").unwrap_or(false)
+    errmsg
+        .map(|s| s.to_lowercase() == "unknown error")
+        .unwrap_or(false)
 }
 
 fn extract_text(item_list: &[ILinkItem]) -> String {
@@ -243,7 +251,7 @@ fn extract_text(item_list: &[ILinkItem]) -> String {
     String::new()
 }
 
-fn guess_chat_type(message: &ILinkMsg, account_id: &str) -> (&str, String) {
+fn guess_chat_type<'a>(message: &'a ILinkMsg, account_id: &'a str) -> (&'a str, String) {
     let room_id = message
         .room_id
         .as_deref()
@@ -348,9 +356,10 @@ impl TypingTicketCache {
     }
 
     fn set(&self, user_id: &str, ticket: &str) {
-        self.cache
-            .lock()
-            .insert(user_id.to_string(), (ticket.to_string(), std::time::Instant::now()));
+        self.cache.lock().insert(
+            user_id.to_string(),
+            (ticket.to_string(), std::time::Instant::now()),
+        );
     }
 }
 
@@ -374,7 +383,10 @@ impl ContextTokenStore {
     }
 
     fn get(&self, account_id: &str, user_id: &str) -> Option<String> {
-        self.cache.lock().get(&self._key(account_id, user_id)).cloned()
+        self.cache
+            .lock()
+            .get(&self._key(account_id, user_id))
+            .cloned()
     }
 
     fn set(&self, account_id: &str, user_id: &str, token: &str) {
@@ -490,9 +502,7 @@ impl WeixinChannel {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "disabled".to_string());
 
-        let allow_from = config
-            .map(|c| c.allowed_users.clone())
-            .unwrap_or_default();
+        let allow_from = config.map(|c| c.allowed_users.clone()).unwrap_or_default();
 
         let group_allow_from = config
             .map(|c| c.group_allowed_users.clone())
@@ -555,7 +565,7 @@ impl WeixinChannel {
         req.send().await.context(format!("POST {}", endpoint))
     }
 
-    async fn get_updates(&self, sync_buf: &str, timeout_ms: u64) -> Result<GetUpdatesResponse> {
+    async fn get_updates(&self, sync_buf: &str, _timeout_ms: u64) -> Result<GetUpdatesResponse> {
         let payload = GetUpdatesPayload {
             get_updates_buf: sync_buf.to_string(),
             base_info: base_info(),
@@ -566,8 +576,9 @@ impl WeixinChannel {
             .context("getUpdates request failed")?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("getUpdates HTTP {}: {}", resp.status(), &text[..text.len().min(200)]);
+            anyhow::bail!("getUpdates HTTP {}: {}", status, &text[..text.len().min(200)]);
         }
 
         resp.json().await.context("parse getUpdates response")
@@ -603,10 +614,11 @@ impl WeixinChannel {
             .context("sendMessage request failed")?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!(
                 "sendMessage HTTP {}: {}",
-                resp.status(),
+                status,
                 &text[..text.len().min(200)]
             );
         }
@@ -627,10 +639,11 @@ impl WeixinChannel {
             .context("sendTyping request failed")?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!(
                 "sendTyping HTTP {}: {}",
-                resp.status(),
+                status,
                 &text[..text.len().min(200)]
             );
         }
@@ -653,10 +666,11 @@ impl WeixinChannel {
             .context("getConfig request failed")?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!(
-                "getConfig HTTP {}: {}",
-                resp.status(),
+                "getUpdates HTTP {}: {}",
+                status,
                 &text[..text.len().min(200)]
             );
         }
@@ -707,7 +721,10 @@ impl WeixinChannel {
         let mut timeout_ms = LONG_POLL_TIMEOUT_MS;
         let mut consecutive_failures: u32 = 0;
 
-        info!("[weixin] Polling task started account={}", safe_id(Some(&account_id), 8));
+        info!(
+            "[weixin] Polling task started account={}",
+            safe_id(Some(&account_id), 8)
+        );
 
         while running.load(Ordering::Relaxed) {
             let sync_buf_val = sync_buf.lock().clone();
@@ -726,7 +743,11 @@ impl WeixinChannel {
                     if ret != 0 || errcode != 0 {
                         if ret == SESSION_EXPIRED_ERRCODE
                             || errcode == SESSION_EXPIRED_ERRCODE
-                            || is_stale_session_ret(Some(ret), Some(errcode), response.errmsg.as_deref())
+                            || is_stale_session_ret(
+                                Some(ret),
+                                Some(errcode),
+                                response.errmsg.as_deref(),
+                            )
                         {
                             error!("[weixin] Session expired; pausing for 10 minutes");
                             tokio::time::sleep(std::time::Duration::from_secs(600)).await;
@@ -849,7 +870,10 @@ impl WeixinChannel {
                 &text[..text.len().min(200)]
             );
             if dedup.is_duplicate(&content_key) {
-                debug!("[weixin] Content-dedup: skipping duplicate from {}", sender_id);
+                debug!(
+                    "[weixin] Content-dedup: skipping duplicate from {}",
+                    sender_id
+                );
                 return Ok(());
             }
         }
@@ -911,7 +935,10 @@ impl WeixinChannel {
             timestamp: Local::now(),
         };
 
-        handler.send(inbound).await.context("handler channel closed")?;
+        handler
+            .send(inbound)
+            .await
+            .context("handler channel closed")?;
         Ok(())
     }
 }
@@ -940,7 +967,9 @@ impl BaseChannel for WeixinChannel {
         let token = match self.token.as_deref() {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => {
-                warn!("[weixin] Token not configured (set WEIXIN_TOKEN or channels.weixin.bot_token)");
+                warn!(
+                    "[weixin] Token not configured (set WEIXIN_TOKEN or channels.weixin.bot_token)"
+                );
                 return Ok(false);
             }
         };
@@ -948,7 +977,9 @@ impl BaseChannel for WeixinChannel {
         let account_id = match self.account_id.as_deref() {
             Some(a) if !a.is_empty() => a.to_string(),
             _ => {
-                warn!("[weixin] Account ID not configured (set WEIXIN_ACCOUNT_ID or channels.weixin.account_id)");
+                warn!(
+                    "[weixin] Account ID not configured (set WEIXIN_ACCOUNT_ID or channels.weixin.account_id)"
+                );
                 return Ok(false);
             }
         };
@@ -1037,14 +1068,21 @@ impl BaseChannel for WeixinChannel {
 
         for chunk in chunks {
             let client_id = format!("kestrel-weixin-{}", uuid::Uuid::new_v4());
-            match self.send_message_api(chat_id, &chunk, context_token.as_deref(), &client_id).await {
+            match self
+                .send_message_api(chat_id, &chunk, context_token.as_deref(), &client_id)
+                .await
+            {
                 Ok(resp) => {
                     let ret = resp.ret.unwrap_or(0);
                     let errcode = resp.errcode.unwrap_or(0);
                     if ret != 0 || errcode != 0 {
                         let is_session_expired = ret == SESSION_EXPIRED_ERRCODE
                             || errcode == SESSION_EXPIRED_ERRCODE
-                            || is_stale_session_ret(Some(ret), Some(errcode), resp.errmsg.as_deref());
+                            || is_stale_session_ret(
+                                Some(ret),
+                                Some(errcode),
+                                resp.errmsg.as_deref(),
+                            );
 
                         if is_session_expired && context_token.is_some() {
                             // Retry without context_token once.
@@ -1052,7 +1090,10 @@ impl BaseChannel for WeixinChannel {
                                 "[weixin] session expired for {}; retrying without context_token",
                                 safe_id(Some(chat_id), 8)
                             );
-                            match self.send_message_api(chat_id, &chunk, None, &client_id).await {
+                            match self
+                                .send_message_api(chat_id, &chunk, None, &client_id)
+                                .await
+                            {
                                 Ok(retry_resp) => {
                                     let rret = retry_resp.ret.unwrap_or(0);
                                     let rcode = retry_resp.errcode.unwrap_or(0);
@@ -1151,7 +1192,11 @@ impl BaseChannel for WeixinChannel {
         };
 
         if let Err(e) = self.send_typing_api(chat_id, &ticket, TYPING_START).await {
-            debug!("[weixin] typing start failed for {}: {}", safe_id(Some(chat_id), 8), e);
+            debug!(
+                "[weixin] typing start failed for {}: {}",
+                safe_id(Some(chat_id), 8),
+                e
+            );
         }
         Ok(())
     }

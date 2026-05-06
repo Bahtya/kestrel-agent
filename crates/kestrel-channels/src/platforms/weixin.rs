@@ -95,14 +95,12 @@ fn base_info() -> BaseInfo {
 struct GetUpdatesPayload {
     #[serde(rename = "get_updates_buf")]
     get_updates_buf: String,
-    #[serde(flatten)]
     base_info: BaseInfo,
 }
 
 #[derive(Debug, Serialize)]
 struct SendMessagePayload {
     msg: ILinkMessage,
-    #[serde(flatten)]
     base_info: BaseInfo,
 }
 
@@ -137,7 +135,6 @@ struct SendTypingPayload {
     ilink_user_id: String,
     typing_ticket: String,
     status: i32,
-    #[serde(flatten)]
     base_info: BaseInfo,
 }
 
@@ -146,7 +143,6 @@ struct GetConfigPayload {
     ilink_user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_token: Option<String>,
-    #[serde(flatten)]
     base_info: BaseInfo,
 }
 

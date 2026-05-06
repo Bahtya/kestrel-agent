@@ -52,7 +52,7 @@ struct FeishuResponse<T> {
 }
 
 /// Token response from `auth/v3/tenant_access_token/internal`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct TokenData {
     tenant_access_token: String,
     expire: u64,

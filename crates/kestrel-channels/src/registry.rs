@@ -196,7 +196,7 @@ mod tests {
             Box::new(platforms::telegram::TelegramChannel::new())
         });
         let names = registry.channel_names();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"custom".to_string()));
 
         let channel = registry.create_channel("custom").unwrap();

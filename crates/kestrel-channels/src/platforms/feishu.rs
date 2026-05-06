@@ -425,12 +425,19 @@ fn parse_image_content(content: Option<&str>, _chat_id: String) -> (String, Vec<
 pub struct FeishuChannel {
     app_id: String,
     app_secret: String,
+    #[allow(dead_code)]
     proxy: Option<String>,
     message_handler: Option<tokio::sync::mpsc::Sender<InboundMessage>>,
     running: Arc<AtomicBool>,
     client: reqwest::Client,
     access_token: Arc<Mutex<Option<String>>>,
     token_expires_at: Arc<Mutex<Instant>>,
+}
+
+impl Default for FeishuChannel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FeishuChannel {

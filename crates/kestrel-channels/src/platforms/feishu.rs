@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
 use kestrel_bus::events::InboundMessage;
@@ -56,13 +56,6 @@ struct FeishuResponse<T> {
 struct TokenData {
     tenant_access_token: String,
     expire: u64,
-}
-
-/// Message sent response from `im/v1/messages`.
-#[derive(Debug, Deserialize)]
-struct SendMessageData {
-    #[allow(dead_code)]
-    message_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

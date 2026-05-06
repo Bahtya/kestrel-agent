@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use hickory_resolver::config::{LookupIpStrategy, ResolverConfig};
-use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioResolver;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
@@ -33,7 +32,7 @@ impl DnsResolver {
             .unwrap_or_else(|_| {
                 let mut b = TokioResolver::builder_with_config(
                     ResolverConfig::default(),
-                    TokioConnectionProvider::default(),
+                    Default::default(),
                 );
                 b.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
                 b.build()
@@ -49,7 +48,8 @@ impl Resolve for DnsResolver {
         let inner = self.inner.clone();
         Box::pin(async move {
             let lookup = inner.lookup_ip(name.as_str()).await?;
-            let addrs: Addrs = Box::new(lookup.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+            let addrs: Addrs =
+                Box::new(lookup.iter().map(|ip| SocketAddr::new(ip, 0)));
             Ok(addrs)
         })
     }

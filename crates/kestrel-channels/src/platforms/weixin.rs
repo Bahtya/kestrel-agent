@@ -74,7 +74,7 @@ const MSG_TYPE_BOT: i32 = 2;
 const MSG_STATE_FINISH: i32 = 2;
 
 const TYPING_START: i32 = 1;
-const TYPING_STOP: i32 = 2;
+const _TYPING_STOP: i32 = 2;
 
 // ---------------------------------------------------------------------------
 // Request/response types
@@ -439,6 +439,7 @@ pub struct WeixinChannel {
     account_id: Option<String>,
     token: Option<String>,
     base_url: String,
+    #[allow(dead_code)]
     cdn_base_url: String,
     dm_policy: String,
     group_policy: String,
@@ -529,6 +530,7 @@ impl WeixinChannel {
         }
     }
 
+    #[allow(dead_code)]
     fn is_dm_allowed(&self, sender_id: &str) -> bool {
         match self.dm_policy.as_str() {
             "disabled" => false,
@@ -537,6 +539,7 @@ impl WeixinChannel {
         }
     }
 
+    #[allow(dead_code)]
     fn is_group_allowed(&self, chat_id: &str) -> bool {
         match self.group_policy.as_str() {
             "disabled" => false,
@@ -579,7 +582,11 @@ impl WeixinChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("getUpdates HTTP {}: {}", status, &text[..text.len().min(200)]);
+            anyhow::bail!(
+                "getUpdates HTTP {}: {}",
+                status,
+                &text[..text.len().min(200)]
+            );
         }
 
         resp.json().await.context("parse getUpdates response")
@@ -865,11 +872,7 @@ impl WeixinChannel {
 
         // Content-based dedup for text messages.
         if !text.is_empty() {
-            let content_key = format!(
-                "content:{}:{}",
-                sender_id,
-                &text[..text.len().min(200)]
-            );
+            let content_key = format!("content:{}:{}", sender_id, &text[..text.len().min(200)]);
             if dedup.is_duplicate(&content_key) {
                 debug!(
                     "[weixin] Content-dedup: skipping duplicate from {}",

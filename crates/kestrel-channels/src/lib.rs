@@ -21,6 +21,7 @@ pub use platforms::telegram::{
     InlineKeyboardButton, InlineKeyboardMarkup,
 };
 pub use platforms::websocket::{run_ws_stream_consumer, WebSocketChannel};
+pub use platforms::feishu::{parse_webhook, FeishuChannel, WebhookResult};
 pub use registry::ChannelRegistry;
 pub use stream_consumer::{split_message, StreamConsumer};
 

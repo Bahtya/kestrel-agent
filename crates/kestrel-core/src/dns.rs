@@ -48,8 +48,7 @@ impl Resolve for DnsResolver {
         let inner = self.inner.clone();
         Box::pin(async move {
             let lookup = inner.lookup_ip(name.as_str()).await?;
-            let addrs: Addrs =
-                Box::new(lookup.iter().map(|ip| SocketAddr::new(ip, 0)));
+            let addrs: Addrs = Box::new(lookup.iter().map(|ip| SocketAddr::new(ip, 0)));
             Ok(addrs)
         })
     }

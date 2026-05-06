@@ -195,13 +195,18 @@ fn run_wizard(io: &dyn WizardIo, config_path: &Path) -> Result<()> {
     print_step(io, 3, "Telegram Channel")?;
     configure_telegram(io, &mut config)?;
 
-    // ── Step 4: WebSocket port ───────────────────────────────────
-    print_step(io, 4, "WebSocket Port")?;
+    // ── Step 4: Feishu / Lark channel ────────────────────────────
+    print_step(io, 4, "Feishu / Lark Channel")?;
+    configure_feishu(io, &mut config, config_path)?;
+
+    // ── Step 5: WebSocket port ───────────────────────────────────
+    print_step(io, 5, "WebSocket Port")?;
     configure_websocket(io, &mut config)?;
 
     // ── Step 5: Weixin channel ───────────────────────────────────
     print_step(io, 5, "WeChat Channel")?;
     configure_weixin(io, &mut config)?;
+
 
     // ── Step 6: Validate & write ─────────────────────────────────
     print_step(io, 6, "Save Configuration")?;
@@ -298,6 +303,13 @@ fn show_config_summary(io: &dyn WizardIo, config: &Config) -> Result<()> {
 
     if let Some(ref tg) = config.channels.telegram {
         io.write_line(&format!("  Telegram:     {}", mask_token(&tg.token)))?;
+    }
+
+    if let Some(ref fs) = config.channels.feishu {
+        if fs.enabled {
+            let app_id = fs.app_id.as_deref().unwrap_or("(not set)");
+            io.write_line(&format!("  Feishu:       {}", mask_token(app_id)))?;
+        }
     }
 
     if let Some(ref ws) = config.channels.websocket {
@@ -483,6 +495,36 @@ fn configure_telegram(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
         streaming,
         proxy,
     });
+
+    Ok(())
+}
+
+fn configure_feishu(io: &dyn WizardIo, config: &mut Config, config_path: &Path) -> Result<()> {
+    let has_existing = config.channels.feishu.as_ref().map_or(false, |f| f.enabled);
+
+    let setup = if has_existing {
+        io.confirm("Reconfigure Feishu / Lark?", true)?
+    } else {
+        io.confirm("Set up Feishu / Lark?", false)?
+    };
+
+    if !setup {
+        io.write_line("  Skipped.")?;
+        return Ok(());
+    }
+
+    let domain_options = ["Feishu (飞书)", "Lark (international)"];
+    let idx = io.select("Select platform", &domain_options, 0)?;
+    let domain = if idx == 1 { "lark" } else { "feishu" };
+
+    // Persist current in-memory config so the Feishu flow can load it.
+    loader::save_config(config, config_path)?;
+
+    // Launch the QR onboarding sub-flow (loads config, adds credentials, saves).
+    commands::setup_feishu::run(domain)?;
+
+    // Reload to capture the Feishu credentials that were just persisted.
+    *config = load_existing_config(config_path)?;
 
     Ok(())
 }
@@ -999,7 +1041,12 @@ mod tests {
                 prompt_contains: "Telegram",
                 result: false,
             },
-            // Step 4: WebSocket (skip)
+            // Step 4: Feishu (skip)
+            MockAction::Confirm {
+                prompt_contains: "Feishu",
+                result: false,
+            },
+            // Step 5: WebSocket (skip)
             MockAction::Confirm {
                 prompt_contains: "WebSocket",
                 result: false,
@@ -1056,7 +1103,12 @@ mod tests {
                 prompt_contains: "Telegram",
                 result: false,
             },
-            // Step 4: WebSocket (skip)
+            // Step 4: Feishu (skip)
+            MockAction::Confirm {
+                prompt_contains: "Feishu",
+                result: false,
+            },
+            // Step 5: WebSocket (skip)
             MockAction::Confirm {
                 prompt_contains: "WebSocket",
                 result: false,
@@ -1066,6 +1118,7 @@ mod tests {
                 prompt_contains: "WeChat",
                 result: false,
             },
+
             // Step 6: Save
             MockAction::Confirm {
                 prompt_contains: "Write",

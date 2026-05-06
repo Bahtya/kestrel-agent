@@ -24,6 +24,9 @@ impl ChannelRegistry {
         self.register("discord", || {
             Box::new(platforms::discord::DiscordChannel::new())
         });
+        self.register("feishu", || {
+            Box::new(platforms::feishu::FeishuChannel::new())
+        });
         self.register("websocket", || {
             Box::new(platforms::websocket::WebSocketChannel::new())
         });
@@ -72,6 +75,16 @@ impl ChannelRegistry {
             Box::new(platforms::websocket::WebSocketChannel::new())
         });
 
+        if let Some(feishu) = config.channels.feishu.clone() {
+            registry.register("feishu", move || {
+                Box::new(platforms::feishu::FeishuChannel::new_with_config(&feishu))
+            });
+        } else {
+            registry.register("feishu", || {
+                Box::new(platforms::feishu::FeishuChannel::new())
+            });
+        }
+
         registry
     }
 
@@ -115,6 +128,7 @@ mod tests {
         let names = registry.channel_names();
         assert!(names.contains(&"telegram".to_string()));
         assert!(names.contains(&"discord".to_string()));
+        assert!(names.contains(&"feishu".to_string()));
         assert!(names.contains(&"websocket".to_string()));
     }
 
@@ -122,7 +136,7 @@ mod tests {
     fn test_registry_default() {
         let registry = ChannelRegistry::default();
         let names = registry.channel_names();
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 4);
     }
 
     #[test]
@@ -159,7 +173,7 @@ mod tests {
             Box::new(platforms::telegram::TelegramChannel::new())
         });
         let names = registry.channel_names();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"custom".to_string()));
 
         let channel = registry.create_channel("custom").unwrap();

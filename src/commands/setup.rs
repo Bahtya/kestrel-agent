@@ -550,7 +550,9 @@ fn configure_weixin(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
 
     match choice {
         0 => {
-            io.write_line("  QR scan setup requires running `kestrel setup weixin` in a terminal.")?;
+            io.write_line(
+                "  QR scan setup requires running `kestrel setup weixin` in a terminal.",
+            )?;
             io.write_line("  Please run that command separately, then return to this wizard.")?;
             // Mark as enabled if credentials already exist
             if let Some(ref wx) = config.channels.weixin {
@@ -563,7 +565,9 @@ fn configure_weixin(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
             }
             // If no credentials yet, just leave channel unconfigured
             if config.channels.weixin.is_none() {
-                io.write_line("  No WeChat credentials found yet. Run `kestrel setup weixin` first.")?;
+                io.write_line(
+                    "  No WeChat credentials found yet. Run `kestrel setup weixin` first.",
+                )?;
             }
         }
         1 => {
@@ -649,10 +653,7 @@ fn configure_weixin(io: &dyn WizardIo, config: &mut Config) -> Result<()> {
                 enabled: true,
             });
 
-            io.write_line(&format!(
-                "  {} WeChat credentials saved.",
-                "✓".green()
-            ))?;
+            io.write_line(&format!("  {} WeChat credentials saved.", "✓".green()))?;
         }
         _ => {
             io.write_line("  Skipped.")?;

@@ -387,7 +387,8 @@ impl ContextTokenStore {
     }
 
     fn path(&self, account_id: &str) -> PathBuf {
-        self.root.join(format!("{}.context-tokens.json", account_id))
+        self.root
+            .join(format!("{}.context-tokens.json", account_id))
     }
 
     fn make_key(account_id: &str, user_id: &str) -> String {

@@ -65,7 +65,10 @@ async fn api_get<T: serde::de::DeserializeOwned>(
     let resp = client
         .get(&url)
         .header("iLink-App-Id", ILINK_APP_ID)
-        .header("iLink-App-ClientVersion", ILINK_APP_CLIENT_VERSION.to_string())
+        .header(
+            "iLink-App-ClientVersion",
+            ILINK_APP_CLIENT_VERSION.to_string(),
+        )
         .send()
         .await
         .with_context(|| format!("GET {}", endpoint))?;
@@ -77,7 +80,12 @@ async fn api_get<T: serde::de::DeserializeOwned>(
         .with_context(|| format!("Failed to read body for {}", endpoint))?;
 
     if !status.is_success() {
-        bail!("iLink GET {} HTTP {}: {}", endpoint, status, &text[..text.len().min(200)]);
+        bail!(
+            "iLink GET {} HTTP {}: {}",
+            endpoint,
+            status,
+            &text[..text.len().min(200)]
+        );
     }
 
     serde_json::from_str(&text).with_context(|| {
@@ -169,12 +177,10 @@ async fn poll_status(
                 print!(".");
                 let _ = stdout.flush();
             }
-            "scaned" => {
-                if !scaned_printed {
-                    println!();
-                    println!("  已扫码，请在微信里确认...");
-                    scaned_printed = true;
-                }
+            "scaned" if !scaned_printed => {
+                println!();
+                println!("  已扫码，请在微信里确认...");
+                scaned_printed = true;
             }
             "scaned_but_redirect" => {
                 if let Some(ref host) = resp.redirect_host {

@@ -74,7 +74,10 @@ enum Commands {
     },
 
     /// Interactive configuration setup.
-    Setup,
+    Setup {
+        #[command(subcommand)]
+        subcommand: Option<SetupSubcommand>,
+    },
 
     /// Show current configuration and status.
     Status,
@@ -140,6 +143,12 @@ enum ConfigSubcommand {
 }
 
 #[derive(Subcommand)]
+enum SetupSubcommand {
+    /// Run the WeChat iLink QR onboarding flow directly.
+    Weixin,
+}
+
+#[derive(Subcommand)]
 enum DaemonSubcommand {
     /// Start the daemon (daemonize then run gateway).
     Start,
@@ -176,8 +185,11 @@ fn main() -> Result<()> {
             .init();
     }
 
-    if matches!(&cli.command, Commands::Setup) {
-        return commands::setup::run(kestrel_config::Config::default());
+    if let Commands::Setup { subcommand } = &cli.command {
+        return match subcommand {
+            Some(SetupSubcommand::Weixin) => commands::setup_weixin::run(),
+            None => commands::setup::run(kestrel_config::Config::default()),
+        };
     }
 
     // Load configuration
@@ -226,7 +238,7 @@ fn main() -> Result<()> {
                 commands::config::export(&config, &password, &output)?;
             }
         },
-        Commands::Setup => unreachable!("setup is handled before config loading"),
+        Commands::Setup { .. } => unreachable!("setup is handled before config loading"),
         Commands::Status => {
             commands::status::run(&config)?;
         }

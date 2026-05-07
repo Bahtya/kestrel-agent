@@ -142,6 +142,8 @@ cargo build --release
 ```bash
 kestrel setup
 # Unified setup wizard for provider + channel onboarding
+kestrel setup weixin
+# Direct WeChat iLink QR onboarding
 # Edit ~/.kestrel/config.toml with your API keys if needed
 ```
 
@@ -338,6 +340,7 @@ Environment variables in values (`${VAR}`) are expanded at load time.
 | `config validate` | Validate the config.toml schema |
 | `config migrate` | Migrate Python kestrel config to kestrel format |
 | `setup` | Unified interactive configuration wizard, including Feishu / Lark onboarding |
+| `setup weixin` | Direct WeChat iLink QR onboarding flow |
 | `status` | Show current configuration and system status |
 | `doctor` | Run system diagnostics for config, provider reachability, and local environment |
 | `daemon start/stop/restart/status` | Native Unix daemon: double-fork, PID file (flock), SIGTERM/SIGINT/SIGHUP, log rotation |

@@ -919,9 +919,10 @@ impl PollContext {
                             let af = self.channel.allow_from.clone();
                             let gaf = self.channel.group_allow_from.clone();
                             tokio::spawn(async move {
-                                if let Err(e) =
-                                    process_message(msg, handler, &aid, ts, ded, &dm, &gp, &af, &gaf)
-                                        .await
+                                if let Err(e) = process_message(
+                                    msg, handler, &aid, ts, ded, &dm, &gp, &af, &gaf,
+                                )
+                                .await
                                 {
                                     error!("[weixin] process_message error: {}", e);
                                 }
@@ -950,6 +951,7 @@ impl PollContext {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_message(
     message: ILinkMsg,
     handler: tokio::sync::mpsc::Sender<InboundMessage>,
@@ -1065,7 +1067,7 @@ impl BaseChannel for WeixinChannel {
     }
 
     async fn connect(&mut self) -> Result<bool> {
-        let token = match self.token.as_deref() {
+        let _token = match self.token.as_deref() {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => {
                 warn!(

@@ -58,6 +58,7 @@ const RETRY_DELAY_SECONDS: u64 = 2;
 const BACKOFF_DELAY_SECONDS: u64 = 30;
 const SESSION_EXPIRED_ERRCODE: i64 = -14;
 const RATE_LIMIT_ERRCODE: i64 = -2;
+const SESSION_EXPIRED_PAUSE_SECS: u64 = 600;
 const MESSAGE_DEDUP_TTL_SECONDS: u64 = 300;
 
 const MAX_MESSAGE_LENGTH: usize = 2000;
@@ -325,7 +326,11 @@ fn safe_id(value: Option<&str>, keep: usize) -> String {
     if raw.len() <= keep {
         raw.to_string()
     } else {
-        raw[..keep].to_string()
+        let mut end = keep;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        raw[..end].to_string()
     }
 }
 
@@ -502,6 +507,7 @@ impl ContextTokenStore {
 struct MessageDedup {
     ttl_seconds: u64,
     seen: ParkMutex<HashMap<String, std::time::Instant>>,
+    last_prune: ParkMutex<std::time::Instant>,
 }
 
 impl MessageDedup {
@@ -509,17 +515,17 @@ impl MessageDedup {
         Self {
             ttl_seconds,
             seen: ParkMutex::new(HashMap::new()),
+            last_prune: ParkMutex::new(std::time::Instant::now()),
         }
     }
 
     fn is_duplicate(&self, key: &str) -> bool {
         let mut seen = self.seen.lock();
         let now = std::time::Instant::now();
-        // Clean old entries periodically (simple heuristic: every 100 inserts)
-        #[allow(clippy::manual_is_multiple_of)]
-        if seen.len() % 100 == 0 {
+        if now.duration_since(*self.last_prune.lock()) > std::time::Duration::from_secs(60) {
             let ttl = std::time::Duration::from_secs(self.ttl_seconds);
             seen.retain(|_, t| now.duration_since(*t) < ttl);
+            *self.last_prune.lock() = now;
         }
         if seen.contains_key(key) {
             return true;
@@ -552,6 +558,22 @@ pub struct WeixinChannel {
     typing_cache: Arc<TypingTicketCache>,
     dedup: Arc<MessageDedup>,
     sync_buf: Arc<ParkMutex<String>>,
+}
+
+fn is_dm_allowed(dm_policy: &str, allow_from: &[String], sender_id: &str) -> bool {
+    match dm_policy {
+        "disabled" => false,
+        "allowlist" => allow_from.iter().any(|s| s == sender_id),
+        _ => true,
+    }
+}
+
+fn is_group_allowed(group_policy: &str, group_allow_from: &[String], chat_id: &str) -> bool {
+    match group_policy {
+        "disabled" => false,
+        "allowlist" => group_allow_from.iter().any(|s| s == chat_id),
+        _ => true,
+    }
 }
 
 impl WeixinChannel {
@@ -626,24 +648,6 @@ impl WeixinChannel {
             typing_cache: Arc::new(TypingTicketCache::new(600.0)),
             dedup: Arc::new(MessageDedup::new(MESSAGE_DEDUP_TTL_SECONDS)),
             sync_buf: Arc::new(ParkMutex::new(String::new())),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn is_dm_allowed(&self, sender_id: &str) -> bool {
-        match self.dm_policy.as_str() {
-            "disabled" => false,
-            "allowlist" => self.allow_from.contains(&sender_id.to_string()),
-            _ => true,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn is_group_allowed(&self, chat_id: &str) -> bool {
-        match self.group_policy.as_str() {
-            "disabled" => false,
-            "allowlist" => self.group_allow_from.contains(&chat_id.to_string()),
-            _ => true,
         }
     }
 
@@ -776,7 +780,7 @@ impl WeixinChannel {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!(
-                "getUpdates HTTP {}: {}",
+                "getConfig HTTP {}: {}",
                 status,
                 &text[..text.len().min(200)]
             );
@@ -789,44 +793,55 @@ impl WeixinChannel {
     // Polling
     // -----------------------------------------------------------------------
 
-    #[allow(clippy::too_many_arguments)]
-    async fn poll_loop(
-        client: reqwest::Client,
-        base_url: String,
-        token: String,
-        account_id: String,
+    fn build_poll_context(
+        &self,
         handler: tokio::sync::mpsc::Sender<InboundMessage>,
-        running: Arc<AtomicBool>,
-        token_store: Arc<ContextTokenStore>,
-        typing_cache: Arc<TypingTicketCache>,
-        dedup: Arc<MessageDedup>,
-        sync_buf: Arc<ParkMutex<String>>,
-        dm_policy: String,
-        group_policy: String,
-        allow_from: Vec<String>,
-        group_allow_from: Vec<String>,
-    ) {
-        let channel = WeixinChannel {
-            account_id: Some(account_id.clone()),
-            token: Some(token.clone()),
-            base_url: base_url.clone(),
-            cdn_base_url: String::new(),
-            dm_policy,
-            group_policy,
-            allow_from,
-            group_allow_from,
-            connected: false,
-            running: running.clone(),
-            message_handler: None,
-            client,
-            token_store: token_store.clone(),
-            typing_cache: typing_cache.clone(),
-            dedup: dedup.clone(),
-            sync_buf: sync_buf.clone(),
-        };
+        account_id: String,
+    ) -> PollContext {
+        PollContext {
+            channel: WeixinChannel {
+                account_id: Some(account_id.clone()),
+                token: self.token.clone(),
+                base_url: self.base_url.clone(),
+                cdn_base_url: String::new(),
+                dm_policy: self.dm_policy.clone(),
+                group_policy: self.group_policy.clone(),
+                allow_from: self.allow_from.clone(),
+                group_allow_from: self.group_allow_from.clone(),
+                connected: false,
+                running: self.running.clone(),
+                message_handler: None,
+                client: self.client.clone(),
+                token_store: self.token_store.clone(),
+                typing_cache: self.typing_cache.clone(),
+                dedup: self.dedup.clone(),
+                sync_buf: self.sync_buf.clone(),
+            },
+            handler,
+            account_id,
+        }
+    }
+}
 
+// ---------------------------------------------------------------------------
+// PollContext — owned state for the polling task
+// ---------------------------------------------------------------------------
+
+struct PollContext {
+    channel: WeixinChannel,
+    handler: tokio::sync::mpsc::Sender<InboundMessage>,
+    account_id: String,
+}
+
+impl PollContext {
+    async fn run(self) {
         let mut timeout_ms = LONG_POLL_TIMEOUT_MS;
         let mut consecutive_failures: u32 = 0;
+        let running = self.channel.running.clone();
+        let sync_buf = self.channel.sync_buf.clone();
+        let account_id = self.account_id.clone();
+        let token_store = self.channel.token_store.clone();
+        let dedup = self.channel.dedup.clone();
 
         info!(
             "[weixin] Polling task started account={}",
@@ -835,9 +850,8 @@ impl WeixinChannel {
 
         while running.load(Ordering::Relaxed) {
             let sync_buf_val = sync_buf.lock().clone();
-            match channel.get_updates(&sync_buf_val, timeout_ms).await {
+            match self.channel.get_updates(&sync_buf_val, timeout_ms).await {
                 Ok(response) => {
-                    // Adjust timeout if server suggests one.
                     if let Some(suggested) = response.longpolling_timeout_ms {
                         if suggested > 0 {
                             timeout_ms = suggested;
@@ -856,8 +870,14 @@ impl WeixinChannel {
                                 response.errmsg.as_deref(),
                             )
                         {
-                            error!("[weixin] Session expired; pausing for 10 minutes");
-                            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                            error!(
+                                "[weixin] Session expired; pausing for {}s",
+                                SESSION_EXPIRED_PAUSE_SECS
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                SESSION_EXPIRED_PAUSE_SECS,
+                            ))
+                            .await;
                             consecutive_failures = 0;
                             continue;
                         }
@@ -890,29 +910,18 @@ impl WeixinChannel {
 
                     if let Some(msgs) = response.msgs {
                         for msg in msgs {
-                            let handler = handler.clone();
-                            let token_store = token_store.clone();
-                            let typing_cache = typing_cache.clone();
-                            let dedup = dedup.clone();
-                            let account_id = account_id.clone();
-                            let dm_policy = channel.dm_policy.clone();
-                            let group_policy = channel.group_policy.clone();
-                            let allow_from = channel.allow_from.clone();
-                            let group_allow_from = channel.group_allow_from.clone();
+                            let handler = self.handler.clone();
+                            let ts = token_store.clone();
+                            let ded = dedup.clone();
+                            let aid = account_id.clone();
+                            let dm = self.channel.dm_policy.clone();
+                            let gp = self.channel.group_policy.clone();
+                            let af = self.channel.allow_from.clone();
+                            let gaf = self.channel.group_allow_from.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = Self::process_message(
-                                    msg,
-                                    handler,
-                                    &account_id,
-                                    token_store,
-                                    typing_cache,
-                                    dedup,
-                                    &dm_policy,
-                                    &group_policy,
-                                    &allow_from,
-                                    &group_allow_from,
-                                )
-                                .await
+                                if let Err(e) =
+                                    process_message(msg, handler, &aid, ts, ded, &dm, &gp, &af, &gaf)
+                                        .await
                                 {
                                     error!("[weixin] process_message error: {}", e);
                                 }
@@ -939,111 +948,100 @@ impl WeixinChannel {
 
         info!("[weixin] Polling task stopped");
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    async fn process_message(
-        message: ILinkMsg,
-        handler: tokio::sync::mpsc::Sender<InboundMessage>,
-        account_id: &str,
-        token_store: Arc<ContextTokenStore>,
-        _typing_cache: Arc<TypingTicketCache>,
-        dedup: Arc<MessageDedup>,
-        dm_policy: &str,
-        group_policy: &str,
-        allow_from: &[String],
-        group_allow_from: &[String],
-    ) -> Result<()> {
-        let sender_id = message.from_user_id.as_deref().unwrap_or("").trim();
-        if sender_id.is_empty() {
-            return Ok(());
-        }
-        if sender_id == account_id {
-            return Ok(());
-        }
-
-        let message_id = message.message_id.as_deref().unwrap_or("").trim();
-        if !message_id.is_empty() && dedup.is_duplicate(message_id) {
-            return Ok(());
-        }
-
-        let item_list = message.item_list.as_deref().unwrap_or(&[]);
-        let text = extract_text(item_list);
-
-        // Content-based dedup for text messages.
-        if !text.is_empty() {
-            let content_key = format!("content:{}:{}", sender_id, &text[..text.len().min(200)]);
-            if dedup.is_duplicate(&content_key) {
-                debug!(
-                    "[weixin] Content-dedup: skipping duplicate from {}",
-                    sender_id
-                );
-                return Ok(());
-            }
-        }
-
-        let (chat_type, effective_chat_id) = guess_chat_type(&message, account_id);
-
-        if chat_type == "group" {
-            if group_policy == "disabled" {
-                return Ok(());
-            }
-            if group_policy == "allowlist" && !group_allow_from.contains(&effective_chat_id) {
-                return Ok(());
-            }
-        } else {
-            match dm_policy {
-                "disabled" => return Ok(()),
-                "allowlist" if !allow_from.contains(&sender_id.to_string()) => return Ok(()),
-                _ => {}
-            }
-        }
-
-        let context_token = message.context_token.as_deref().unwrap_or("").trim();
-        if !context_token.is_empty() {
-            token_store.set(account_id, sender_id, context_token);
-        }
-
-        if text.is_empty() {
-            // TODO: handle media items
-            return Ok(());
-        }
-
-        let source = SessionSource {
-            platform: Platform::Weixin,
-            chat_id: effective_chat_id.clone(),
-            chat_name: None,
-            chat_type: chat_type.to_string(),
-            user_id: Some(sender_id.to_string()),
-            user_name: Some(sender_id.to_string()),
-            thread_id: None,
-            chat_topic: None,
-        };
-
-        let inbound = InboundMessage {
-            channel: Platform::Weixin,
-            sender_id: sender_id.to_string(),
-            chat_id: effective_chat_id,
-            content: text,
-            media: vec![],
-            metadata: HashMap::new(),
-            source: Some(source),
-            message_type: MessageType::Text,
-            message_id: if message_id.is_empty() {
-                None
-            } else {
-                Some(message_id.to_string())
-            },
-            trace_id: None,
-            reply_to: None,
-            timestamp: Local::now(),
-        };
-
-        handler
-            .send(inbound)
-            .await
-            .context("handler channel closed")?;
-        Ok(())
+async fn process_message(
+    message: ILinkMsg,
+    handler: tokio::sync::mpsc::Sender<InboundMessage>,
+    account_id: &str,
+    token_store: Arc<ContextTokenStore>,
+    dedup: Arc<MessageDedup>,
+    dm_policy: &str,
+    group_policy: &str,
+    allow_from: &[String],
+    group_allow_from: &[String],
+) -> Result<()> {
+    let sender_id = message.from_user_id.as_deref().unwrap_or("").trim();
+    if sender_id.is_empty() {
+        return Ok(());
     }
+    if sender_id == account_id {
+        return Ok(());
+    }
+
+    let message_id = message.message_id.as_deref().unwrap_or("").trim();
+    if !message_id.is_empty() && dedup.is_duplicate(message_id) {
+        return Ok(());
+    }
+
+    let item_list = message.item_list.as_deref().unwrap_or(&[]);
+    let text = extract_text(item_list);
+
+    if !text.is_empty() {
+        let content_key = format!("content:{}:{}", sender_id, &text[..text.len().min(200)]);
+        if dedup.is_duplicate(&content_key) {
+            debug!(
+                "[weixin] Content-dedup: skipping duplicate from {}",
+                sender_id
+            );
+            return Ok(());
+        }
+    }
+
+    let (chat_type, effective_chat_id) = guess_chat_type(&message, account_id);
+
+    if chat_type == "group" {
+        if !is_group_allowed(group_policy, group_allow_from, &effective_chat_id) {
+            return Ok(());
+        }
+    } else if !is_dm_allowed(dm_policy, allow_from, sender_id) {
+        return Ok(());
+    }
+
+    let context_token = message.context_token.as_deref().unwrap_or("").trim();
+    if !context_token.is_empty() {
+        token_store.set(account_id, sender_id, context_token);
+    }
+
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let source = SessionSource {
+        platform: Platform::Weixin,
+        chat_id: effective_chat_id.clone(),
+        chat_name: None,
+        chat_type: chat_type.to_string(),
+        user_id: Some(sender_id.to_string()),
+        user_name: Some(sender_id.to_string()),
+        thread_id: None,
+        chat_topic: None,
+    };
+
+    let inbound = InboundMessage {
+        channel: Platform::Weixin,
+        sender_id: sender_id.to_string(),
+        chat_id: effective_chat_id,
+        content: text,
+        media: vec![],
+        metadata: HashMap::new(),
+        source: Some(source),
+        message_type: MessageType::Text,
+        message_id: if message_id.is_empty() {
+            None
+        } else {
+            Some(message_id.to_string())
+        },
+        trace_id: None,
+        reply_to: None,
+        timestamp: Local::now(),
+    };
+
+    handler
+        .send(inbound)
+        .await
+        .context("handler channel closed")?;
+    Ok(())
 }
 
 impl Default for WeixinChannel {
@@ -1095,36 +1093,9 @@ impl BaseChannel for WeixinChannel {
         self.connected = true;
 
         if let Some(handler) = self.message_handler.clone() {
-            let client = self.client.clone();
-            let base_url = self.base_url.clone();
-            let running = self.running.clone();
-            let token_store = self.token_store.clone();
-            let typing_cache = self.typing_cache.clone();
-            let dedup = self.dedup.clone();
-            let sync_buf = self.sync_buf.clone();
-            let dm_policy = self.dm_policy.clone();
-            let group_policy = self.group_policy.clone();
-            let allow_from = self.allow_from.clone();
-            let group_allow_from = self.group_allow_from.clone();
-
+            let ctx = self.build_poll_context(handler, account_id);
             tokio::spawn(async move {
-                WeixinChannel::poll_loop(
-                    client,
-                    base_url,
-                    token,
-                    account_id,
-                    handler,
-                    running,
-                    token_store,
-                    typing_cache,
-                    dedup,
-                    sync_buf,
-                    dm_policy,
-                    group_policy,
-                    allow_from,
-                    group_allow_from,
-                )
-                .await;
+                ctx.run().await;
             });
 
             info!("[weixin] Channel connected — polling started");

@@ -193,7 +193,7 @@ async fn poll_status(
                     return Ok(None);
                 }
                 println!("\n  二维码已过期，正在刷新... ({}/3)", refresh_count);
-                match fetch_qr(client, ILINK_BASE_URL).await {
+                match fetch_qr(client, "https://ilinkai.weixin.qq.com").await {
                     Ok((new_token, new_scan_data)) => {
                         qrcode_token = new_token;
                         if !new_scan_data.is_empty() {
@@ -212,7 +212,7 @@ async fn poll_status(
             "confirmed" => {
                 let account_id = resp.ilink_bot_id.unwrap_or_default();
                 let token = resp.bot_token.unwrap_or_default();
-                let base_url = resp.baseurl.unwrap_or_else(|| ILINK_BASE_URL.to_string());
+                let base_url = resp.baseurl.unwrap_or_else(|| "https://ilinkai.weixin.qq.com".to_string());
                 let _user_id = resp.ilink_user_id.unwrap_or_default();
 
                 if account_id.is_empty() || token.is_empty() {
@@ -335,7 +335,7 @@ async fn run_inner() -> Result<()> {
     // Step 1: Fetch QR
     print!("  Fetching QR code from iLink...");
     std::io::stdout().flush().ok();
-    let (qrcode_value, qr_scan_data) = fetch_qr(&client, ILINK_BASE_URL).await?;
+    let (qrcode_value, qr_scan_data) = fetch_qr(&client, "https://ilinkai.weixin.qq.com").await?;
     println!(" done.");
 
     // Step 2: Render QR
@@ -350,7 +350,7 @@ async fn run_inner() -> Result<()> {
 
     // Step 3: Poll
     println!("  等待扫码...");
-    let creds = match poll_status(&client, ILINK_BASE_URL, &qrcode_value).await? {
+    let creds = match poll_status(&client, "https://ilinkai.weixin.qq.com", &qrcode_value).await? {
         Some(c) => c,
         None => {
             println!();

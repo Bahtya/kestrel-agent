@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.7.1] - 2026-05-07
+
+### Bug Fixes
+- Re-enable the `kestrel setup weixin` subcommand, restore Weixin wizard credential handling, and add Feishu webhook flow test coverage (#230)
+
 ## [v0.7.0] - 2026-05-07
 
 ### New Features

@@ -137,7 +137,7 @@ pub fn check_admission(event: &WebhookEvent, config: &FeishuConfig) -> Admission
     let configured_token = config
         .verification_token
         .as_deref()
-        .or_else(|| env_token.as_deref());
+        .or(env_token.as_deref());
     if let Some(expected) = configured_token {
         let header_token = event
             .header
@@ -202,21 +202,19 @@ pub fn check_admission(event: &WebhookEvent, config: &FeishuConfig) -> Admission
                     debug!("Feishu admission: group messages disabled");
                     return Admission::Deny("group messages disabled".to_string());
                 }
-                "allowlist" => {
+                "allowlist"
                     if !config.group_allowlist.is_empty()
-                        && !config.group_allowlist.iter().any(|g| g == chat_id)
-                    {
-                        debug!("Feishu admission: group {chat_id} not in allowlist");
-                        return Admission::Deny("group not in allowlist".to_string());
-                    }
+                        && !config.group_allowlist.iter().any(|g| g == chat_id) =>
+                {
+                    debug!("Feishu admission: group {chat_id} not in allowlist");
+                    return Admission::Deny("group not in allowlist".to_string());
                 }
-                "blacklist" => {
-                    if config.group_blacklist.iter().any(|g| g == chat_id) {
-                        debug!("Feishu admission: group {chat_id} is blacklisted");
-                        return Admission::Deny("group is blacklisted".to_string());
-                    }
+                "blacklist" if config.group_blacklist.iter().any(|g| g == chat_id) => {
+                    debug!("Feishu admission: group {chat_id} is blacklisted");
+                    return Admission::Deny("group is blacklisted".to_string());
                 }
-                "open" | _ => {}
+                "open" => {}
+                _ => {}
             }
 
             // Mention-only check for groups.
@@ -235,14 +233,12 @@ pub fn check_admission(event: &WebhookEvent, config: &FeishuConfig) -> Admission
                 }
             }
         }
-        "p2p" => {
-            // DM allowed users check.
+        "p2p"
             if !config.allowed_users.is_empty()
-                && !config.allowed_users.iter().any(|u| u == sender_id)
-            {
-                debug!("Feishu admission: DM user {sender_id} not in allowed_users");
-                return Admission::Deny("user not allowed".to_string());
-            }
+                && !config.allowed_users.iter().any(|u| u == sender_id) =>
+        {
+            debug!("Feishu admission: DM user {sender_id} not in allowed_users");
+            return Admission::Deny("user not allowed".to_string());
         }
         _ => {}
     }
@@ -363,7 +359,7 @@ pub fn parse_webhook(body: &[u8], config: Option<&FeishuConfig>) -> Result<Webho
     // Check if the payload is encrypted.
     let raw_body: Vec<u8> = if let Some(cfg) = config {
         let env_key = std::env::var("FEISHU_ENCRYPT_KEY").ok();
-        let encrypt_key = cfg.encrypt_key.as_deref().or_else(|| env_key.as_deref());
+        let encrypt_key = cfg.encrypt_key.as_deref().or(env_key.as_deref());
         if let Some(key) = encrypt_key {
             if !key.is_empty() {
                 let prelim: serde_json::Value =

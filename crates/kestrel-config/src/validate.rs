@@ -2892,6 +2892,15 @@ token = "${MISSING_BBB}"
             app_secret: Some("secret".to_string()),
             enabled: true,
             proxy: None,
+            verification_token: None,
+            encrypt_key: None,
+            group_policy: "open".to_string(),
+            group_allowlist: vec![],
+            group_blacklist: vec![],
+            allowed_users: vec![],
+            allow_bots: "none".to_string(),
+            mention_only: false,
+            connection_mode: None,
         });
         let report = validate(&config);
         assert!(!report.is_valid());
@@ -2909,6 +2918,15 @@ token = "${MISSING_BBB}"
             app_secret: None,
             enabled: true,
             proxy: None,
+            verification_token: None,
+            encrypt_key: None,
+            group_policy: "open".to_string(),
+            group_allowlist: vec![],
+            group_blacklist: vec![],
+            allowed_users: vec![],
+            allow_bots: "none".to_string(),
+            mention_only: false,
+            connection_mode: None,
         });
         let report = validate(&config);
         assert!(!report.is_valid());

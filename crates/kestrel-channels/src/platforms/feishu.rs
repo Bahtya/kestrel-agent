@@ -814,7 +814,7 @@ async fn ws_connect_and_listen(
     };
     let auth_json = serde_json::to_string(&auth).context("serialize WS auth")?;
     write
-        .send(Message::Text(auth_json))
+        .send(Message::Text(auth_json.into()))
         .await
         .context("send WS auth")?;
 

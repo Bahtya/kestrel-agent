@@ -1,13 +1,11 @@
 //! Feishu (Lark) channel adapter.
 //!
 //! Implements the BaseChannel trait for Feishu's open platform API.
-//! Uses HTTP callback (webhook) for receiving events and REST API for sending.
+//! Supports two connection modes:
+//! - **WebSocket**: Persistent outbound connection via `wss://` (recommended)
+//! - **Webhook**: HTTP callback endpoint for receiving events
 //!
-//! ## Event subscription
-//!
-//! Feishu sends events via HTTP POST to a configured webhook URL.
-//! The gateway exposes a `/feishu/webhook` route that parses events
-//! and forwards them to the message bus.
+//! Both modes use the same REST API for sending messages.
 //!
 //! ## Authentication
 //!
@@ -21,8 +19,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use kestrel_bus::events::InboundMessage;
@@ -35,7 +35,9 @@ use crate::base::{BaseChannel, SendResult};
 // ---------------------------------------------------------------------------
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
+const FEISHU_WS_URL: &str = "wss://open.feishu.cn/open-apis/callback/ws/event";
 const TOKEN_REFRESH_MARGIN_SECS: u64 = 300; // refresh 5 min before expiry
+const WS_RECONNECT_DELAY_SECS: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // Feishu API response types
@@ -568,6 +570,7 @@ pub struct FeishuChannel {
     app_secret: String,
     #[allow(dead_code)]
     proxy: Option<String>,
+    connection_mode: String,
     message_handler: Option<tokio::sync::mpsc::Sender<InboundMessage>>,
     running: Arc<AtomicBool>,
     client: reqwest::Client,
@@ -647,10 +650,13 @@ impl FeishuChannel {
     pub fn new() -> Self {
         let app_id = std::env::var("FEISHU_APP_ID").unwrap_or_default();
         let app_secret = std::env::var("FEISHU_APP_SECRET").unwrap_or_default();
+        let connection_mode =
+            std::env::var("FEISHU_CONNECTION_MODE").unwrap_or_else(|_| "webhook".to_string());
         Self {
             app_id,
             app_secret,
             proxy: None,
+            connection_mode,
             message_handler: None,
             running: Arc::new(AtomicBool::new(false)),
             client: Self::build_client(None),
@@ -672,11 +678,17 @@ impl FeishuChannel {
             .or_else(|| std::env::var("FEISHU_APP_SECRET").ok())
             .unwrap_or_default();
         let proxy = config.proxy.clone();
+        let connection_mode = config
+            .connection_mode
+            .clone()
+            .or_else(|| std::env::var("FEISHU_CONNECTION_MODE").ok())
+            .unwrap_or_else(|| "webhook".to_string());
         let client = Self::build_client(proxy.as_deref());
         Self {
             app_id,
             app_secret,
             proxy,
+            connection_mode,
             message_handler: None,
             running: Arc::new(AtomicBool::new(false)),
             client,
@@ -842,7 +854,7 @@ impl FeishuChannel {
                 .get("msg")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            let retryable = status.is_server_error() || code == 99991400; // rate limit
+            let retryable = status.is_server_error() || code == 99991400;
             error!("Feishu send failed: code={code}, msg={msg}, status={status}");
             Ok(SendResult {
                 success: false,
@@ -1018,6 +1030,204 @@ impl FeishuChannel {
             .context("Failed to read image response body")?;
         Ok(bytes.to_vec())
     }
+
+    /// Spawn the WebSocket event loop in a background task.
+    fn spawn_ws_loop(
+        &self,
+        handler: tokio::sync::mpsc::Sender<InboundMessage>,
+        running: Arc<AtomicBool>,
+    ) {
+        let app_id = self.app_id.clone();
+        let app_secret = self.app_secret.clone();
+
+        tokio::spawn(async move {
+            run_ws_event_loop(app_id, app_secret, handler, running).await;
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket event loop
+// ---------------------------------------------------------------------------
+
+/// WebSocket frame types from Feishu long-connection protocol.
+#[derive(Debug, Deserialize)]
+struct WsFrame {
+    #[serde(default)]
+    cmd: Option<String>,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    msg_id: Option<String>,
+}
+
+/// Auth request sent to Feishu after WebSocket connection.
+#[derive(Debug, Serialize)]
+struct WsAuthRequest {
+    cmd: String,
+    data: WsAuthData,
+}
+
+#[derive(Debug, Serialize)]
+struct WsAuthData {
+    app_id: String,
+    app_secret: String,
+}
+
+/// Run the WebSocket event loop for Feishu long-connection mode.
+///
+/// Connects to Feishu's WebSocket endpoint, authenticates with app credentials,
+/// and forwards incoming events to the message handler.
+async fn run_ws_event_loop(
+    app_id: String,
+    app_secret: String,
+    handler: tokio::sync::mpsc::Sender<InboundMessage>,
+    running: Arc<AtomicBool>,
+) {
+    while running.load(Ordering::Relaxed) {
+        if let Err(e) = ws_connect_and_listen(&app_id, &app_secret, &handler, &running).await {
+            error!("[feishu:ws] connection error: {e}");
+        }
+
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+
+        info!(
+            "[feishu:ws] reconnecting in {}s...",
+            WS_RECONNECT_DELAY_SECS
+        );
+        tokio::time::sleep(Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
+    }
+
+    info!("[feishu:ws] event loop exited");
+}
+
+/// Connect to Feishu WebSocket, authenticate, and process incoming frames.
+async fn ws_connect_and_listen(
+    app_id: &str,
+    app_secret: &str,
+    handler: &tokio::sync::mpsc::Sender<InboundMessage>,
+    running: &AtomicBool,
+) -> Result<()> {
+    info!("[feishu:ws] connecting to {FEISHU_WS_URL}");
+    let (ws_stream, _) = connect_async(FEISHU_WS_URL)
+        .await
+        .context("Feishu WebSocket connect failed")?;
+
+    info!("[feishu:ws] connected, authenticating");
+    let (mut write, mut read) = ws_stream.split();
+
+    // Send authentication frame.
+    let auth = WsAuthRequest {
+        cmd: "command".to_string(),
+        data: WsAuthData {
+            app_id: app_id.to_string(),
+            app_secret: app_secret.to_string(),
+        },
+    };
+    let auth_json = serde_json::to_string(&auth).context("serialize WS auth")?;
+    write
+        .send(Message::Text(auth_json.into()))
+        .await
+        .context("send WS auth")?;
+
+    // Process incoming frames.
+    while let Some(msg) = read.next().await {
+        if !running.load(Ordering::Relaxed) {
+            info!("[feishu:ws] shutting down");
+            break;
+        }
+
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("[feishu:ws] read error: {e}");
+                break;
+            }
+        };
+
+        match msg {
+            Message::Text(text) => {
+                if let Err(e) = handle_ws_text_frame(&text, handler).await {
+                    debug!("[feishu:ws] frame handling error: {e}");
+                }
+            }
+            Message::Ping(data) => {
+                if let Err(e) = write.send(Message::Pong(data)).await {
+                    warn!("[feishu:ws] pong error: {e}");
+                    break;
+                }
+            }
+            Message::Close(_) => {
+                info!("[feishu:ws] server closed connection");
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let _ = write.close().await;
+    Ok(())
+}
+
+/// Handle a text frame from the Feishu WebSocket.
+async fn handle_ws_text_frame(
+    text: &str,
+    handler: &tokio::sync::mpsc::Sender<InboundMessage>,
+) -> Result<()> {
+    let frame: WsFrame = serde_json::from_str(text).context("parse WS frame")?;
+
+    match frame.cmd.as_deref() {
+        Some("command") => {
+            // Auth response or config response.
+            if let Some(data) = &frame.data {
+                let code = data.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+                if code == 0 {
+                    info!("[feishu:ws] authentication successful");
+                } else {
+                    let msg = data
+                        .get("msg")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown");
+                    error!("[feishu:ws] auth failed: code={code}, msg={msg}");
+                }
+            }
+        }
+        Some("ping") => {
+            // Server ping — handled at the Message::Ping level.
+            debug!("[feishu:ws] received server ping");
+        }
+        Some("event") | Some("callback") => {
+            // Event callback via WebSocket.
+            if let Some(event_data) = frame.data {
+                if let Ok(event_bytes) = serde_json::to_vec(&event_data) {
+                    match parse_webhook(&event_bytes) {
+                        Ok(WebhookResult::Messages(msgs)) => {
+                            for msg in msgs {
+                                if let Err(e) = handler.send(msg).await {
+                                    warn!("[feishu:ws] failed to forward message: {e}");
+                                }
+                            }
+                        }
+                        Ok(WebhookResult::Challenge(_)) => {
+                            debug!("[feishu:ws] challenge event via WS — not applicable");
+                        }
+                        Ok(WebhookResult::Ignored) => {}
+                        Err(e) => {
+                            debug!("[feishu:ws] event parse error: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        other => {
+            debug!("[feishu:ws] unknown cmd: {:?}", other);
+        }
+    }
+
+    Ok(())
 }
 
 #[async_trait]
@@ -1040,11 +1250,34 @@ impl BaseChannel for FeishuChannel {
             return Ok(false);
         }
 
+        let mode = self.connection_mode.to_lowercase();
+        if mode != "websocket" && mode != "webhook" {
+            warn!(
+                "Feishu unsupported connection_mode='{}', expected 'websocket' or 'webhook'",
+                self.connection_mode
+            );
+            return Ok(false);
+        }
+
         // Pre-fetch tenant_access_token to validate credentials.
         match self.get_access_token().await {
             Ok(_) => {
                 self.running.store(true, Ordering::Relaxed);
-                info!("Feishu channel connected (app_id={})", self.app_id);
+
+                if mode == "websocket" {
+                    if let Some(handler) = self.message_handler.clone() {
+                        self.spawn_ws_loop(handler, self.running.clone());
+                    }
+                    info!(
+                        "Feishu channel connected via WebSocket (app_id={})",
+                        self.app_id
+                    );
+                } else {
+                    info!(
+                        "Feishu channel connected via Webhook (app_id={})",
+                        self.app_id
+                    );
+                }
                 Ok(true)
             }
             Err(e) => {

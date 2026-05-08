@@ -200,7 +200,10 @@ fn build_command(command: &str, dangerous: bool, max_memory_kib: u64) -> Command
     let mut cmd = if dangerous || kestrel_config::platform::is_android() {
         // No ulimit wrapper — safe to use user's preferred shell
         let mut c = Command::new(&shell);
+        #[cfg(unix)]
         c.arg("-c").arg(command);
+        #[cfg(not(unix))]
+        c.arg("/c").arg(command);
         c
     } else {
         #[cfg(unix)]
@@ -220,7 +223,7 @@ fn build_command(command: &str, dangerous: bool, max_memory_kib: u64) -> Command
         {
             let _ = max_memory_kib;
             let mut c = Command::new(&shell);
-            c.arg("-c").arg(command);
+            c.arg("/c").arg(command);
             c
         }
     };

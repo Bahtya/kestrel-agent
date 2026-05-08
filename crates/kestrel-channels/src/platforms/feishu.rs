@@ -248,14 +248,14 @@ fn merge_batch(messages: Vec<InboundMessage>) -> Option<InboundMessage> {
         .join("\n");
 
     let merged = InboundMessage {
-        channel: first.channel,
+        channel: first.channel.clone(),
         sender_id: first.sender_id.clone(),
         chat_id: first.chat_id.clone(),
         content,
         media: first.media.clone(),
         metadata: first.metadata.clone(),
         source: first.source.clone(),
-        message_type: first.message_type,
+        message_type: first.message_type.clone(),
         message_id: first.message_id.clone(),
         trace_id: first.trace_id.clone(),
         reply_to: first.reply_to.clone(),

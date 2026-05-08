@@ -982,7 +982,7 @@ async fn feishu_webhook(
                 info!("Feishu webhook: URL verification challenge");
                 (
                     StatusCode::OK,
-                    [(CONTENT_TYPE, "application/json")],
+                    [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
                     json_str,
                 )
             }
@@ -996,7 +996,7 @@ async fn feishu_webhook(
                 }
                 (
                     StatusCode::OK,
-                    [(CONTENT_TYPE, "application/json")],
+                    [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
                     "{}".to_string(),
                 )
             }
@@ -1005,7 +1005,7 @@ async fn feishu_webhook(
                 debug!("Feishu webhook: ignored event");
                 (
                     StatusCode::OK,
-                    [(CONTENT_TYPE, "application/json")],
+                    [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
                     "{}".to_string(),
                 )
             }
@@ -1014,7 +1014,7 @@ async fn feishu_webhook(
             warn!("Feishu webhook: parse error: {e}");
             (
                 StatusCode::BAD_REQUEST,
-                [(CONTENT_TYPE, "application/json")],
+                [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
                 format!("{{\"error\":\"{e}\"}}"),
             )
         }

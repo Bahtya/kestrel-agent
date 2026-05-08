@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.7.4] - 2026-05-08
+
+### Bug Fixes
+- fix(weixin): harden getUpdates parsing and cursor handling (PR #246)
+
 ## [v0.7.3] - 2026-05-08
 
 ### Bug Fixes

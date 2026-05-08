@@ -948,7 +948,12 @@ impl FeishuChannel {
     }
 
     /// Upload a file to Feishu and return the `file_key`.
-    async fn upload_file(&self, file_data: &[u8], file_name: &str, file_type: &str) -> Result<String> {
+    async fn upload_file(
+        &self,
+        file_data: &[u8],
+        file_name: &str,
+        file_type: &str,
+    ) -> Result<String> {
         let token = self.get_access_token().await?;
         let url = format!("{FEISHU_BASE_URL}/im/v1/files");
 

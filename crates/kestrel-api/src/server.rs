@@ -1023,7 +1023,7 @@ async fn feishu_webhook(
 
 async fn handle_card_action(
     state: AppState,
-    action: CardActionEvent,
+    action: kestrel_channels::CardActionEvent,
 ) -> (
     StatusCode,
     [(axum::http::header::HeaderName, HeaderValue); 1],

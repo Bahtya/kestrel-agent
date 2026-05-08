@@ -1103,6 +1103,7 @@ mod tests {
         assert!(result.message.contains("default"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_config_store_unreadable_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -1132,6 +1133,7 @@ mod tests {
         .ok();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_config_store_unwritable_data_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -1370,6 +1372,7 @@ mod tests {
         assert!(result.message.contains("default"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_deep_config_unwritable_data_dir() {
         let dir = tempfile::tempdir().unwrap();

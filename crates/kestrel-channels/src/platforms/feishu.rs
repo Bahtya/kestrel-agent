@@ -36,6 +36,240 @@ use crate::base::{BaseChannel, SendResult};
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
 const TOKEN_REFRESH_MARGIN_SECS: u64 = 300; // refresh 5 min before expiry
+const FEISHU_DEDUP_TTL_SECS: u64 = 86400; // 24 hours
+const FEISHU_BATCH_WINDOW_MS: u64 = 600; // 0.6s normal batch window
+const FEISHU_BATCH_SPLIT_WINDOW_MS: u64 = 2000; // 2s for near-limit split detection
+const FEISHU_SPLIT_THRESHOLD_CHARS: usize = 3800; // ~near Feishu's ~4000 char limit
+
+// ---------------------------------------------------------------------------
+// Feishu message deduplication
+// ---------------------------------------------------------------------------
+
+/// Deduplication tracker for Feishu messages.
+///
+/// Prevents duplicate processing based on:
+/// - `message_id` — unique per event
+/// - Content fingerprint (`sender_id:text_prefix`) — catches same content
+///   delivered through different event types
+///
+/// Entries are automatically pruned after 24 hours.
+pub struct FeishuDedup {
+    ttl_secs: u64,
+    seen: parking_lot::Mutex<HashMap<String, Instant>>,
+    last_prune: parking_lot::Mutex<Instant>,
+}
+
+impl FeishuDedup {
+    pub fn new(ttl_secs: u64) -> Self {
+        Self {
+            ttl_secs,
+            seen: parking_lot::Mutex::new(HashMap::new()),
+            last_prune: parking_lot::Mutex::new(Instant::now()),
+        }
+    }
+
+    /// Check if a key has been seen before. Returns `true` if duplicate.
+    ///
+    /// Automatically prunes stale entries every ~60 seconds.
+    pub fn is_duplicate(&self, key: &str) -> bool {
+        let mut seen = self.seen.lock();
+        let now = Instant::now();
+
+        if now.duration_since(*self.last_prune.lock()) > Duration::from_secs(60) {
+            let ttl = Duration::from_secs(self.ttl_secs);
+            seen.retain(|_, t| now.duration_since(*t) < ttl);
+            *self.last_prune.lock() = now;
+        }
+
+        if seen.contains_key(key) {
+            return true;
+        }
+        seen.insert(key.to_string(), now);
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feishu message batching
+// ---------------------------------------------------------------------------
+
+/// Tracks a pending batch of messages for a single chat.
+struct PendingBatch {
+    messages: Vec<InboundMessage>,
+    timer: Instant,
+    extended: bool,
+}
+
+/// Batches rapid consecutive Feishu messages before dispatching to the agent.
+///
+/// When a user sends several messages in quick succession (e.g. typing then
+/// sending), or when a client splits a long message into fragments near the
+/// platform limit, this batches them into a single merged message.
+pub struct FeishuBatcher {
+    dedup: Arc<FeishuDedup>,
+    pending: parking_lot::Mutex<HashMap<String, PendingBatch>>,
+}
+
+impl FeishuBatcher {
+    pub fn new(dedup: Arc<FeishuDedup>) -> Self {
+        Self {
+            dedup,
+            pending: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Process an inbound message through dedup and batching.
+    ///
+    /// Returns:
+    /// - `Ok(Some(msg))` — message is ready to dispatch immediately (no batch)
+    /// - `Ok(None)` — message was buffered into an existing or new batch
+    /// - `Err(msg)` — message is a duplicate, discard it
+    pub fn process(&self, msg: InboundMessage) -> std::result::Result<Option<InboundMessage>, InboundMessage> {
+        let message_id = msg.message_id.as_deref().unwrap_or("");
+        let sender_id = &msg.sender_id;
+
+        // message_id dedup
+        if !message_id.is_empty() && self.dedup.is_duplicate(message_id) {
+            debug!("Feishu dedup: skipping duplicate message_id={}", message_id);
+            return Err(msg);
+        }
+
+        // Content fingerprint dedup
+        let prefix_len = msg.content.len().min(200);
+        let content_key = format!("{}:{}", sender_id, &msg.content[..prefix_len]);
+        if self.dedup.is_duplicate(&content_key) {
+            debug!(
+                "Feishu dedup: skipping content duplicate from {}",
+                sender_id
+            );
+            return Err(msg);
+        }
+
+        let now = Instant::now();
+        let chat_id = msg.chat_id.clone();
+        let mut pending = self.pending.lock();
+
+        // Check if there's an existing batch for this chat
+        if let Some(batch) = pending.get_mut(&chat_id) {
+            // Check if the batch window has expired
+            let window = if batch.extended {
+                Duration::from_millis(FEISHU_BATCH_SPLIT_WINDOW_MS)
+            } else {
+                Duration::from_millis(FEISHU_BATCH_WINDOW_MS)
+            };
+
+            if now.duration_since(batch.timer) < window {
+                // Within window — buffer this message
+                let near_limit =
+                    msg.content.len() >= FEISHU_SPLIT_THRESHOLD_CHARS;
+                if near_limit {
+                    batch.extended = true;
+                }
+                batch.messages.push(msg);
+                return Ok(None);
+            }
+            // Window expired — we should have already flushed, but handle defensively
+        }
+
+        // No active batch — start a new one with just this message
+        let near_limit = msg.content.len() >= FEISHU_SPLIT_THRESHOLD_CHARS;
+        pending.insert(
+            chat_id,
+            PendingBatch {
+                messages: vec![msg],
+                timer: now,
+                extended: near_limit,
+            },
+        );
+        Ok(None)
+    }
+
+    /// Drain all batches whose timer has expired, returning merged messages.
+    pub fn drain_ready(&self) -> Vec<InboundMessage> {
+        let now = Instant::now();
+        let mut pending = self.pending.lock();
+        let mut results = Vec::new();
+
+        let expired_keys: Vec<String> = pending
+            .iter()
+            .filter(|(_, batch)| {
+                let window = if batch.extended {
+                    Duration::from_millis(FEISHU_BATCH_SPLIT_WINDOW_MS)
+                } else {
+                    Duration::from_millis(FEISHU_BATCH_WINDOW_MS)
+                };
+                now.duration_since(batch.timer) >= window
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in expired_keys {
+            if let Some(batch) = pending.remove(&key) {
+                if let Some(merged) = merge_batch(batch.messages) {
+                    results.push(merged);
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Force-drain all pending batches regardless of timer, returning merged messages.
+    pub fn force_flush_all(&self) -> Vec<InboundMessage> {
+        let mut pending = self.pending.lock();
+        let batches: Vec<_> = pending.drain().collect();
+        let mut results = Vec::new();
+        for (_, batch) in batches {
+            if let Some(merged) = merge_batch(batch.messages) {
+                results.push(merged);
+            }
+        }
+        results
+    }
+}
+
+/// Merge a batch of messages into a single `InboundMessage`.
+///
+/// Uses the first message's `message_id` and `chat_id`.
+/// Concatenates content with newlines.
+fn merge_batch(messages: Vec<InboundMessage>) -> Option<InboundMessage> {
+    if messages.is_empty() {
+        return None;
+    }
+    if messages.len() == 1 {
+        return Some(messages.into_iter().next().unwrap());
+    }
+
+    let first = &messages[0];
+    let content = messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let merged = InboundMessage {
+        channel: first.channel,
+        sender_id: first.sender_id.clone(),
+        chat_id: first.chat_id.clone(),
+        content,
+        media: first.media.clone(),
+        metadata: first.metadata.clone(),
+        source: first.source.clone(),
+        message_type: first.message_type,
+        message_id: first.message_id.clone(),
+        trace_id: first.trace_id.clone(),
+        reply_to: first.reply_to.clone(),
+        timestamp: first.timestamp,
+    };
+
+    info!(
+        "Feishu batcher: merged {} messages for chat {}",
+        messages.len(),
+        merged.chat_id
+    );
+
+    Some(merged)
+}
 
 // ---------------------------------------------------------------------------
 // Feishu API response types
@@ -1017,5 +1251,134 @@ mod tests {
         }"#;
         let result = parse_post_content(Some(content));
         assert_eq!(result, "Hello link (https://example.com)\nLine 2");
+    }
+
+    // ─── Dedup tests ──────────────────────────────────────
+
+    #[test]
+    fn test_dedup_new_key_not_duplicate() {
+        let dedup = FeishuDedup::new(86400);
+        assert!(!dedup.is_duplicate("msg_1"));
+    }
+
+    #[test]
+    fn test_dedup_same_key_is_duplicate() {
+        let dedup = FeishuDedup::new(86400);
+        assert!(!dedup.is_duplicate("msg_1"));
+        assert!(dedup.is_duplicate("msg_1"));
+    }
+
+    #[test]
+    fn test_dedup_different_keys_not_duplicate() {
+        let dedup = FeishuDedup::new(86400);
+        assert!(!dedup.is_duplicate("msg_1"));
+        assert!(!dedup.is_duplicate("msg_2"));
+    }
+
+    // ─── Batcher tests ───────────────────────────────────
+
+    fn make_msg(id: &str, chat: &str, sender: &str, text: &str) -> InboundMessage {
+        InboundMessage {
+            channel: Platform::Feishu,
+            sender_id: sender.to_string(),
+            chat_id: chat.to_string(),
+            content: text.to_string(),
+            media: vec![],
+            metadata: HashMap::new(),
+            source: None,
+            message_type: MessageType::Text,
+            message_id: Some(id.to_string()),
+            trace_id: None,
+            reply_to: None,
+            timestamp: chrono::Local::now(),
+        }
+    }
+
+    #[test]
+    fn test_batcher_dedup_same_message_id() {
+        let dedup = Arc::new(FeishuDedup::new(86400));
+        let batcher = FeishuBatcher::new(dedup);
+        let msg = make_msg("msg_1", "chat_1", "user_1", "hello");
+
+        let result = batcher.process(msg);
+        assert!(result.is_ok());
+
+        let msg2 = make_msg("msg_1", "chat_1", "user_1", "hello");
+        let result2 = batcher.process(msg2);
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_batcher_dedup_same_content_fingerprint() {
+        let dedup = Arc::new(FeishuDedup::new(86400));
+        let batcher = FeishuBatcher::new(dedup);
+
+        let msg1 = make_msg("msg_1", "chat_1", "user_1", "hello world");
+        let msg2 = make_msg("msg_2", "chat_1", "user_1", "hello world");
+
+        let result1 = batcher.process(msg1);
+        assert!(result1.is_ok());
+
+        let result2 = batcher.process(msg2);
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_batcher_different_content_not_deduped() {
+        let dedup = Arc::new(FeishuDedup::new(86400));
+        let batcher = FeishuBatcher::new(dedup);
+
+        let msg1 = make_msg("msg_1", "chat_1", "user_1", "hello");
+        let msg2 = make_msg("msg_2", "chat_1", "user_1", "world");
+
+        let result1 = batcher.process(msg1);
+        assert!(result1.is_ok());
+
+        let result2 = batcher.process(msg2);
+        assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn test_batcher_buffers_into_batch() {
+        let dedup = Arc::new(FeishuDedup::new(86400));
+        let batcher = FeishuBatcher::new(dedup);
+
+        let msg1 = make_msg("msg_1", "chat_1", "user_1", "hello");
+        let msg2 = make_msg("msg_2", "chat_1", "user_1", "world");
+
+        let r1 = batcher.process(msg1);
+        assert!(matches!(r1, Ok(None)));
+
+        let r2 = batcher.process(msg2);
+        assert!(matches!(r2, Ok(None)));
+
+        let ready = batcher.drain_ready();
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn test_merge_batch_single_message() {
+        let msg = make_msg("msg_1", "chat_1", "user_1", "hello");
+        let result = merge_batch(vec![msg]).unwrap();
+        assert_eq!(result.content, "hello");
+        assert_eq!(result.message_id, Some("msg_1".to_string()));
+    }
+
+    #[test]
+    fn test_merge_batch_multiple_messages() {
+        let msgs = vec![
+            make_msg("msg_1", "chat_1", "user_1", "hello"),
+            make_msg("msg_2", "chat_1", "user_1", "world"),
+            make_msg("msg_3", "chat_1", "user_1", "foo"),
+        ];
+        let result = merge_batch(msgs).unwrap();
+        assert_eq!(result.content, "hello\nworld\nfoo");
+        assert_eq!(result.message_id, Some("msg_1".to_string()));
+        assert_eq!(result.chat_id, "chat_1");
+    }
+
+    #[test]
+    fn test_merge_batch_empty_returns_none() {
+        assert!(merge_batch(vec![]).is_none());
     }
 }

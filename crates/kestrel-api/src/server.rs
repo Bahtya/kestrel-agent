@@ -31,7 +31,8 @@ use futures::stream::Stream;
 use futures::StreamExt;
 use kestrel_agent::AgentRunner;
 use kestrel_bus::MessageBus;
-use kestrel_channels::{parse_webhook, WebhookResult};
+use kestrel_channels::{parse_webhook, FeishuBatcher, FeishuDedup, WebhookResult};
+
 use kestrel_config::Config;
 use kestrel_core::{Message, MessageRole};
 use kestrel_heartbeat::types::{CheckStatus, HealthSnapshot};
@@ -99,6 +100,8 @@ pub struct AppState {
     pub cancel: CancellationToken,
     /// Latest health snapshot from the heartbeat service, updated externally.
     pub health_snapshot: Arc<parking_lot::RwLock<Option<HealthSnapshot>>>,
+    /// Feishu message dedup + batching.
+    pub feishu_batcher: Arc<FeishuBatcher>,
     /// Per-IP rate limiter for the Feishu webhook endpoint.
     pub feishu_rate_limit: FeishuRateLimit,
 }
@@ -158,6 +161,7 @@ impl ApiServer {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
         Self { state, host, port }
@@ -186,6 +190,7 @@ impl ApiServer {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
         Self { state, host, port }
@@ -244,6 +249,37 @@ impl ApiServer {
         let listener = tokio::net::TcpListener::bind(addr).await?;
 
         let cancel = self.state.cancel.clone();
+
+        // Background task: flush expired Feishu message batches every 100ms.
+        let flush_cancel = self.state.cancel.clone();
+        let flush_batcher = self.state.feishu_batcher.clone();
+        let flush_tx = self.state.bus.inbound_sender();
+        let flush_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        for msg in flush_batcher.drain_ready() {
+                            debug!("Feishu batcher flush: dispatching merged message for chat {}", msg.chat_id);
+                            if let Err(e) = flush_tx.send(msg).await {
+                                warn!("Feishu batcher flush: failed to send: {e}");
+                            }
+                        }
+                    }
+                    _ = flush_cancel.cancelled() => {
+                        // On shutdown, flush remaining batches.
+                        for msg in flush_batcher.force_flush_all() {
+                            debug!("Feishu batcher shutdown flush: dispatching merged message for chat {}", msg.chat_id);
+                            if let Err(e) = flush_tx.send(msg).await {
+                                warn!("Feishu batcher shutdown flush: failed to send: {e}");
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 tokio::signal::ctrl_c()
@@ -253,6 +289,9 @@ impl ApiServer {
                 cancel.cancel();
             })
             .await?;
+
+        // Wait for the flush task to finish.
+        let _ = flush_handle.await;
 
         info!("API server stopped");
         Ok(())
@@ -1008,6 +1047,13 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Handle incoming Feishu webhook events.
 ///
+/// Feishu sends two types of requests:
+/// - **URL verification**: responds with the challenge token for initial setup.
+/// - **Event callback**: extracts messages and forwards them to the message bus.
+///
+/// Messages pass through dedup (message_id + content fingerprint) and are
+/// batched when they arrive in rapid succession.
+///
 /// Security layers applied in order:
 /// 1. **Body size check**: rejects payloads > 1 MB.
 /// 2. **IP rate limiting**: 120 req/min per source IP.
@@ -1057,12 +1103,51 @@ async fn feishu_webhook(
             }
             WebhookResult::Messages(messages) => {
                 let tx = state.bus.inbound_sender();
-                for msg in messages {
-                    debug!("Feishu webhook: forwarding message from {}", msg.chat_id);
+                let batcher = &state.feishu_batcher;
+
+                // Flush any batches whose timer has already expired.
+                for msg in batcher.drain_ready() {
+                    debug!(
+                        "Feishu webhook: flushing batched message for chat {}",
+                        msg.chat_id
+                    );
                     if let Err(e) = tx.send(msg).await {
-                        warn!("Feishu webhook: failed to forward message: {e}");
+                        warn!("Feishu webhook: failed to forward batched message: {e}");
                     }
                 }
+
+                for msg in messages {
+                    match batcher.process(msg) {
+                        Ok(Some(immediate_msg)) => {
+                            debug!(
+                                "Feishu webhook: forwarding immediate message from {}",
+                                immediate_msg.chat_id
+                            );
+                            if let Err(e) = tx.send(immediate_msg).await {
+                                warn!("Feishu webhook: failed to forward message: {e}");
+                            }
+                        }
+                        Ok(None) => {
+                            debug!("Feishu webhook: buffered message into batch");
+                        }
+                        Err(_dup_msg) => {
+                            debug!("Feishu webhook: dedup discarded message");
+                        }
+                    }
+                }
+
+                // Flush again in case single-message batches are ready
+                // (when the timer is already past due to elapsed processing time).
+                for msg in batcher.drain_ready() {
+                    debug!(
+                        "Feishu webhook: flushing ready batch for chat {}",
+                        msg.chat_id
+                    );
+                    if let Err(e) = tx.send(msg).await {
+                        warn!("Feishu webhook: failed to forward batched message: {e}");
+                    }
+                }
+
                 (
                     StatusCode::OK,
                     [(CONTENT_TYPE, "application/json")],
@@ -1118,6 +1203,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         }
     }
@@ -1141,6 +1227,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         }
     }
@@ -1593,6 +1680,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
         let app = Router::new()
@@ -1947,6 +2035,31 @@ mod tests {
     async fn test_feishu_webhook_forwards_message_to_bus() {
         let state = test_state();
         let mut inbound_rx = state.bus.consume_inbound().await.unwrap();
+
+        // Start a background flush task (mimics the server's run() behavior).
+        let flush_batcher = state.feishu_batcher.clone();
+        let flush_tx = state.bus.inbound_sender();
+        let flush_cancel = tokio_util::sync::CancellationToken::new();
+        let flush_cancel_clone = flush_cancel.clone();
+        let flush_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        for msg in flush_batcher.drain_ready() {
+                            let _ = flush_tx.send(msg).await;
+                        }
+                    }
+                    _ = flush_cancel_clone.cancelled() => {
+                        for msg in flush_batcher.force_flush_all() {
+                            let _ = flush_tx.send(msg).await;
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
         let app = Router::new()
             .route("/feishu/webhook", post(feishu_webhook))
             .with_state(state);
@@ -1983,7 +2096,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let forwarded = tokio::time::timeout(std::time::Duration::from_secs(1), inbound_rx.recv())
+        let forwarded = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
             .await
             .unwrap()
             .unwrap();
@@ -1992,6 +2105,9 @@ mod tests {
         assert_eq!(forwarded.sender_id, "ou_user");
         assert_eq!(forwarded.content, "hello feishu");
         assert_eq!(forwarded.message_id.as_deref(), Some("om_123"));
+
+        flush_cancel.cancel();
+        let _ = flush_handle.await;
     }
 
     // ─── Serialization tests ─────────────────────────────
@@ -2136,6 +2252,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
 
@@ -2296,6 +2413,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
 
@@ -2342,6 +2460,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
 
@@ -2388,6 +2507,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
 
@@ -2442,6 +2562,7 @@ mod tests {
             api_key: None,
             cancel: CancellationToken::new(),
             health_snapshot: Arc::new(parking_lot::RwLock::new(None)),
+            feishu_batcher: Arc::new(FeishuBatcher::new(Arc::new(FeishuDedup::new(86400)))),
             feishu_rate_limit: FeishuRateLimit::default(),
         };
 

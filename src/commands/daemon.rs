@@ -249,6 +249,7 @@ mod fallback_impl {
 // ── Public re-exports (platform-selected) ──────────────────────────────
 
 #[cfg(target_family = "unix")]
+#[allow(unused_imports)]
 pub use unix_impl::{handle_daemon_command, DaemonHandles};
 
 #[cfg(not(target_family = "unix"))]

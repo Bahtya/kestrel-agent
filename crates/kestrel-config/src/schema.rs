@@ -993,8 +993,7 @@ fn default_daemon_log_dir() -> String {
 
 #[cfg(windows)]
 fn default_daemon_working_directory() -> String {
-    std::env::var("PROGRAMDATA")
-        .unwrap_or_else(|_| "C:\\ProgramData".to_string())
+    std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".to_string())
 }
 
 const fn default_daemon_grace_period() -> u64 {

@@ -444,6 +444,13 @@ pub struct FeishuConfig {
     /// In groups, only respond when the bot is @mentioned.
     #[serde(default)]
     pub mention_only: bool,
+
+    /// Connection mode: `"websocket"` or `"webhook"` (default: `"webhook"`).
+    ///
+    /// WebSocket mode establishes a persistent outbound connection to Feishu,
+    /// no public endpoint needed. Also reads from `FEISHU_CONNECTION_MODE` env var.
+    #[serde(default)]
+    pub connection_mode: Option<String>,
 }
 
 fn default_feishu_group_policy() -> String {
@@ -469,6 +476,7 @@ impl Default for FeishuConfig {
             allowed_users: Vec::new(),
             allow_bots: default_feishu_allow_bots(),
             mention_only: false,
+            connection_mode: None,
         }
     }
 }

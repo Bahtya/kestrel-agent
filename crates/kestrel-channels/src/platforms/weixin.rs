@@ -481,9 +481,8 @@ fn header_re() -> &'static Regex {
     HEADER_RE.get_or_init(|| Regex::new(r"^(#{1,6})\s+(.+?)\s*$").unwrap())
 }
 fn table_rule_re() -> &'static Regex {
-    TABLE_RULE_RE.get_or_init(|| {
-        Regex::new(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$").unwrap()
-    })
+    TABLE_RULE_RE
+        .get_or_init(|| Regex::new(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$").unwrap())
 }
 fn fence_re() -> &'static Regex {
     FENCE_RE.get_or_init(|| Regex::new(r"^```([^\n`]*)\s*$").unwrap())
@@ -531,9 +530,7 @@ fn split_table_row(line: &str) -> Vec<String> {
     if row.ends_with('|') {
         row = row[..row.len() - 1].to_string();
     }
-    row.split('|')
-        .map(|cell| cell.trim().to_string())
-        .collect()
+    row.split('|').map(|cell| cell.trim().to_string()).collect()
 }
 
 fn rewrite_table_block_for_weixin(lines: &[&str]) -> String {
@@ -578,10 +575,7 @@ fn rewrite_table_block_for_weixin(lines: &[&str]) -> String {
             formatted_rows.push(format!("- {}: {}", pairs[0].0, pairs[0].1));
             formatted_rows.push(format!("  {}: {}", pairs[1].0, pairs[1].1));
         } else {
-            let summary: Vec<String> = pairs
-                .iter()
-                .map(|(l, v)| format!("{}: {}", l, v))
-                .collect();
+            let summary: Vec<String> = pairs.iter().map(|(l, v)| format!("{}: {}", l, v)).collect();
             formatted_rows.push(format!("- {}", summary.join(" | ")));
         }
     }
@@ -845,6 +839,16 @@ fn split_delivery_units_for_weixin(content: &str) -> Vec<String> {
 // Smart chunking: block-aware packing
 // ---------------------------------------------------------------------------
 
+/// Find a safe char-boundary cut at or before `target` bytes.
+fn find_char_boundary_near(s: &str, target: usize) -> usize {
+    let target = target.min(s.len());
+    let mut cut = target;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
+
 fn pack_markdown_blocks_for_weixin(content: &str, max_length: usize) -> Vec<String> {
     if content.len() <= max_length {
         return vec![content.to_string()];
@@ -871,6 +875,20 @@ fn pack_markdown_blocks_for_weixin(content: &str, max_length: usize) -> Vec<Stri
             current = block;
         } else {
             for line in block.lines() {
+                // Hard-break lines that individually exceed max_length.
+                if line.len() > max_length {
+                    if !current.is_empty() {
+                        packed.push(current.trim().to_string());
+                        current = String::new();
+                    }
+                    let mut rest = line;
+                    while !rest.is_empty() {
+                        let cut = find_char_boundary_near(rest, max_length);
+                        packed.push(rest[..cut].to_string());
+                        rest = &rest[cut..];
+                    }
+                    continue;
+                }
                 if current.len() + line.len() + 1 > max_length {
                     if !current.is_empty() {
                         packed.push(current.trim().to_string());
@@ -2223,18 +2241,9 @@ mod tests {
     #[test]
     fn test_rewrite_headers() {
         assert_eq!(super::rewrite_headers_for_weixin("# Title"), "【Title】");
-        assert_eq!(
-            super::rewrite_headers_for_weixin("## Subtitle"),
-            "**Subtitle**"
-        );
-        assert_eq!(
-            super::rewrite_headers_for_weixin("### H3"),
-            "**H3**"
-        );
-        assert_eq!(
-            super::rewrite_headers_for_weixin("plain text"),
-            "plain text"
-        );
+        assert_eq!(super::rewrite_headers_for_weixin("## Subtitle"), "**Subtitle**");
+        assert_eq!(super::rewrite_headers_for_weixin("### H3"), "**H3**");
+        assert_eq!(super::rewrite_headers_for_weixin("plain text"), "plain text");
     }
 
     #[test]

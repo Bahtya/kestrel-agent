@@ -36,7 +36,7 @@ use crate::base::{BaseChannel, SendResult};
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
 const TOKEN_REFRESH_MARGIN_SECS: u64 = 300; // refresh 5 min before expiry
-const FEISHU_DEDUP_TTL_SECS: u64 = 86400; // 24 hours
+const _FEISHU_DEDUP_TTL_SECS: u64 = 86400; // 24 hours
 const FEISHU_BATCH_WINDOW_MS: u64 = 600; // 0.6s normal batch window
 const FEISHU_BATCH_SPLIT_WINDOW_MS: u64 = 2000; // 2s for near-limit split detection
 const FEISHU_SPLIT_THRESHOLD_CHARS: usize = 3800; // ~near Feishu's ~4000 char limit
@@ -124,6 +124,7 @@ impl FeishuBatcher {
     /// - `Ok(Some(msg))` — message is ready to dispatch immediately (no batch)
     /// - `Ok(None)` — message was buffered into an existing or new batch
     /// - `Err(msg)` — message is a duplicate, discard it
+    #[allow(clippy::result_large_err)]
     pub fn process(
         &self,
         msg: InboundMessage,

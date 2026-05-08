@@ -279,8 +279,8 @@ pub fn decrypt_event(body: &[u8], encrypt_key: &str) -> Result<Vec<u8>> {
     }
     let (nonce_bytes, ct_and_tag) = ciphertext.split_at(12);
 
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| anyhow::anyhow!("invalid AES key: {e}"))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("invalid AES key: {e}"))?;
     let nonce = Nonce::from_slice(nonce_bytes);
 
     let plaintext = cipher

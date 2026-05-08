@@ -28,6 +28,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Local;
 use parking_lot::Mutex as ParkMutex;
+use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -651,32 +652,476 @@ fn split_text_for_weixin(content: &str) -> Vec<String> {
     if content.is_empty() {
         return vec![];
     }
-    if content.len() <= MAX_MESSAGE_LENGTH {
+    let formatted = format_message_for_weixin(content);
+    _split_text_for_weixin_delivery(&formatted, MAX_MESSAGE_LENGTH)
+}
+
+// ---------------------------------------------------------------------------
+// Smart chunking: compiled regexes
+// ---------------------------------------------------------------------------
+
+static HEADER_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+static TABLE_RULE_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+static FENCE_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+static MARKDOWN_LINK_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+static BOLD_ONLY_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+static NUMBERED_LIST_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+
+fn header_re() -> &'static Regex {
+    HEADER_RE.get_or_init(|| Regex::new(r"^(#{1,6})\s+(.+?)\s*$").unwrap())
+}
+fn table_rule_re() -> &'static Regex {
+    TABLE_RULE_RE
+        .get_or_init(|| Regex::new(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$").unwrap())
+}
+fn fence_re() -> &'static Regex {
+    FENCE_RE.get_or_init(|| Regex::new(r"^```([^\n`]*)\s*$").unwrap())
+}
+fn markdown_link_re() -> &'static Regex {
+    MARKDOWN_LINK_RE.get_or_init(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap())
+}
+fn bold_only_re() -> &'static Regex {
+    BOLD_ONLY_RE.get_or_init(|| Regex::new(r"^\*\*[^*]+\*\*$").unwrap())
+}
+fn numbered_list_re() -> &'static Regex {
+    NUMBERED_LIST_RE.get_or_init(|| Regex::new(r"^\d+\.\s").unwrap())
+}
+
+// ---------------------------------------------------------------------------
+// Smart chunking: formatting helpers
+// ---------------------------------------------------------------------------
+
+fn convert_markdown_links(text: &str) -> String {
+    markdown_link_re().replace_all(text, "$1($2)").to_string()
+}
+
+fn rewrite_headers_for_weixin(line: &str) -> String {
+    let capped = header_re().captures(line.trim());
+    match capped {
+        Some(caps) => {
+            let hashes = caps.get(1).unwrap().as_str();
+            let title = caps.get(2).unwrap().as_str().trim();
+            let level = hashes.len();
+            if level == 1 {
+                format!("【{}】", title)
+            } else {
+                format!("**{}**", title)
+            }
+        }
+        None => line.trim_end().to_string(),
+    }
+}
+
+fn split_table_row(line: &str) -> Vec<String> {
+    let mut row = line.trim().to_string();
+    if row.starts_with('|') {
+        row = row[1..].to_string();
+    }
+    if row.ends_with('|') {
+        row = row[..row.len() - 1].to_string();
+    }
+    row.split('|').map(|cell| cell.trim().to_string()).collect()
+}
+
+fn rewrite_table_block_for_weixin(lines: &[&str]) -> String {
+    if lines.len() < 2 {
+        return lines.join("\n");
+    }
+    let headers = split_table_row(lines[0]);
+    let body_rows: Vec<Vec<String>> = lines
+        .iter()
+        .skip(2)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| split_table_row(l))
+        .collect();
+
+    if headers.is_empty() || body_rows.is_empty() {
+        return lines.join("\n");
+    }
+
+    let mut formatted_rows: Vec<String> = Vec::new();
+    for row in &body_rows {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (idx, header) in headers.iter().enumerate() {
+            if idx >= row.len() {
+                break;
+            }
+            let label = if header.is_empty() {
+                format!("Column {}", idx + 1)
+            } else {
+                header.clone()
+            };
+            let value = row[idx].trim().to_string();
+            if !value.is_empty() {
+                pairs.push((label, value));
+            }
+        }
+        if pairs.is_empty() {
+            continue;
+        }
+        if pairs.len() == 1 {
+            formatted_rows.push(format!("- {}: {}", pairs[0].0, pairs[0].1));
+        } else if pairs.len() == 2 {
+            formatted_rows.push(format!("- {}: {}", pairs[0].0, pairs[0].1));
+            formatted_rows.push(format!("  {}: {}", pairs[1].0, pairs[1].1));
+        } else {
+            let summary: Vec<String> = pairs.iter().map(|(l, v)| format!("{}: {}", l, v)).collect();
+            formatted_rows.push(format!("- {}", summary.join(" | ")));
+        }
+    }
+    if formatted_rows.is_empty() {
+        lines.join("\n")
+    } else {
+        formatted_rows.join("\n")
+    }
+}
+
+fn format_message_for_weixin(content: &str) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+
+    let linked = convert_markdown_links(content);
+    let lines: Vec<&str> = linked.lines().collect();
+    let mut result: Vec<String> = Vec::new();
+    let mut in_code_block = false;
+    let mut table_lines: Vec<String> = Vec::new();
+    let mut in_table = false;
+
+    for raw_line in &lines {
+        let line = raw_line.trim_end();
+
+        if fence_re().is_match(line.trim()) {
+            if in_table {
+                result.push(rewrite_table_block_for_weixin_owned(&table_lines));
+                table_lines.clear();
+                in_table = false;
+            }
+            in_code_block = !in_code_block;
+            result.push(line.to_string());
+            continue;
+        }
+
+        if in_code_block {
+            result.push(line.to_string());
+            continue;
+        }
+
+        if table_rule_re().is_match(line) {
+            in_table = true;
+            if let Some(prev) = result.pop() {
+                if !prev.is_empty() {
+                    table_lines.push(prev);
+                }
+            }
+            table_lines.push(line.to_string());
+            continue;
+        }
+
+        if in_table {
+            if line.trim().starts_with('|') || (line.contains('|') && !line.trim().is_empty()) {
+                table_lines.push(line.to_string());
+                continue;
+            } else {
+                result.push(rewrite_table_block_for_weixin_owned(&table_lines));
+                table_lines.clear();
+                in_table = false;
+            }
+        }
+
+        let rewritten = rewrite_headers_for_weixin(line);
+        result.push(rewritten);
+    }
+
+    if in_table && !table_lines.is_empty() {
+        result.push(rewrite_table_block_for_weixin_owned(&table_lines));
+    }
+
+    _normalize_blank_lines(&result.join("\n"))
+}
+
+fn rewrite_table_block_for_weixin_owned(lines: &[String]) -> String {
+    let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    rewrite_table_block_for_weixin(&refs)
+}
+
+fn _normalize_blank_lines(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result: Vec<String> = Vec::new();
+    let mut blank_run = 0usize;
+    let mut in_code_block = false;
+
+    for raw_line in &lines {
+        let line = raw_line.trim_end();
+        if fence_re().is_match(line.trim()) {
+            in_code_block = !in_code_block;
+            result.push(line.to_string());
+            blank_run = 0;
+            continue;
+        }
+        if in_code_block {
+            result.push(line.to_string());
+            continue;
+        }
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                result.push(String::new());
+            }
+            continue;
+        }
+        blank_run = 0;
+        result.push(line.to_string());
+    }
+
+    result.join("\n").trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Smart chunking: block splitting
+// ---------------------------------------------------------------------------
+
+fn split_markdown_blocks(content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return vec![];
+    }
+
+    let mut blocks: Vec<String> = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut current: Vec<String> = Vec::new();
+    let mut in_code_block = false;
+
+    for raw_line in &lines {
+        let line = raw_line.trim_end();
+        if fence_re().is_match(line.trim()) {
+            if !in_code_block && !current.is_empty() {
+                blocks.push(current.join("\n").trim().to_string());
+                current.clear();
+            }
+            current.push(line.to_string());
+            in_code_block = !in_code_block;
+            if !in_code_block {
+                blocks.push(current.join("\n").trim().to_string());
+                current.clear();
+            }
+            continue;
+        }
+        if in_code_block {
+            current.push(line.to_string());
+            continue;
+        }
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                blocks.push(current.join("\n").trim().to_string());
+                current.clear();
+            }
+            continue;
+        }
+        current.push(line.to_string());
+    }
+
+    if !current.is_empty() {
+        blocks.push(current.join("\n").trim().to_string());
+    }
+    blocks.retain(|b| !b.is_empty());
+    blocks
+}
+
+// ---------------------------------------------------------------------------
+// Smart chunking: delivery unit splitting
+// ---------------------------------------------------------------------------
+
+fn looks_like_chatty_line(line: &str) -> bool {
+    let stripped = line.trim();
+    if stripped.is_empty() {
+        return false;
+    }
+    if stripped.len() > 48 {
+        return false;
+    }
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return false;
+    }
+    if stripped.starts_with('>')
+        || stripped.starts_with('-')
+        || stripped.starts_with('*')
+        || stripped.starts_with('【')
+        || stripped.starts_with('#')
+        || stripped.starts_with('|')
+    {
+        return false;
+    }
+    if table_rule_re().is_match(stripped) {
+        return false;
+    }
+    if bold_only_re().is_match(stripped) {
+        return false;
+    }
+    if numbered_list_re().is_match(stripped) {
+        return false;
+    }
+    true
+}
+
+fn looks_like_heading_line(line: &str) -> bool {
+    let stripped = line.trim();
+    if stripped.is_empty() {
+        return false;
+    }
+    if header_re().is_match(stripped) {
+        return true;
+    }
+    stripped.len() <= 24 && (stripped.ends_with(':') || stripped.ends_with('：'))
+}
+
+fn should_split_short_chat_block(block: &str) -> bool {
+    let lines: Vec<&str> = block.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 2 || lines.len() > 6 {
+        return false;
+    }
+    if looks_like_heading_line(lines[0]) {
+        return false;
+    }
+    lines.iter().all(|l| looks_like_chatty_line(l))
+}
+
+fn split_delivery_units_for_weixin(content: &str) -> Vec<String> {
+    let mut units: Vec<String> = Vec::new();
+
+    for block in split_markdown_blocks(content) {
+        let block_lines: Vec<&str> = block.lines().collect();
+        if !block_lines.is_empty() && fence_re().is_match(block_lines[0].trim()) {
+            units.push(block);
+            continue;
+        }
+
+        let mut current: Vec<String> = Vec::new();
+        for raw_line in &block_lines {
+            let line = raw_line.trim_end();
+            if line.trim().is_empty() {
+                if !current.is_empty() {
+                    units.push(current.join("\n").trim().to_string());
+                    current.clear();
+                }
+                continue;
+            }
+            let is_continuation =
+                !current.is_empty() && (raw_line.starts_with(' ') || raw_line.starts_with('\t'));
+            if is_continuation {
+                current.push(line.to_string());
+                continue;
+            }
+            if !current.is_empty() {
+                units.push(current.join("\n").trim().to_string());
+            }
+            current = vec![line.to_string()];
+        }
+        if !current.is_empty() {
+            units.push(current.join("\n").trim().to_string());
+        }
+    }
+
+    units.retain(|u| !u.is_empty());
+    units
+}
+
+// ---------------------------------------------------------------------------
+// Smart chunking: block-aware packing
+// ---------------------------------------------------------------------------
+
+/// Find a safe char-boundary cut at or before `target` bytes.
+fn find_char_boundary_near(s: &str, target: usize) -> usize {
+    let target = target.min(s.len());
+    let mut cut = target;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
+
+fn pack_markdown_blocks_for_weixin(content: &str, max_length: usize) -> Vec<String> {
+    if content.len() <= max_length {
         return vec![content.to_string()];
     }
 
-    let mut chunks = Vec::new();
+    let mut packed: Vec<String> = Vec::new();
     let mut current = String::new();
-    for line in content.lines() {
-        if current.len() + line.len() + 1 > MAX_MESSAGE_LENGTH {
-            if !current.is_empty() {
-                chunks.push(current.trim().to_string());
-            }
-            current = line.to_string();
+
+    for block in split_markdown_blocks(content) {
+        let candidate = if current.is_empty() {
+            block.clone()
         } else {
-            if !current.is_empty() {
-                current.push('\n');
+            format!("{}\n\n{}", current, block)
+        };
+        if candidate.len() <= max_length {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            packed.push(current);
+            current = String::new();
+        }
+        if block.len() <= max_length {
+            current = block;
+        } else {
+            for line in block.lines() {
+                // Hard-break lines that individually exceed max_length.
+                if line.len() > max_length {
+                    if !current.is_empty() {
+                        packed.push(current.trim().to_string());
+                        current = String::new();
+                    }
+                    let mut rest = line;
+                    while !rest.is_empty() {
+                        let cut = find_char_boundary_near(rest, max_length);
+                        packed.push(rest[..cut].to_string());
+                        rest = &rest[cut..];
+                    }
+                    continue;
+                }
+                if current.len() + line.len() + 1 > max_length {
+                    if !current.is_empty() {
+                        packed.push(current.trim().to_string());
+                    }
+                    current = line.to_string();
+                } else {
+                    if !current.is_empty() {
+                        current.push('\n');
+                    }
+                    current.push_str(line);
+                }
             }
-            current.push_str(line);
         }
     }
     if !current.is_empty() {
-        chunks.push(current.trim().to_string());
+        packed.push(current.trim().to_string());
     }
-    if chunks.is_empty() {
-        chunks.push(content.to_string());
+    packed
+}
+
+// ---------------------------------------------------------------------------
+// Smart chunking: top-level delivery split
+// ---------------------------------------------------------------------------
+
+fn _split_text_for_weixin_delivery(content: &str, max_length: usize) -> Vec<String> {
+    if content.is_empty() {
+        return vec![];
     }
-    chunks
+    if content.len() <= max_length {
+        if should_split_short_chat_block(content) {
+            let units = split_delivery_units_for_weixin(content);
+            if !units.is_empty() {
+                return units;
+            }
+        }
+        return vec![content.to_string()];
+    }
+    let packed = pack_markdown_blocks_for_weixin(content, max_length);
+    if packed.is_empty() {
+        vec![content.to_string()]
+    } else {
+        packed
+    }
 }
 
 fn safe_id(value: Option<&str>, keep: usize) -> String {
@@ -2366,5 +2811,121 @@ mod tests {
             next_get_updates_buf(&resp).as_deref(),
             Some("cursor-fallback")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Smart chunking tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_convert_markdown_links() {
+        assert_eq!(
+            super::convert_markdown_links("Click [here](https://example.com) for info"),
+            "Click here(https://example.com) for info"
+        );
+        assert_eq!(
+            super::convert_markdown_links("[Google](https://google.com)"),
+            "Google(https://google.com)"
+        );
+        assert_eq!(
+            super::convert_markdown_links("No links here"),
+            "No links here"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_headers() {
+        assert_eq!(super::rewrite_headers_for_weixin("# Title"), "【Title】");
+        assert_eq!(
+            super::rewrite_headers_for_weixin("## Subtitle"),
+            "**Subtitle**"
+        );
+        assert_eq!(super::rewrite_headers_for_weixin("### H3"), "**H3**");
+        assert_eq!(
+            super::rewrite_headers_for_weixin("plain text"),
+            "plain text"
+        );
+    }
+
+    #[test]
+    fn test_format_message_combines_links_and_headers() {
+        let input = "# Guide\nSee [docs](https://example.com) for details.";
+        let result = super::format_message_for_weixin(input);
+        assert!(result.contains("【Guide】"));
+        assert!(result.contains("docs(https://example.com)"));
+    }
+
+    #[test]
+    fn test_table_degradation() {
+        let input = "| Name  | Age |\n|-------|-----|\n| Alice | 30  |\n| Bob   | 25  |";
+        let result = super::format_message_for_weixin(input);
+        assert!(!result.contains("|"));
+        assert!(result.contains("- Name: Alice"));
+        assert!(result.contains("Age: 30"));
+    }
+
+    #[test]
+    fn test_split_text_short_content() {
+        let chunks = super::split_text_for_weixin("Hello world");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "Hello world");
+    }
+
+    #[test]
+    fn test_split_text_empty() {
+        let chunks = super::split_text_for_weixin("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_split_text_long_content_splits() {
+        let long_content = "a".repeat(3000);
+        let chunks = super::split_text_for_weixin(&long_content);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 2000);
+        }
+    }
+
+    #[test]
+    fn test_code_block_not_split() {
+        let code_block = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
+        let chunks = super::split_text_for_weixin(code_block);
+        let found = chunks.iter().any(|c| c.contains("fn main()"));
+        assert!(found);
+    }
+
+    #[test]
+    fn test_normalize_blank_lines_collapses_excessive_blanks() {
+        let input = "line1\n\n\n\n\nline2";
+        let result = super::_normalize_blank_lines(input);
+        assert_eq!(result, "line1\n\nline2");
+    }
+
+    #[test]
+    fn test_looks_like_chatty_line() {
+        assert!(super::looks_like_chatty_line("Hello there"));
+        assert!(super::looks_like_chatty_line("Sure, go ahead"));
+        assert!(!super::looks_like_chatty_line("- list item"));
+        assert!(!super::looks_like_chatty_line("# heading"));
+        assert!(!super::looks_like_chatty_line("**bold only**"));
+    }
+
+    #[test]
+    fn test_should_split_short_chat_block() {
+        let chat = "Hello\nHow are you?\nThat's great!";
+        assert!(super::should_split_short_chat_block(chat));
+        let not_chat = "# Title\nSome longer content here that exceeds the chatty threshold";
+        assert!(!super::should_split_short_chat_block(not_chat));
+    }
+
+    #[test]
+    fn test_heading_body_stays_together_in_blocks() {
+        let content = "## Setup\nInstall the dependencies first.\nThen configure.";
+        let blocks = super::split_markdown_blocks(content);
+        let setup_block = blocks.iter().find(|b| b.contains("Setup"));
+        assert!(setup_block.is_some());
+        let block = setup_block.unwrap();
+        assert!(block.contains("Install"));
     }
 }

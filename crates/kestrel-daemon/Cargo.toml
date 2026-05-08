@@ -18,6 +18,10 @@ tracing-appender = "0.2"
 libc = "0.2"
 nix = { version = "0.29", features = ["process", "signal", "fs"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+fs4 = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

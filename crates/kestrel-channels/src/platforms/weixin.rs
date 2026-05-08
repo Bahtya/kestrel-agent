@@ -2241,9 +2241,15 @@ mod tests {
     #[test]
     fn test_rewrite_headers() {
         assert_eq!(super::rewrite_headers_for_weixin("# Title"), "【Title】");
-        assert_eq!(super::rewrite_headers_for_weixin("## Subtitle"), "**Subtitle**");
+        assert_eq!(
+            super::rewrite_headers_for_weixin("## Subtitle"),
+            "**Subtitle**"
+        );
         assert_eq!(super::rewrite_headers_for_weixin("### H3"), "**H3**");
-        assert_eq!(super::rewrite_headers_for_weixin("plain text"), "plain text");
+        assert_eq!(
+            super::rewrite_headers_for_weixin("plain text"),
+            "plain text"
+        );
     }
 
     #[test]

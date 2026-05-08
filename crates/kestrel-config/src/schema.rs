@@ -404,6 +404,12 @@ pub struct FeishuConfig {
     /// - empty or absent → direct connection (no proxy)
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Connection mode: `"websocket"` or `"webhook"` (default: `"webhook"`).
+    ///
+    /// WebSocket mode establishes a persistent outbound connection to Feishu,
+    /// no public endpoint needed. Also reads from `FEISHU_CONNECTION_MODE` env var.
+    #[serde(default)]
+    pub connection_mode: Option<String>,
 }
 
 /// WeCom (Enterprise WeChat) channel configuration.

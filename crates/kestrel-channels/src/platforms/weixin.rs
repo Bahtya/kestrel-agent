@@ -177,6 +177,7 @@ struct GetUpdatesResponse {
 
 #[derive(Debug, Deserialize)]
 struct ILinkMsg {
+    #[allow(dead_code)]
     #[serde(default, deserialize_with = "deserialize_opt_i64_from_any")]
     seq: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_opt_string_from_any")]
@@ -185,8 +186,10 @@ struct ILinkMsg {
     from_user_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_opt_string_from_any")]
     to_user_id: Option<String>,
+    #[allow(dead_code)]
     #[serde(default, deserialize_with = "deserialize_opt_string_from_any")]
     client_id: Option<String>,
+    #[allow(dead_code)]
     #[serde(default, deserialize_with = "deserialize_opt_i64_from_any")]
     create_time_ms: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_opt_string_from_any")]
@@ -199,6 +202,7 @@ struct ILinkMsg {
         deserialize_with = "deserialize_opt_i32_from_any"
     )]
     msg_type: Option<i32>,
+    #[allow(dead_code)]
     #[serde(default, deserialize_with = "deserialize_opt_i32_from_any")]
     message_state: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_opt_string_from_any")]

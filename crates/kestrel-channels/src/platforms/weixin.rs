@@ -1732,6 +1732,185 @@ async fn process_message(
     Ok(())
 }
 
+impl WeixinChannel {
+    async fn send_media(
+        &self,
+        chat_id: &str,
+        data: &[u8],
+        file_name: &str,
+        item_type: i32,
+        caption: Option<&str>,
+    ) -> Result<SendResult> {
+        if !self.connected {
+            return Ok(SendResult {
+                success: false,
+                message_id: None,
+                error: Some("Not connected".to_string()),
+                retryable: false,
+            });
+        }
+
+        let max_size = match item_type {
+            ITEM_IMAGE => MAX_IMAGE_SIZE,
+            ITEM_VIDEO => MAX_VIDEO_SIZE,
+            _ => MAX_FILE_SIZE,
+        };
+        if data.len() > max_size {
+            return Ok(SendResult {
+                success: false,
+                message_id: None,
+                error: Some(format!(
+                    "File too large: {} bytes (max {} bytes)",
+                    data.len(),
+                    max_size
+                )),
+                retryable: false,
+            });
+        }
+
+        let account_id = match self.account_id.as_deref() {
+            Some(a) => a,
+            None => {
+                return Ok(SendResult {
+                    success: false,
+                    message_id: None,
+                    error: Some("Account ID not available".to_string()),
+                    retryable: false,
+                });
+            }
+        };
+        let context_token = self.token_store.get(account_id, chat_id);
+
+        let upload_resp = self
+            .get_upload_url(item_type, data.len() as i64, file_name, chat_id)
+            .await?;
+
+        let ret = upload_resp.ret.unwrap_or(0);
+        let errcode = upload_resp.errcode.unwrap_or(0);
+        if ret != 0 || errcode != 0 {
+            let errmsg = upload_resp
+                .errmsg
+                .unwrap_or_else(|| "unknown error".to_string());
+            return Ok(SendResult {
+                success: false,
+                message_id: None,
+                error: Some(format!(
+                    "getUploadUrl error: ret={} errcode={} errmsg={}",
+                    ret, errcode, errmsg
+                )),
+                retryable: false,
+            });
+        }
+
+        let upload_url = match upload_resp.upload_url.as_deref() {
+            Some(u) if !u.is_empty() => u.to_string(),
+            _ => {
+                return Ok(SendResult {
+                    success: false,
+                    message_id: None,
+                    error: Some("getUploadUrl returned no upload_url".to_string()),
+                    retryable: false,
+                });
+            }
+        };
+
+        let aes_key_raw = upload_resp
+            .aes_key
+            .as_deref()
+            .unwrap_or("AAAAAAAAAAAAAAAA");
+        let aes_key = decode_aes_key(aes_key_raw).unwrap_or_else(|_| vec![0u8; 16]);
+
+        if let Err(e) = self.upload_media_bytes(data, &aes_key, &upload_url).await {
+            return Ok(SendResult {
+                success: false,
+                message_id: None,
+                error: Some(format!("CDN upload failed: {}", e)),
+                retryable: true,
+            });
+        }
+
+        let client_id = format!("kestrel-weixin-{}", uuid::Uuid::new_v4());
+
+        let mut item_list = vec![MessageItem {
+            item_type,
+            text_item: None,
+        }];
+
+        if let Some(caption_text) = caption {
+            if !caption_text.is_empty() {
+                item_list.push(MessageItem {
+                    item_type: ITEM_TEXT,
+                    text_item: Some(TextItem {
+                        text: caption_text.to_string(),
+                    }),
+                });
+            }
+        }
+
+        let payload = SendMessagePayload {
+            msg: ILinkMessage {
+                from_user_id: String::new(),
+                to_user_id: chat_id.to_string(),
+                client_id: client_id.clone(),
+                message_type: MSG_TYPE_BOT,
+                message_state: MSG_STATE_FINISH,
+                item_list,
+                context_token: context_token.map(|s| s.to_string()),
+            },
+            base_info: base_info(),
+        };
+
+        let resp = self
+            .api_post(EP_SEND_MESSAGE, payload)
+            .await
+            .context("sendMessage (media) request failed")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Ok(SendResult {
+                success: false,
+                message_id: None,
+                error: Some(format!(
+                    "sendMessage (media) HTTP {}: {}",
+                    status,
+                    &text[..text.len().min(200)]
+                )),
+                retryable: true,
+            });
+        }
+
+        let send_resp: SendMessageResponse = resp
+            .json()
+            .await
+            .context("parse sendMessage response")?;
+        let sret = send_resp.ret.unwrap_or(0);
+        let serrcode = send_resp.errcode.unwrap_or(0);
+        if sret != 0 || serrcode != 0 {
+            let errmsg = send_resp
+                .errmsg
+                .or(send_resp.msg)
+                .unwrap_or_else(|| "unknown error".to_string());
+            return Ok(SendResult {
+                success: false,
+                message_id: None,
+                error: Some(format!(
+                    "sendMessage (media) error: ret={} errcode={} errmsg={}",
+                    sret, serrcode, errmsg
+                )),
+                retryable: false,
+            });
+        }
+
+        Ok(SendResult {
+            success: true,
+            message_id: Some(client_id),
+            error: None,
+            retryable: false,
+        })
+    }
+}
+
 impl Default for WeixinChannel {
     fn default() -> Self {
         Self::new()
@@ -1965,180 +2144,6 @@ impl BaseChannel for WeixinChannel {
             );
         }
         Ok(())
-    }
-
-    async fn send_media(
-        &self,
-        chat_id: &str,
-        data: &[u8],
-        file_name: &str,
-        item_type: i32,
-        caption: Option<&str>,
-    ) -> Result<SendResult> {
-        if !self.connected {
-            return Ok(SendResult {
-                success: false,
-                message_id: None,
-                error: Some("Not connected".to_string()),
-                retryable: false,
-            });
-        }
-
-        let max_size = match item_type {
-            ITEM_IMAGE => MAX_IMAGE_SIZE,
-            ITEM_VIDEO => MAX_VIDEO_SIZE,
-            _ => MAX_FILE_SIZE,
-        };
-        if data.len() > max_size {
-            return Ok(SendResult {
-                success: false,
-                message_id: None,
-                error: Some(format!(
-                    "File too large: {} bytes (max {} bytes)",
-                    data.len(),
-                    max_size
-                )),
-                retryable: false,
-            });
-        }
-
-        let account_id = match self.account_id.as_deref() {
-            Some(a) => a,
-            None => {
-                return Ok(SendResult {
-                    success: false,
-                    message_id: None,
-                    error: Some("Account ID not available".to_string()),
-                    retryable: false,
-                });
-            }
-        };
-        let context_token = self.token_store.get(account_id, chat_id);
-
-        let upload_resp = self
-            .get_upload_url(item_type, data.len() as i64, file_name, chat_id)
-            .await?;
-
-        let ret = upload_resp.ret.unwrap_or(0);
-        let errcode = upload_resp.errcode.unwrap_or(0);
-        if ret != 0 || errcode != 0 {
-            let errmsg = upload_resp
-                .errmsg
-                .unwrap_or_else(|| "unknown error".to_string());
-            return Ok(SendResult {
-                success: false,
-                message_id: None,
-                error: Some(format!(
-                    "getUploadUrl error: ret={} errcode={} errmsg={}",
-                    ret, errcode, errmsg
-                )),
-                retryable: false,
-            });
-        }
-
-        let upload_url = match upload_resp.upload_url.as_deref() {
-            Some(u) if !u.is_empty() => u.to_string(),
-            _ => {
-                return Ok(SendResult {
-                    success: false,
-                    message_id: None,
-                    error: Some("getUploadUrl returned no upload_url".to_string()),
-                    retryable: false,
-                });
-            }
-        };
-
-        let aes_key_raw = upload_resp
-            .aes_key
-            .as_deref()
-            .unwrap_or("AAAAAAAAAAAAAAAA");
-        let aes_key = decode_aes_key(aes_key_raw).unwrap_or_else(|_| vec![0u8; 16]);
-
-        if let Err(e) = self.upload_media_bytes(data, &aes_key, &upload_url).await {
-            return Ok(SendResult {
-                success: false,
-                message_id: None,
-                error: Some(format!("CDN upload failed: {}", e)),
-                retryable: true,
-            });
-        }
-
-        let client_id = format!("kestrel-weixin-{}", uuid::Uuid::new_v4());
-
-        let mut item_list = vec![MessageItem {
-            item_type,
-            text_item: None,
-        }];
-
-        if let Some(caption_text) = caption {
-            if !caption_text.is_empty() {
-                item_list.push(MessageItem {
-                    item_type: ITEM_TEXT,
-                    text_item: Some(TextItem {
-                        text: caption_text.to_string(),
-                    }),
-                });
-            }
-        }
-
-        let payload = SendMessagePayload {
-            msg: ILinkMessage {
-                from_user_id: String::new(),
-                to_user_id: chat_id.to_string(),
-                client_id: client_id.clone(),
-                message_type: MSG_TYPE_BOT,
-                message_state: MSG_STATE_FINISH,
-                item_list,
-                context_token: context_token.map(|s| s.to_string()),
-            },
-            base_info: base_info(),
-        };
-
-        let resp = self
-            .api_post(EP_SEND_MESSAGE, payload)
-            .await
-            .context("sendMessage (media) request failed")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Ok(SendResult {
-                success: false,
-                message_id: None,
-                error: Some(format!(
-                    "sendMessage (media) HTTP {}: {}",
-                    status,
-                    &text[..text.len().min(200)]
-                )),
-                retryable: true,
-            });
-        }
-
-        let send_resp: SendMessageResponse = resp.json().await.context("parse sendMessage response")?;
-        let sret = send_resp.ret.unwrap_or(0);
-        let serrcode = send_resp.errcode.unwrap_or(0);
-        if sret != 0 || serrcode != 0 {
-            let errmsg = send_resp
-                .errmsg
-                .or(send_resp.msg)
-                .unwrap_or_else(|| "unknown error".to_string());
-            return Ok(SendResult {
-                success: false,
-                message_id: None,
-                error: Some(format!(
-                    "sendMessage (media) error: ret={} errcode={} errmsg={}",
-                    sret, serrcode, errmsg
-                )),
-                retryable: false,
-            });
-        }
-
-        Ok(SendResult {
-            success: true,
-            message_id: Some(client_id),
-            error: None,
-            retryable: false,
-        })
     }
 
     async fn send_image(

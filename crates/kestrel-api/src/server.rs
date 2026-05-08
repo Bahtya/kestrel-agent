@@ -30,6 +30,7 @@ use axum::{
 use futures::stream::Stream;
 use futures::StreamExt;
 use kestrel_agent::AgentRunner;
+use kestrel_bus::events::InboundMessage;
 use kestrel_bus::MessageBus;
 use kestrel_config::Config;
 use kestrel_core::{Message, MessageRole};
@@ -38,6 +39,7 @@ use kestrel_providers::ProviderRegistry;
 use kestrel_session::SessionManager;
 use kestrel_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -972,7 +974,7 @@ async fn feishu_webhook(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    use kestrel_channels::{parse_webhook, WebhookResult};
+    use kestrel_channels::{parse_webhook, CardActionEvent, WebhookResult};
 
     match parse_webhook(&body) {
         Ok(result) => match result {
@@ -998,6 +1000,9 @@ async fn feishu_webhook(
                     "{}".to_string(),
                 )
             }
+            WebhookResult::CardAction(action) => {
+                handle_card_action(state, action).await
+            }
             WebhookResult::Ignored => {
                 debug!("Feishu webhook: ignored event");
                 (
@@ -1016,6 +1021,75 @@ async fn feishu_webhook(
             )
         }
     }
+}
+
+async fn handle_card_action(
+    state: AppState,
+    action: CardActionEvent,
+) -> (StatusCode, [(axum::http::header::HeaderName, HeaderValue); 1], String) {
+    info!(
+        "Feishu card action: key={} user={} chat={}",
+        action.action_key, action.user_open_id, action.chat_id
+    );
+
+    let content = format!(
+        "/{} {}",
+        action.action_key,
+        action.action_value
+    );
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "message_id".to_string(),
+        serde_json::Value::String(action.message_id.clone()),
+    );
+    metadata.insert(
+        "action_key".to_string(),
+        serde_json::Value::String(action.action_key.clone()),
+    );
+    metadata.insert(
+        "action_value".to_string(),
+        action.action_value.clone(),
+    );
+    metadata.insert(
+        "is_card_action".to_string(),
+        serde_json::Value::Bool(true),
+    );
+
+    let inbound = InboundMessage {
+        channel: kestrel_core::Platform::Feishu,
+        sender_id: action.user_open_id.clone(),
+        chat_id: action.chat_id.clone(),
+        content,
+        media: vec![],
+        metadata,
+        source: Some(kestrel_core::SessionSource {
+            platform: kestrel_core::Platform::Feishu,
+            chat_id: action.chat_id.clone(),
+            chat_name: None,
+            chat_type: "group".to_string(),
+            user_id: Some(action.user_open_id),
+            user_name: None,
+            thread_id: None,
+            chat_topic: None,
+        }),
+        message_type: kestrel_core::MessageType::Text,
+        message_id: Some(action.message_id),
+        trace_id: None,
+        reply_to: None,
+        timestamp: chrono::Local::now(),
+    };
+
+    let tx = state.bus.inbound_sender();
+    if let Err(e) = tx.send(inbound).await {
+        warn!("Feishu webhook: failed to forward card action: {e}");
+    }
+
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "application/json")],
+        "{}".to_string(),
+    )
 }
 
 // ─── Tests ─────────────────────────────────────────────────

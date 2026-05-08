@@ -58,6 +58,13 @@ struct TokenData {
     expire: u64,
 }
 
+/// Reaction response data.
+#[derive(Debug, Deserialize, Default)]
+struct ReactionData {
+    #[serde(default)]
+    reaction_id: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Webhook event types (public — used by the API server webhook route)
 // ---------------------------------------------------------------------------
@@ -154,8 +161,25 @@ pub enum WebhookResult {
     Challenge(String),
     /// One or more inbound messages extracted from the event.
     Messages(Vec<InboundMessage>),
+    /// Card action triggered by a user interacting with an interactive card.
+    CardAction(CardActionEvent),
     /// Ignored event (not a message or unsupported type).
     Ignored,
+}
+
+/// Card action event from Feishu interactive card.
+#[derive(Debug, Clone)]
+pub struct CardActionEvent {
+    /// Open ID of the user who triggered the action.
+    pub user_open_id: String,
+    /// Chat ID where the card was displayed.
+    pub chat_id: String,
+    /// Message ID of the card message.
+    pub message_id: String,
+    /// Action key (e.g. "approve_once", "approve_session", "approve_always", "deny").
+    pub action_key: String,
+    /// Action value payload.
+    pub action_value: serde_json::Value,
 }
 
 /// Parse a Feishu webhook POST body.
@@ -185,6 +209,11 @@ pub fn parse_webhook(body: &[u8]) -> Result<WebhookResult> {
     };
 
     let event_type = header.event_type.as_deref().unwrap_or("");
+
+    if event_type == "card.action.trigger" {
+        return parse_card_action(&event);
+    }
+
     if !event_type.starts_with("im.message.receive_v") {
         debug!("Ignoring Feishu event type: {event_type}");
         return Ok(WebhookResult::Ignored);
@@ -405,6 +434,71 @@ fn parse_image_content(content: Option<&str>, _chat_id: String) -> (String, Vec<
     (desc, vec![])
 }
 
+/// Parse a card action trigger event.
+///
+/// Feishu sends card action events when a user clicks a button on an
+/// interactive card. The payload structure differs from message events.
+fn parse_card_action(event_json: &serde_json::Value) -> Result<WebhookResult> {
+    let user_open_id = event_json
+        .get("operator")
+        .and_then(|o| o.get("open_id"))
+        .or_else(|| event_json.get("open_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let chat_id = event_json
+        .get("open_chat_id")
+        .or_else(|| {
+            event_json
+                .get("event")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.get("chat_id"))
+        })
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let message_id = event_json
+        .get("open_message_id")
+        .or_else(|| {
+            event_json
+                .get("event")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.get("message_id"))
+        })
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let action = event_json.get("action").unwrap_or(event_json);
+
+    let action_key = action
+        .get("key")
+        .or_else(|| action.get("tag"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let action_value = action
+        .get("value")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    if action_key.is_empty() {
+        debug!("Feishu card action missing action key, ignoring");
+        return Ok(WebhookResult::Ignored);
+    }
+
+    Ok(WebhookResult::CardAction(CardActionEvent {
+        user_open_id,
+        chat_id,
+        message_id,
+        action_key,
+        action_value,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // FeishuChannel
 // ---------------------------------------------------------------------------
@@ -425,6 +519,10 @@ pub struct FeishuChannel {
     client: reqwest::Client,
     access_token: Arc<Mutex<Option<String>>>,
     token_expires_at: Arc<Mutex<Instant>>,
+    /// Last message_id per chat_id (for typing indicator reactions).
+    last_message_ids: Arc<Mutex<HashMap<String, String>>>,
+    /// Active typing reaction_id per chat_id (for removal).
+    typing_reactions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for FeishuChannel {
@@ -508,6 +606,8 @@ impl FeishuChannel {
             client: Self::build_client(None),
             access_token: Arc::new(Mutex::new(None)),
             token_expires_at: Arc::new(Mutex::new(Instant::now())),
+            last_message_ids: Arc::new(Mutex::new(HashMap::new())),
+            typing_reactions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -534,6 +634,8 @@ impl FeishuChannel {
             client,
             access_token: Arc::new(Mutex::new(None)),
             token_expires_at: Arc::new(Mutex::new(Instant::now())),
+            last_message_ids: Arc::new(Mutex::new(HashMap::new())),
+            typing_reactions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -593,6 +695,116 @@ impl FeishuChannel {
             expire_secs
         );
         Ok(data.tenant_access_token)
+    }
+
+    /// Add an emoji reaction to a message.
+    ///
+    /// Returns the reaction_id on success.
+    async fn add_reaction(
+        &self,
+        message_id: &str,
+        emoji_key: &str,
+    ) -> Result<String> {
+        let token = self.get_access_token().await?;
+        let url = format!("{FEISHU_BASE_URL}/im/v1/messages/{message_id}/reactions");
+        let body = serde_json::json!({
+            "reaction_type": {
+                "emoji_type": {
+                    "emoji_key": emoji_key
+                }
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to add Feishu reaction")?;
+
+        let feishu_resp: FeishuResponse<ReactionData> = resp
+            .json()
+            .await
+            .context("Failed to parse Feishu reaction response")?;
+
+        if feishu_resp.code != 0 {
+            warn!(
+                "Feishu add reaction failed: code={}, msg={:?}",
+                feishu_resp.code, feishu_resp.msg
+            );
+            anyhow::bail!(
+                "Feishu add reaction failed: code={}",
+                feishu_resp.code
+            );
+        }
+
+        let reaction_id = feishu_resp
+            .data
+            .and_then(|d| d.reaction_id)
+            .unwrap_or_default();
+
+        debug!("Added '{emoji_key}' reaction to message {message_id}: reaction_id={reaction_id}");
+        Ok(reaction_id)
+    }
+
+    /// Remove an emoji reaction from a message.
+    async fn delete_reaction(
+        &self,
+        message_id: &str,
+        reaction_id: &str,
+    ) -> Result<()> {
+        let token = self.get_access_token().await?;
+        let url = format!(
+            "{FEISHU_BASE_URL}/im/v1/messages/{message_id}/reactions/{reaction_id}"
+        );
+
+        let resp = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .context("Failed to delete Feishu reaction")?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse Feishu delete reaction response")?;
+
+        let code = body.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+        if code != 0 {
+            warn!(
+                "Feishu delete reaction failed: code={}, msg={:?}",
+                code,
+                body.get("msg").and_then(|m| m.as_str())
+            );
+        } else {
+            debug!("Removed reaction {reaction_id} from message {message_id}");
+        }
+
+        Ok(())
+    }
+
+    /// Store the message_id for a chat_id (for typing indicator).
+    pub fn track_message_id(&self, chat_id: &str, message_id: &str) {
+        self.last_message_ids
+            .lock()
+            .insert(chat_id.to_string(), message_id.to_string());
+    }
+
+    /// Remove the typing indicator (emoji reaction) for a chat.
+    pub async fn remove_typing_reaction(&self, chat_id: &str) {
+        let reaction_info = self.typing_reactions.lock().remove(chat_id);
+        let message_id = self.last_message_ids.lock().get(chat_id).cloned();
+
+        if let (Some(reaction_id), Some(msg_id)) = (reaction_info, message_id) {
+            if let Err(e) = self.delete_reaction(&msg_id, &reaction_id).await {
+                warn!("Failed to remove typing reaction for chat {chat_id}: {e}");
+            }
+        }
     }
 
     /// Send a text message via Feishu API.
@@ -752,11 +964,34 @@ impl BaseChannel for FeishuChannel {
         content: &str,
         reply_to: Option<&str>,
     ) -> Result<SendResult> {
+        self.remove_typing_reaction(chat_id).await;
         self.send_text_message(chat_id, content, reply_to).await
     }
 
-    async fn send_typing(&self, _chat_id: &str, _trace_id: Option<&str>) -> Result<()> {
-        // Feishu has no typing indicator API.
+    async fn send_typing(&self, chat_id: &str, _trace_id: Option<&str>) -> Result<()> {
+        let message_id = match self.last_message_ids.lock().get(chat_id).cloned() {
+            Some(id) => id,
+            None => {
+                debug!("Feishu typing: no message_id tracked for chat {chat_id}");
+                return Ok(());
+            }
+        };
+
+        if self.typing_reactions.lock().contains_key(chat_id) {
+            return Ok(());
+        }
+
+        match self.add_reaction(&message_id, "Typing").await {
+            Ok(reaction_id) => {
+                self.typing_reactions
+                    .lock()
+                    .insert(chat_id.to_string(), reaction_id);
+            }
+            Err(e) => {
+                debug!("Feishu typing reaction failed: {e}");
+            }
+        }
+
         Ok(())
     }
 
@@ -1017,5 +1252,109 @@ mod tests {
         }"#;
         let result = parse_post_content(Some(content));
         assert_eq!(result, "Hello link (https://example.com)\nLine 2");
+    }
+
+    #[test]
+    fn test_parse_webhook_card_action() {
+        let body = r#"{
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt_card_001",
+                "event_type": "card.action.trigger",
+                "token": "xxx",
+                "app_id": "cli_test"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_user123"
+                },
+                "open_chat_id": "oc_chat456",
+                "open_message_id": "om_msg789",
+                "action": {
+                    "key": "approve_once",
+                    "value": {"session_id": "sess_abc"}
+                }
+            }
+        }"#;
+
+        let result = parse_webhook(body.as_bytes()).unwrap();
+        match result {
+            WebhookResult::CardAction(action) => {
+                assert_eq!(action.user_open_id, "ou_user123");
+                assert_eq!(action.chat_id, "oc_chat456");
+                assert_eq!(action.message_id, "om_msg789");
+                assert_eq!(action.action_key, "approve_once");
+                assert_eq!(
+                    action.action_value,
+                    serde_json::json!({"session_id": "sess_abc"})
+                );
+            }
+            _ => panic!("Expected CardAction result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_webhook_card_action_deny() {
+        let body = r#"{
+            "schema": "2.0",
+            "header": {
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {"open_id": "ou_admin"},
+                "open_chat_id": "oc_group",
+                "open_message_id": "om_card1",
+                "action": {
+                    "key": "deny",
+                    "value": {"reason": "not authorized"}
+                }
+            }
+        }"#;
+
+        let result = parse_webhook(body.as_bytes()).unwrap();
+        match result {
+            WebhookResult::CardAction(action) => {
+                assert_eq!(action.action_key, "deny");
+                assert_eq!(action.chat_id, "oc_group");
+            }
+            _ => panic!("Expected CardAction result"),
+        }
+    }
+
+    #[test]
+    fn test_parse_webhook_card_action_missing_key_ignored() {
+        let body = r#"{
+            "schema": "2.0",
+            "header": {
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {"open_id": "ou_user"},
+                "open_chat_id": "oc_chat",
+                "open_message_id": "om_msg",
+                "action": {}
+            }
+        }"#;
+
+        let result = parse_webhook(body.as_bytes()).unwrap();
+        assert!(matches!(result, WebhookResult::Ignored));
+    }
+
+    #[test]
+    fn test_track_message_id() {
+        let ch = FeishuChannel::new();
+        assert!(!ch.last_message_ids.lock().contains_key("oc_chat1"));
+
+        ch.track_message_id("oc_chat1", "om_msg123");
+        assert_eq!(
+            ch.last_message_ids.lock().get("oc_chat1").map(|s| s.clone()),
+            Some("om_msg123".to_string())
+        );
+
+        ch.track_message_id("oc_chat1", "om_msg456");
+        assert_eq!(
+            ch.last_message_ids.lock().get("oc_chat1").map(|s| s.clone()),
+            Some("om_msg456".to_string())
+        );
     }
 }

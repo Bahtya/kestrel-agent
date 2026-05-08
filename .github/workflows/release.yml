@@ -11,12 +11,24 @@ env:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get install -y protobuf-compiler
+
+      - name: Install protobuf-compiler (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Install protobuf compiler (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc
 
       - uses: actions/cache@v4
         with:
@@ -49,6 +61,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: kestrel-aarch64-macos
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: kestrel-x86_64-windows
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -62,6 +77,10 @@ jobs:
       - name: Install protobuf (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
+
+      - name: Install protobuf compiler (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc
 
       - name: Install cross for musl cross-compilation (aarch64-linux)
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -97,12 +116,23 @@ jobs:
           cp target/${{ matrix.target }}/release/kestrel dist/
           cp README.md LICENSE dist/
           tar -czf ${{ matrix.artifact }}.tar.gz -C dist .
-        if: hashFiles('LICENSE') != ''
+        if: hashFiles('LICENSE') != '' && runner.os != 'Windows'
+
+      - name: Package binary (Windows)
+        run: |
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/kestrel.exe" dist/
+          cp README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact }}.zip
+        shell: pwsh
+        if: runner.os == 'Windows'
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.tar.gz
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
 
   release:
     name: Create Release
@@ -142,4 +172,6 @@ jobs:
           title: ${{ github.ref_name }}
           body: ${{ steps.changelog.outputs.body }}
           prerelease: ${{ steps.prerelease.outputs.prerelease }}
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip

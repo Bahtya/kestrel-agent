@@ -1,5 +1,30 @@
 # Changelog
 
+## [v0.8.0] - 2026-05-08
+
+### New Features
+- feat(feishu): WebSocket long-connection mode — persistent outbound connection, no public endpoint needed (PR #253)
+- feat(feishu): media send/receive — image, file, audio, video upload and download with CDN integration (PR #254)
+- feat(feishu): security and access control — webhook verification token, AES payload decryption, group/DM policy, bot filtering, mention-only mode (PR #255)
+- feat(feishu): message deduplication and batching — message_id + content fingerprint dedup, auto-batch rapid messages with smart split detection (PR #256)
+- feat(feishu): typing indicator and interactive card message support — typing events, card action handling, message ID tracking (PR #257)
+- feat(weixin): media send/receive with AES-256-GCM encryption (PR #258)
+- feat(weixin): smart message chunking — automatic split near platform char limit with regex-aware boundary detection (PR #259)
+- feat(daemon): Windows Service daemon support with service CLI subcommand (PR #245, #264)
+- feat(daemon): cross-platform logging module (PR #265)
+
+### Changes
+- ci: add Windows CI matrix for compilation and test verification (PR #262)
+- release: add Windows (x86_64-pc-windows-msvc) build target to release workflow
+
+### Bug Fixes
+- fix(config): use Windows-compatible default paths in DaemonConfig (PR #261)
+- fix(config): add Windows-compatible paths in platform.rs (PR #244)
+- fix(tools): use /c flag for cmd.exe on Windows in shell build_command (PR #260)
+- fix(binary): cfg-gate Unix-only kestrel_daemon usage (PR #263)
+- fix(daemon): gate nix/libc deps to Unix-only for Windows compat (PR #243)
+- fix(agent): gate Unix-only heartbeat tests with cfg(unix) (PR #242)
+
 ## [v0.7.4] - 2026-05-08
 
 ### Bug Fixes

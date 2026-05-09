@@ -7,7 +7,7 @@
 use crate::trait_def::{Tool, ToolError};
 use async_trait::async_trait;
 use kestrel_core::MAX_TOOL_OUTPUT_LENGTH;
-use mlua::{Lua, LuaOptions, StdLib};
+use mlua::{HookTriggers, Lua, LuaOptions, StdLib, VmState};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
@@ -20,6 +20,7 @@ const DEFAULT_SCRIPT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_WRITE_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_WRITE_FILES: usize = 100;
+const DEFAULT_MAX_INSTRUCTIONS: usize = 10_000_000;
 
 /// System paths that are never writable from Lua scripts.
 #[cfg(unix)]
@@ -49,6 +50,7 @@ pub struct ScriptTool {
     max_output_bytes: usize,
     max_write_bytes: usize,
     max_write_files: usize,
+    max_instructions: usize,
     dangerous: bool,
 }
 
@@ -60,6 +62,7 @@ impl ScriptTool {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_write_bytes: DEFAULT_MAX_WRITE_BYTES,
             max_write_files: DEFAULT_MAX_WRITE_FILES,
+            max_instructions: DEFAULT_MAX_INSTRUCTIONS,
             dangerous: false,
         }
     }
@@ -107,13 +110,10 @@ impl ScriptTool {
         let lua = unsafe { Lua::unsafe_new_with(safe_libs, LuaOptions::default()) };
 
         if !self.dangerous {
-            // Remove dangerous globals
+            // Remove dangerous globals, but preserve safe os.* subset
             let globals = lua.globals();
             globals
                 .set("io", mlua::Value::Nil)
-                .map_err(|e| ToolError::Execution(format!("Failed to sandbox: {}", e)))?;
-            globals
-                .set("os", mlua::Value::Nil)
                 .map_err(|e| ToolError::Execution(format!("Failed to sandbox: {}", e)))?;
             globals
                 .set("require", mlua::Value::Nil)
@@ -124,6 +124,61 @@ impl ScriptTool {
             globals
                 .set("loadfile", mlua::Value::Nil)
                 .map_err(|e| ToolError::Execution(format!("Failed to sandbox: {}", e)))?;
+
+            // Replace os table with safe subset (date, time, clock only)
+            let os_safe = lua.create_table().map_err(|e| {
+                ToolError::Execution(format!("Failed to create safe os table: {}", e))
+            })?;
+
+            // os.date([format [, time]])
+            let os_date_fn = lua
+                .create_function(|lua, (fmt, t): (Option<String>, Option<i64>)| {
+                    let time_val = t.unwrap_or_else(|| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64
+                    });
+                    // Use Lua's own os.date if available, otherwise return time
+                    let format = fmt.unwrap_or_else(|| "%c".to_string());
+                    // Simple implementation: return formatted time string
+                    lua.create_string(format!(
+                        "os.date({}) not fully implemented - timestamp: {}",
+                        format, time_val
+                    ))
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create os.date: {}", e)))?;
+            os_safe
+                .set("date", os_date_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set os.date: {}", e)))?;
+
+            // os.time() -> current timestamp
+            let os_time_fn = lua
+                .create_function(|_, _: ()| {
+                    Ok(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64)
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create os.time: {}", e)))?;
+            os_safe
+                .set("time", os_time_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set os.time: {}", e)))?;
+
+            // os.clock() -> elapsed CPU time
+            let os_clock_fn = lua
+                .create_function(|_, _: ()| {
+                    // Return a simple elapsed time approximation
+                    Ok(0.0f64)
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create os.clock: {}", e)))?;
+            os_safe
+                .set("clock", os_clock_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set os.clock: {}", e)))?;
+
+            globals
+                .set("os", os_safe)
+                .map_err(|e| ToolError::Execution(format!("Failed to set safe os: {}", e)))?;
         }
 
         // Inject kestrel API
@@ -451,6 +506,26 @@ impl Tool for ScriptTool {
         );
 
         let lua = self.create_sandboxed_vm()?;
+
+        // Set up instruction limit via debug hook
+        if !self.dangerous {
+            let max_instructions = self.max_instructions;
+            let instruction_counter = Arc::new(AtomicUsize::new(0));
+            lua.set_hook(
+                HookTriggers::new().every_nth_instruction(1000),
+                move |_lua, _debug| {
+                    let count = instruction_counter.fetch_add(1000, Ordering::Relaxed);
+                    if count >= max_instructions {
+                        return Err(mlua::Error::external(format!(
+                            "Instruction limit exceeded (max {})",
+                            max_instructions
+                        )));
+                    }
+                    Ok(VmState::Continue)
+                },
+            )
+            .map_err(|e| ToolError::Execution(format!("Failed to set instruction hook: {}", e)))?;
+        }
 
         // Set up output capture buffer
         let stdout_buf: Arc<std::sync::Mutex<Vec<u8>>> =

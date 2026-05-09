@@ -1,9 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [v0.9.6] - 2026-05-10
 
 ### Bug Fixes
-- fix(agent): abort spawned tool tasks when `message_timeout` fires — previous code left `tokio::spawn`ed tasks running as detached zombies after the parent future was dropped; also adds `cancel_token` checking in the tool poll loop for faster cancellation on `/stop` (Issue #310)
+- fix(agent): abort spawned tool tasks when `message_timeout` fires — previous code left `tokio::spawn`ed tasks running as detached zombies after the parent future was dropped; also adds `cancel_token` checking in the tool poll loop for faster cancellation on `/stop` (Issue #310, PR #311)
 
 ## [v0.9.5] - 2026-05-10
 

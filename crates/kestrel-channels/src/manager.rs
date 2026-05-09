@@ -91,6 +91,7 @@ impl ChannelManager {
     /// Handle an outbound message from the bus.
     pub async fn handle_outbound(&self, msg: OutboundMessage) {
         let channel_name = msg.channel.to_string();
+        let trace_id = msg.trace_id.clone();
         match self.running_channels.get(&channel_name) {
             Some(channel) => {
                 let channel = channel.lock().await;
@@ -115,19 +116,26 @@ impl ChannelManager {
                         Ok(result) => {
                             if !result.success {
                                 error!(
+                                    trace_id = %trace_id.as_deref().unwrap_or("-"),
                                     "Failed to send message to {} via {}: {:?}",
                                     msg.chat_id, channel_name, result.error
                                 );
                             }
                         }
                         Err(e) => {
-                            error!("Error sending message via {}: {}", channel_name, e);
+                            error!(
+                                trace_id = %trace_id.as_deref().unwrap_or("-"),
+                                "Error sending message via {}: {}", channel_name, e
+                            );
                         }
                     }
                 }
             }
             None => {
-                warn!("No running channel for platform: {}", channel_name);
+                warn!(
+                    trace_id = %trace_id.as_deref().unwrap_or("-"),
+                    "No running channel for platform: {}", channel_name
+                );
             }
         }
 

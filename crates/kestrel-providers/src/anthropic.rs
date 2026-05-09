@@ -394,7 +394,7 @@ impl LlmProvider for AnthropicProvider {
             "HTTP REQ"
         );
 
-        debug!("Anthropic request to {} (model: {})", url, request.model);
+        debug!(trace_id = %trace_id, "Anthropic request to {} (model: {})", url, request.model);
 
         let start = std::time::Instant::now();
         let trace_id_for_log = trace_id.clone();
@@ -543,6 +543,7 @@ impl LlmProvider for AnthropicProvider {
         );
 
         debug!(
+            trace_id = %trace_id,
             "Anthropic streaming request to {} (model: {})",
             url, request.model
         );

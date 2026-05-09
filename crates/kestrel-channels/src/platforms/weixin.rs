@@ -2022,6 +2022,12 @@ async fn process_message(
         return Ok(());
     }
 
+    let trace_id = if !message_id.is_empty() {
+        format!("wx_{message_id}")
+    } else {
+        kestrel_core::generate_trace_id()
+    };
+
     let item_list = message.item_list.as_deref().unwrap_or(&[]);
     let text = extract_text(item_list);
 
@@ -2029,6 +2035,7 @@ async fn process_message(
         let content_key = format!("content:{}:{}", sender_id, &text[..text.len().min(200)]);
         if dedup.is_duplicate(&content_key) {
             debug!(
+                trace_id = %trace_id,
                 "[weixin] Content-dedup: skipping duplicate from {}",
                 sender_id
             );
@@ -2128,6 +2135,7 @@ async fn process_message(
 
     if primary_type != MessageType::Text {
         debug!(
+            trace_id = %trace_id,
             "[weixin] processing {} media attachment(s) from {}",
             media.len(),
             sender_id
@@ -2178,7 +2186,7 @@ async fn process_message(
         } else {
             Some(message_id.to_string())
         },
-        trace_id: None,
+        trace_id: Some(trace_id),
         reply_to: None,
         timestamp: Local::now(),
     };

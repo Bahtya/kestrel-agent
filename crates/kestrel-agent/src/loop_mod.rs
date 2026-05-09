@@ -239,7 +239,7 @@ impl AgentLoop {
                             metadata: Default::default(),
                         };
                         if let Err(e) = self.bus.publish_outbound(reply).await {
-                            error!("Failed to send /stop reply: {e}");
+                            error!(trace_id = %msg.trace_id.as_deref().unwrap_or("-"), "Failed to send /stop reply: {e}");
                         }
                         continue;
                     }
@@ -260,10 +260,12 @@ impl AgentLoop {
 
                     match result {
                         Ok(Ok(())) => {}
-                        Ok(Err(e)) => error!("Error processing message: {}", e),
+                        Ok(Err(e)) => {
+                            error!(trace_id = %timeout_trace_id.as_deref().unwrap_or("-"), "Error processing message: {}", e)
+                        }
                         Err(_) => {
                             let timeout_secs = self.config.agent.message_timeout;
-                            error!("Message processing timed out after {}s", timeout_secs);
+                            error!(trace_id = %timeout_trace_id.as_deref().unwrap_or("-"), "Message processing timed out after {}s", timeout_secs);
 
                             let timeout_reply = OutboundMessage {
                                 channel: timeout_channel,
@@ -274,12 +276,12 @@ impl AgentLoop {
                                     timeout_secs
                                 ),
                                 reply_to: timeout_message_id,
-                                trace_id: timeout_trace_id,
+                                trace_id: timeout_trace_id.clone(),
                                 media: vec![],
                                 metadata: Default::default(),
                             };
                             if let Err(e) = self.bus.publish_outbound(timeout_reply).await {
-                                error!("Failed to send timeout reply: {}", e);
+                                error!(trace_id = %timeout_trace_id.as_deref().unwrap_or("-"), "Failed to send timeout reply: {}", e);
                             }
 
                             // Clean up stale session entry after timeout
@@ -320,6 +322,7 @@ impl AgentLoop {
 
         async move {
             let session_key = msg.session_key();
+            let trace_id_str = msg.trace_id.as_deref().unwrap_or("-").to_string();
 
             // If session is busy, interrupt current run and replan with new message
             if self.is_session_active(&session_key) {
@@ -335,11 +338,12 @@ impl AgentLoop {
                     metadata: Default::default(),
                 };
                 if let Err(e) = self.bus.publish_outbound(confirmation).await {
-                    error!("Failed to send interrupt confirmation: {e}");
+                    error!(trace_id = %trace_id_str, "Failed to send interrupt confirmation: {e}");
                 }
 
                 self.pending_messages.insert(session_key.clone(), msg.clone());
                 info!(
+                    trace_id = %trace_id_str,
                     "Session {} interrupted by new message, queued for re-planning",
                     session_key
                 );
@@ -349,6 +353,7 @@ impl AgentLoop {
             // Audit log: message content at debug level for traceability
             let content_preview = truncate_str(&msg.content, 100);
             tracing::debug!(
+                trace_id = %trace_id_str,
                 content = %content_preview,
                 channel = %msg.channel,
                 "Incoming message"
@@ -363,7 +368,7 @@ impl AgentLoop {
                 duration_ms: None,
             });
 
-            info!("Processing message");
+            info!(trace_id = %trace_id_str, "Processing message");
 
             // Emit started event
             let started_event = AgentEvent::Started {
@@ -394,6 +399,7 @@ impl AgentLoop {
                     Ok(result) => {
                         if result.messages_after < result.messages_before {
                             info!(
+                                trace_id = %trace_id_str,
                                 session_key = %session_key,
                                 before = result.messages_before,
                                 after = result.messages_after,
@@ -403,6 +409,7 @@ impl AgentLoop {
                     }
                     Err(e) => {
                         warn!(
+                            trace_id = %trace_id_str,
                             "Context compaction failed for session {}: {}",
                             session_key, e
                         );
@@ -413,7 +420,7 @@ impl AgentLoop {
             self.session_manager.save_session_async(&session);
 
             // Recall relevant memories from the memory store (if configured).
-            let recalled_memory = self.recall_memories(&msg.content).await;
+            let recalled_memory = self.recall_memories(&msg.content, &trace_id_str).await;
 
             // Build context (with memory recall + skill matching if attached)
             let system_prompt = {
@@ -587,6 +594,7 @@ impl AgentLoop {
                             let now = std::time::Instant::now();
                             if now + backoff >= retry_deadline {
                                 warn!(
+                                    trace_id = %trace_id_str,
                                     remaining_ms = (retry_deadline - now).as_millis() as u64,
                                     backoff_ms = backoff.as_millis() as u64,
                                     "Skipping retry: would exceed message timeout budget"
@@ -595,6 +603,7 @@ impl AgentLoop {
                             }
 
                             warn!(
+                                trace_id = %trace_id_str,
                                 attempt = attempt + 1,
                                 max_retries,
                                 backoff_ms = backoff.as_millis() as u64,
@@ -615,7 +624,7 @@ impl AgentLoop {
                 match handle.await {
                     Ok((_text, msg_id)) => msg_id,
                     Err(e) => {
-                        warn!("Stream consumer task error: {e}");
+                        warn!(trace_id = %trace_id_str, "Stream consumer task error: {e}");
                         None
                     }
                 }
@@ -630,6 +639,7 @@ impl AgentLoop {
                 Ok(result) => {
                     let duration_ms = run_start.elapsed().as_millis() as u64;
                     info!(
+                        trace_id = %trace_id_str,
                         duration_ms = duration_ms,
                         tool_calls = result.tool_calls_made,
                         iterations = result.iterations_used,
@@ -650,11 +660,13 @@ impl AgentLoop {
 
                     if was_interrupted {
                         info!(
+                            trace_id = %trace_id_str,
                             session_key = %session_key,
                             "Agent run interrupted by new message, skipping cancelled response"
                         );
                         if let Err(e) = self.session_manager.save_session(&session) {
                             warn!(
+                                trace_id = %trace_id_str,
                                 session_key = %session_key,
                                 "Failed to persist session: {e}"
                             );
@@ -667,6 +679,7 @@ impl AgentLoop {
                             NotesManager::extract_notes_from_response(&mut session, &result.content);
                         if extracted > 0 {
                             info!(
+                                trace_id = %trace_id_str,
                                 "Auto-extracted {} notes from agent response in session {}",
                                 extracted, session_key
                             );
@@ -674,18 +687,19 @@ impl AgentLoop {
 
                         // Compact notes if they exceed the limit
                         if NotesManager::compact_if_needed(&mut session) {
-                            info!("Notes compacted for session {}", session_key);
+                            info!(trace_id = %trace_id_str, "Notes compacted for session {}", session_key);
                         }
 
                         if let Err(e) = self.session_manager.save_session(&session) {
                             warn!(
+                                trace_id = %trace_id_str,
                                 session_key = %session_key,
                                 "Failed to persist completed session: {e}"
                             );
                         }
 
                         // Store conversation memory (non-blocking — failures are logged, not propagated)
-                        self.store_conversation_memory(&msg.content, &result.content)
+                        self.store_conversation_memory(&msg.content, &result.content, &trace_id_str)
                             .await;
 
                         // Emit ToolSucceeded learning event if tools were used
@@ -724,7 +738,7 @@ impl AgentLoop {
                         // Skip outbound if stream consumer already delivered the response
                         if stream_delivered_msg_id.is_none() {
                             if let Err(e) = self.bus.publish_outbound(outbound).await {
-                                error!("Failed to publish outbound message: {}", e);
+                                error!(trace_id = %trace_id_str, "Failed to publish outbound message: {}", e);
                             }
                         }
 
@@ -787,6 +801,7 @@ impl AgentLoop {
                     });
 
                     error!(
+                        trace_id = %trace_id_str,
                         error = %e,
                         "Agent run error for session {}, sending error reply",
                         session_key
@@ -803,7 +818,7 @@ impl AgentLoop {
                         metadata: Default::default(),
                     };
                     if let Err(send_err) = self.bus.publish_outbound(error_outbound).await {
-                        error!("Failed to send error reply: {}", send_err);
+                        error!(trace_id = %trace_id_str, "Failed to send error reply: {}", send_err);
                     }
 
                     // Emit ToolFailed learning event
@@ -884,7 +899,7 @@ impl AgentLoop {
     /// configured or no memories were found. Output is bounded by the char budget
     /// from [`MemoryConfig`] (or [`DEFAULT_MEMORY_CHAR_BUDGET`] as fallback) —
     /// entries that would exceed the budget are skipped entirely.
-    async fn recall_memories(&self, query_text: &str) -> Option<String> {
+    async fn recall_memories(&self, query_text: &str, trace_id: &str) -> Option<String> {
         let store = self.memory_store.as_ref()?;
 
         let query = MemoryQuery::new()
@@ -946,7 +961,7 @@ impl AgentLoop {
                 ))
             }
             Err(e) => {
-                warn!("Memory recall failed: {}", e);
+                warn!(trace_id = %trace_id, "Memory recall failed: {}", e);
                 None
             }
         }
@@ -957,7 +972,12 @@ impl AgentLoop {
     /// Extracts a summary from the user message and agent response, then stores
     /// it as an [`MemoryCategory::AgentNote`]. Failures are logged but not propagated
     /// — memory storage must not break the agent loop.
-    async fn store_conversation_memory(&self, user_msg: &str, agent_response: &str) {
+    async fn store_conversation_memory(
+        &self,
+        user_msg: &str,
+        agent_response: &str,
+        trace_id: &str,
+    ) {
         let Some(store) = self.memory_store.as_ref() else {
             return;
         };
@@ -965,6 +985,7 @@ impl AgentLoop {
         let quality = summary_quality(user_msg, agent_response);
         if quality < MEMORY_QUALITY_THRESHOLD {
             tracing::debug!(
+                trace_id = %trace_id,
                 "Skipping low-quality conversation memory (quality={:.2}): {:.80}",
                 quality,
                 user_msg
@@ -985,7 +1006,7 @@ impl AgentLoop {
         {
             let entries: Vec<_> = existing.into_iter().map(|s| s.entry).collect();
             if is_near_duplicate(&content, &entries) {
-                tracing::debug!("Skipping duplicate conversation memory: {:.80}", content);
+                tracing::debug!(trace_id = %trace_id, "Skipping duplicate conversation memory: {:.80}", content);
                 return;
             }
         }
@@ -995,7 +1016,7 @@ impl AgentLoop {
             MemoryEntry::new(content, MemoryCategory::AgentNote).with_confidence(confidence);
 
         if let Err(e) = store.store(entry).await {
-            warn!("Failed to store conversation memory: {}", e);
+            warn!(trace_id = %trace_id, "Failed to store conversation memory: {}", e);
         }
     }
 
@@ -1329,7 +1350,7 @@ async fn post_task_reflect(task: ReflectionTask) {
     let provider = match task.provider_registry.get_provider(provider_name) {
         Some(p) => p,
         None => {
-            warn!("No provider available for task reflection");
+            warn!(trace_id = %task.trace_id.as_deref().unwrap_or("-"), "No provider available for task reflection");
             return;
         }
     };
@@ -1397,6 +1418,7 @@ async fn post_task_reflect(task: ReflectionTask) {
                 if attempt < REFLECTION_MAX_RETRIES {
                     let delay = REFLECTION_BACKOFF_BASE_MS * 2u64.pow(attempt);
                     warn!(
+                        trace_id = %task.trace_id.as_deref().unwrap_or("-"),
                         attempt,
                         max_retries = REFLECTION_MAX_RETRIES,
                         "Post-task reflection LLM call failed, retrying in {}ms: {}",
@@ -1416,11 +1438,13 @@ async fn post_task_reflect(task: ReflectionTask) {
     let total = prev + 1;
     if total >= REFLECTION_CONSECUTIVE_ERROR_THRESHOLD {
         error!(
+            trace_id = %task.trace_id.as_deref().unwrap_or("-"),
             consecutive_failures = total,
             "Post-task reflection has failed {} times in a row: {}", total, last_error
         );
     } else {
         warn!(
+            trace_id = %task.trace_id.as_deref().unwrap_or("-"),
             "Post-task reflection failed after {} retries: {}",
             REFLECTION_MAX_RETRIES, last_error
         );
@@ -2006,7 +2030,7 @@ mod tests {
     #[tokio::test]
     async fn test_recall_memories_no_store() {
         let al = make_agent_loop();
-        let result = al.recall_memories("test query").await;
+        let result = al.recall_memories("test query", "-").await;
         assert!(result.is_none());
     }
 
@@ -2014,7 +2038,7 @@ mod tests {
     async fn test_recall_memories_empty_store() {
         let mock = Arc::new(MockMemoryStore::new());
         let al = make_agent_loop().with_memory_store(mock.clone());
-        let result = al.recall_memories("test query").await;
+        let result = al.recall_memories("test query", "-").await;
         assert!(result.is_none());
         assert_eq!(mock.search_count(), 1);
     }
@@ -2029,7 +2053,7 @@ mod tests {
         .unwrap();
 
         let al = make_agent_loop().with_memory_store(mock.clone());
-        let result = al.recall_memories("rust").await;
+        let result = al.recall_memories("rust", "-").await;
         assert!(result.is_some());
         let text = result.unwrap();
         assert!(text.contains("User likes Rust"));
@@ -2046,7 +2070,7 @@ mod tests {
             .unwrap();
 
         let al = make_agent_loop().with_memory_store(mock.clone());
-        let result = al.recall_memories("rust programming").await;
+        let result = al.recall_memories("rust programming", "-").await;
         // "rust programming" does not match "Python scripting"
         assert!(result.is_none());
     }
@@ -2055,7 +2079,7 @@ mod tests {
     async fn test_store_conversation_memory_no_store() {
         let al = make_agent_loop();
         // Should not panic or error
-        al.store_conversation_memory("hello", "hi there").await;
+        al.store_conversation_memory("hello", "hi there", "-").await;
     }
 
     #[tokio::test]
@@ -2063,7 +2087,7 @@ mod tests {
         let mock = Arc::new(MockMemoryStore::new());
         let al = make_agent_loop().with_memory_store(mock.clone());
 
-        al.store_conversation_memory("What is Rust?", "Rust is a systems language")
+        al.store_conversation_memory("What is Rust?", "Rust is a systems language", "-")
             .await;
 
         assert_eq!(mock.store_count(), 1);
@@ -2088,11 +2112,13 @@ mod tests {
         al.store_conversation_memory(
             "How do I run the test suite?",
             "Use cargo test --workspace to run all tests across crates",
+            "-",
         )
         .await;
         al.store_conversation_memory(
             "What database driver should I use?",
             "The sqlx crate provides async database access with compile-time query checking",
+            "-",
         )
         .await;
 
@@ -2241,7 +2267,7 @@ mod tests {
         let mock = Arc::new(MockMemoryStore::new());
         let al = make_agent_loop().with_memory_store(mock.clone());
 
-        al.store_conversation_memory("hi", "hello").await;
+        al.store_conversation_memory("hi", "hello", "-").await;
         assert_eq!(
             mock.store_count(),
             0,
@@ -2257,6 +2283,7 @@ mod tests {
         al.store_conversation_memory(
             "How do I configure the database connection pool?",
             "Use the r2d2 crate with your database driver to manage the pool",
+            "-",
         )
         .await;
         assert_eq!(mock.store_count(), 1);
@@ -2315,7 +2342,7 @@ mod tests {
 
         let al = make_agent_loop().with_memory_store(Arc::new(store));
 
-        let result = al.recall_memories("dark mode").await;
+        let result = al.recall_memories("dark mode", "-").await;
         assert!(result.is_some());
         let text = result.unwrap();
         assert!(text.contains("dark mode"));
@@ -2329,7 +2356,7 @@ mod tests {
             .unwrap();
 
         let al = make_agent_loop().with_memory_store(mock);
-        let result = al.recall_memories("test").await.unwrap();
+        let result = al.recall_memories("test", "-").await.unwrap();
         assert!(
             result.starts_with("<memory-context>\n"),
             "should start with <memory-context> tag"
@@ -2360,7 +2387,7 @@ mod tests {
         .unwrap();
 
         let al = make_agent_loop().with_memory_store(mock);
-        let result = al.recall_memories("ignore").await.unwrap();
+        let result = al.recall_memories("ignore", "-").await.unwrap();
 
         // The raw </memory-context> must be escaped so it can't break out
         assert!(
@@ -2388,7 +2415,7 @@ mod tests {
             .unwrap();
 
         let al = make_agent_loop().with_memory_store(mock);
-        let result = al.recall_memories("A").await.unwrap();
+        let result = al.recall_memories("A", "-").await.unwrap();
 
         assert!(result.contains("A &amp; B &lt; C &gt; D"));
     }
@@ -2402,7 +2429,7 @@ mod tests {
             .unwrap();
 
         let al = make_agent_loop().with_memory_store(mock);
-        let result = al.recall_memories("test").await.unwrap();
+        let result = al.recall_memories("test", "-").await.unwrap();
         // Category "fact" has no special chars, just verify it still works
         assert!(result.contains("[fact]"));
     }
@@ -2421,7 +2448,7 @@ mod tests {
             .unwrap();
 
         let al = make_agent_loop().with_memory_store(mock);
-        let result = al.recall_memories("x").await.unwrap();
+        let result = al.recall_memories("x", "-").await.unwrap();
 
         assert!(
             result.contains("<memory-context>"),
@@ -2460,7 +2487,7 @@ mod tests {
         let al = make_agent_loop()
             .with_memory_store(mock)
             .with_memory_config(mem_config);
-        let result = al.recall_memories("a").await.unwrap();
+        let result = al.recall_memories("a", "-").await.unwrap();
 
         let inner = result
             .strip_prefix("<memory-context>\n")
@@ -2506,7 +2533,7 @@ mod tests {
         let al = make_agent_loop()
             .with_memory_store(mock)
             .with_memory_config(mem_config);
-        let result = al.recall_memories("a").await.unwrap();
+        let result = al.recall_memories("a", "-").await.unwrap();
 
         // With budget=50, each entry line is ~34 chars ("- ENTRY [fact] (confidence: 0.XX)"),
         // so only 1 entry should fit.
@@ -2539,7 +2566,7 @@ mod tests {
 
         let al = make_agent_loop().with_memory_store(Arc::new(store));
 
-        al.store_conversation_memory("How do I build?", "Use cargo build")
+        al.store_conversation_memory("How do I build?", "Use cargo build", "-")
             .await;
 
         // Verify stored by searching
@@ -2653,7 +2680,7 @@ mod tests {
             .with_learning_bus(bus);
 
         // Trigger recall (which emits the event)
-        let result = al.recall_memories("rust").await;
+        let result = al.recall_memories("rust", "-").await;
         assert!(result.is_some());
 
         // Verify the event was published
@@ -2681,7 +2708,7 @@ mod tests {
         let mut rx = bus.subscribe();
 
         let al = make_agent_loop().with_learning_bus(bus);
-        let result = al.recall_memories("rust").await;
+        let result = al.recall_memories("rust", "-").await;
         assert!(result.is_none());
 
         // No store → no event emitted
@@ -2701,7 +2728,7 @@ mod tests {
             .with_learning_bus(bus);
 
         // Empty store → recall returns None → no hit
-        let _ = al.recall_memories("anything").await;
+        let _ = al.recall_memories("anything", "-").await;
 
         // Verify event was emitted with hit=false
         let event = rx.try_recv().expect("should receive event");

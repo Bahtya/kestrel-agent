@@ -51,6 +51,7 @@ pub struct StreamConsumer {
     current_edit_interval: f64,
     in_think_block: bool,
     think_buffer: String,
+    trace_id: String,
 }
 
 impl StreamConsumer {
@@ -80,6 +81,7 @@ impl StreamConsumer {
             current_edit_interval,
             in_think_block: false,
             think_buffer: String::new(),
+            trace_id: "-".to_string(),
         }
     }
 
@@ -102,6 +104,11 @@ impl StreamConsumer {
                         // Drop chunks from other sessions
                         if chunk.session_key != self.session_key {
                             continue;
+                        }
+                        if self.trace_id == "-" {
+                            if let Some(ref tid) = chunk.trace_id {
+                                self.trace_id = tid.clone();
+                            }
                         }
                         if chunk.done {
                             got_done = true;
@@ -181,6 +188,7 @@ impl StreamConsumer {
                     let ok = self.send_or_edit(&chunk, false).await;
                     if !ok {
                         warn!(
+                            trace_id = %self.trace_id,
                             "Stream chunk split-and-send failed ({} bytes remaining), dropping rest",
                             self.accumulated.len()
                         );
@@ -272,6 +280,7 @@ impl StreamConsumer {
                             self.current_edit_interval =
                                 (self.current_edit_interval * 2.0).min(10.0);
                             debug!(
+                                trace_id = %self.trace_id,
                                 "Flood control on edit (strike {}/{}), backoff → {:.1}s",
                                 self.flood_strikes, MAX_FLOOD_STRIKES, self.current_edit_interval
                             );
@@ -283,6 +292,7 @@ impl StreamConsumer {
 
                         // Non-flood or strikes exhausted: enter fallback mode
                         debug!(
+                            trace_id = %self.trace_id,
                             "Edit failed (strikes={}), entering fallback mode",
                             self.flood_strikes
                         );
@@ -290,7 +300,7 @@ impl StreamConsumer {
                         false
                     }
                     Err(e) => {
-                        warn!("Edit message error: {e}");
+                        warn!(trace_id = %self.trace_id, "Edit message error: {e}");
                         self.edit_supported = false;
                         false
                     }
@@ -317,7 +327,7 @@ impl StreamConsumer {
                     false
                 }
                 Err(e) => {
-                    warn!("Stream send error: {e}");
+                    warn!(trace_id = %self.trace_id, "Stream send error: {e}");
                     self.edit_supported = false;
                     false
                 }

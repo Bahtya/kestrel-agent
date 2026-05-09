@@ -789,6 +789,7 @@ impl WebSocketChannel {
 
             if let Err(e) = handler.send(inbound).await {
                 warn!(
+                    trace_id = %trace_id,
                     "Failed to forward WebSocket message from {}: {}",
                     client_id, e
                 );
@@ -953,7 +954,10 @@ impl BaseChannel for WebSocketChannel {
 
         match client.send(json) {
             Ok(()) => {
-                debug!("Sent message to WebSocket client {}", chat_id);
+                debug!(
+                    trace_id = %trace_id.unwrap_or("-"),
+                    "Sent message to WebSocket client {}", chat_id
+                );
                 if let Some(tid) = trace_id {
                     tracing::info!(
                         target: "comm",
@@ -971,7 +975,10 @@ impl BaseChannel for WebSocketChannel {
                 })
             }
             Err(e) => {
-                warn!("Failed to send to WebSocket client {}: {}", chat_id, e);
+                warn!(
+                    trace_id = %trace_id.unwrap_or("-"),
+                    "Failed to send to WebSocket client {}: {}", chat_id, e
+                );
                 Ok(SendResult {
                     success: false,
                     message_id: None,
@@ -1075,7 +1082,10 @@ pub async fn run_ws_stream_consumer(
             envelope.trace_id = chunk.trace_id.clone();
             if let Ok(json) = envelope.to_json() {
                 if client_tx.send(json).is_err() {
-                    debug!("Failed to send streaming chunk to client {}", chat_id);
+                    debug!(
+                        trace_id = %chunk.trace_id.as_deref().unwrap_or("-"),
+                        "Failed to send streaming chunk to client {}", chat_id
+                    );
                 }
             }
         }

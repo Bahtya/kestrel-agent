@@ -238,7 +238,10 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command and return the output. Use for running system commands, scripts, and programs."
+        "Execute a shell command and return the output. \
+         Use for running external programs and system commands (git, docker, python, npm, etc.). \
+         For cross-platform string processing, JSON manipulation, or batch file operations \
+         (especially on Windows where cmd.exe is limited), prefer the 'script' tool instead."
     }
 
     fn parameters_schema(&self) -> Value {

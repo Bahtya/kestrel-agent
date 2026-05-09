@@ -732,7 +732,7 @@ mod tests {
             "code:script:timeout:",
         ];
 
-        for q in &tricky_queries {
+        for q in tricky_queries {
             let result = store.search(&MemoryQuery::new().with_text(q)).await;
             assert!(result.is_ok(), "query '{q}' should not error: {:?}", result);
         }

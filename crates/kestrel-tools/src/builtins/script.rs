@@ -29,6 +29,7 @@ const BLOCKED_WRITE_PATHS_UNIX: &[&str] = &[
     "/opt",
 ];
 
+#[cfg(windows)]
 const BLOCKED_WRITE_PATHS_WINDOWS: &[&str] = &[
     "C:\\Windows",
     "C:\\Program Files",
@@ -912,16 +913,14 @@ mod tests {
         let result = tool
             .execute(json!({"code": "io.open('/tmp/test', 'w')"}))
             .await;
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("nil")
-                || result.unwrap_err().to_string().contains("error")
-        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("nil") || err_msg.contains("error"));
     }
 
     #[tokio::test]
     async fn test_script_sandbox_blocks_os_execute() {
         let tool = ScriptTool::new();
+        // Our safe os table has no execute method, so this should error
         let result = tool
             .execute(json!({"code": "os.execute('echo pwned')"}))
             .await;

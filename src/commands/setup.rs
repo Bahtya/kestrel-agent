@@ -1591,14 +1591,14 @@ mod tests {
             MockAction::Password {
                 result: "sk-test-key",
             },
-            // Step 2: Telegram (skip via "No" in confirm_or_back)
-            MockAction::Select { result: 1 }, // "No" in [No, Yes, ↩]
+            // Step 2: Telegram (skip) — confirm_or_back [No, Yes, ↩], index 0 = No
+            MockAction::Select { result: 0 }, // "No"
             // Step 3: Feishu (skip)
-            MockAction::Select { result: 1 }, // "No"
+            MockAction::Select { result: 0 }, // "No"
             // Step 4: WebSocket (skip)
-            MockAction::Select { result: 1 }, // "No"
+            MockAction::Select { result: 0 }, // "No"
             // Step 5: WeChat (skip)
-            MockAction::Select { result: 1 }, // "No"
+            MockAction::Select { result: 0 }, // "No"
             // Review: Save
             MockAction::Select { result: 5 }, // Save
             MockAction::Confirm {
@@ -1642,11 +1642,11 @@ mod tests {
             MockAction::Password {
                 result: "sk-ant-test",
             },
-            // Step 2-5: Skip all channels
-            MockAction::Select { result: 1 }, // Telegram No
-            MockAction::Select { result: 1 }, // Feishu No
-            MockAction::Select { result: 1 }, // WebSocket No
-            MockAction::Select { result: 1 }, // WeChat No
+            // Step 2-5: Skip all channels — confirm_or_back [No, Yes, ↩], index 0 = No
+            MockAction::Select { result: 0 }, // Telegram No
+            MockAction::Select { result: 0 }, // Feishu No
+            MockAction::Select { result: 0 }, // WebSocket No
+            MockAction::Select { result: 0 }, // WeChat No
             // Review: Save
             MockAction::Select { result: 5 }, // Save
             MockAction::Confirm {

@@ -13,6 +13,7 @@ use kestrel_config::{
 use owo_colors::OwoColorize;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 // ── Provider display info ──────────────────────────────────────
 
@@ -808,9 +809,271 @@ fn validate_url(input: &str) -> Result<String> {
     Ok(url)
 }
 
+// ── Connectivity validation ────────────────────────────────────
+
+/// Result of a connectivity check.
+enum ConnectivityResult {
+    /// Successfully connected and authenticated.
+    Ok {
+        latency_ms: u64,
+        models: Vec<String>,
+    },
+    /// Connected to server but authentication failed (HTTP 401/403).
+    AuthFailed(String),
+    /// Server unreachable or other network error.
+    Unreachable(String),
+}
+
+/// Test API key validity by making a real request to the provider.
+///
+/// Most OpenAI-compatible providers support `GET /models` with Bearer auth.
+/// For Anthropic we use `GET /v1/models` with `x-api-key` header.
+fn test_api_key_connectivity(
+    provider_key: &str,
+    base_url: &str,
+    api_key: &str,
+) -> ConnectivityResult {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => return ConnectivityResult::Unreachable(format!("Runtime error: {}", e)),
+    };
+
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build();
+
+        let client = match client {
+            Ok(c) => c,
+            Err(e) => return ConnectivityResult::Unreachable(format!("Client error: {}", e)),
+        };
+
+        let start = std::time::Instant::now();
+
+        // Build the request based on provider type
+        let (display_url, req) = build_validation_request(provider_key, base_url, api_key, &client);
+
+        match req {
+            Ok(request) => match client.execute(request).await {
+                Ok(resp) => {
+                    let latency = start.elapsed().as_millis() as u64;
+                    let status = resp.status();
+
+                    if status.is_success() {
+                        let models = parse_models_from_response(provider_key, resp).await;
+                        ConnectivityResult::Ok {
+                            latency_ms: latency,
+                            models,
+                        }
+                    } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                        let body = resp.text().await.unwrap_or_default();
+                        let msg = extract_error_message(&body)
+                            .unwrap_or_else(|| format!("HTTP {} — API key may be invalid", status));
+                        ConnectivityResult::AuthFailed(msg)
+                    } else {
+                        // Other HTTP errors — report with status code so user can diagnose
+                        let msg = format!("Server returned HTTP {} for {}", status, display_url);
+                        ConnectivityResult::Unreachable(msg)
+                    }
+                }
+                Err(e) => {
+                    let msg = if e.is_timeout() {
+                        "Connection timed out (10s)".to_string()
+                    } else if e.is_connect() {
+                        format!("Cannot connect to {}", display_url)
+                    } else {
+                        format!("{}", e)
+                    };
+                    ConnectivityResult::Unreachable(msg)
+                }
+            },
+            Err(e) => ConnectivityResult::Unreachable(format!("Request error: {}", e)),
+        }
+    })
+}
+
+/// Build the validation HTTP request based on provider type.
+/// Returns (display_url, request_result) where display_url is safe to show in error messages.
+fn build_validation_request(
+    provider_key: &str,
+    base_url: &str,
+    api_key: &str,
+    client: &reqwest::Client,
+) -> (String, Result<reqwest::Request, reqwest::Error>) {
+    let (display_url, req_builder) = match provider_key {
+        "anthropic" => {
+            let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+            let req = client
+                .get(&url)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01");
+            (url, req.build())
+        }
+        "gemini" => {
+            let url = format!("{}?key={}", base_url.trim_end_matches('/'), api_key);
+            // Don't expose API key in error messages
+            let display = format!("{}/models", base_url.trim_end_matches('/'));
+            let req = client.get(&url);
+            (display, req.build())
+        }
+        // OpenAI-compatible providers: openai, openrouter, deepseek, groq, moonshot, minimax,
+        // github_copilot, openai_codex, glm_coding_plan, etc.
+        _ => {
+            let base = base_url.trim_end_matches('/');
+            let url = format!("{}/models", base);
+            let req = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", api_key));
+            (url, req.build())
+        }
+    };
+    (display_url, req_builder)
+}
+
+/// Try to extract model names from the validation response.
+async fn parse_models_from_response(provider_key: &str, resp: reqwest::Response) -> Vec<String> {
+    let body = resp.text().await.unwrap_or_default();
+
+    if provider_key == "gemini" {
+        // Gemini returns { "models": [ { "name": "models/gemini-2.5-pro", ... } ] }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(models) = val.get("models").and_then(|m| m.as_array()) {
+                return models
+                    .iter()
+                    .filter_map(|m| {
+                        m.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n.trim_start_matches("models/").to_string())
+                    })
+                    .take(5)
+                    .collect();
+            }
+        }
+        return vec![];
+    }
+
+    if provider_key == "anthropic" {
+        // Anthropic /v1/models returns { "data": [ { "id": "claude-...", ... } ] }
+        return parse_openai_models(&body);
+    }
+
+    // OpenAI-compatible: { "data": [ { "id": "gpt-4o", ... } ] }
+    parse_openai_models(&body)
+}
+
+/// Parse model IDs from an OpenAI-style { "data": [ ... ] } response.
+fn parse_openai_models(body: &str) -> Vec<String> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(data) = val.get("data").and_then(|d| d.as_array()) {
+            return data
+                .iter()
+                .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                .take(5)
+                .collect();
+        }
+    }
+    vec![]
+}
+
+/// Extract a human-readable error message from an error response body.
+fn extract_error_message(body: &str) -> Option<String> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+        // { "error": { "message": "..." } } — OpenAI and Anthropic format
+        if let Some(msg) = val
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+        {
+            return Some(msg.to_string());
+        }
+        // Fallback: { "message": "..." }
+        if let Some(msg) = val.get("message").and_then(|m| m.as_str()) {
+            return Some(msg.to_string());
+        }
+    }
+    None
+}
+
+/// Run connectivity validation after provider config is entered.
+/// Shows results to user and asks if they want to continue on failure.
+/// Accepts a connectivity test fn (for testability).
+fn run_connectivity_check(
+    io: &dyn WizardIo,
+    provider_key: &str,
+    base_url: &str,
+    api_key: &str,
+    test_fn: fn(&str, &str, &str) -> ConnectivityResult,
+) -> Result<()> {
+    // Skip for Ollama (local, no API key needed)
+    if provider_key == "ollama" {
+        return Ok(());
+    }
+
+    io.write_line("")?;
+    io.write_line(&format!("  {} Validating API key…", "⟳".cyan()))?;
+
+    match test_fn(provider_key, base_url, api_key) {
+        ConnectivityResult::Ok { latency_ms, models } => {
+            if models.is_empty() {
+                io.write_line(&format!(
+                    "  {} Connected! (latency: {}ms)",
+                    "✓".green(),
+                    latency_ms
+                ))?;
+            } else {
+                io.write_line(&format!(
+                    "  {} Connected! (latency: {}ms)",
+                    "✓".green(),
+                    latency_ms
+                ))?;
+                let models_str = models.join(", ");
+                io.write_line(&format!("    Available models: {}", models_str.dimmed()))?;
+            }
+        }
+        ConnectivityResult::AuthFailed(msg) => {
+            io.write_line(&format!(
+                "  {} API key validation failed: {}",
+                "✗".red(),
+                msg
+            ))?;
+            if !io.confirm("  Continue with this key anyway?", false)? {
+                bail!("Provider configuration cancelled.");
+            }
+        }
+        ConnectivityResult::Unreachable(msg) => {
+            io.write_line(&format!(
+                "  {} Could not verify API key: {}",
+                "⚠".yellow(),
+                msg
+            ))?;
+            io.write_line(&format!(
+                "    {}",
+                "The server may be unreachable from this network.".dimmed()
+            ))?;
+            if !io.confirm("  Continue anyway?", true)? {
+                bail!("Provider configuration cancelled.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ── Provider configuration ─────────────────────────────────────
 
 fn configure_provider(io: &dyn WizardIo, config: &mut Config) -> Result<StepAction> {
+    #[cfg(test)]
+    let test_fn: fn(&str, &str, &str) -> ConnectivityResult = mock_connectivity_ok;
+    #[cfg(not(test))]
+    let test_fn: fn(&str, &str, &str) -> ConnectivityResult = test_api_key_connectivity;
+    configure_provider_inner(io, config, test_fn)
+}
+
+fn configure_provider_inner(
+    io: &dyn WizardIo,
+    config: &mut Config,
+    connectivity_fn: fn(&str, &str, &str) -> ConnectivityResult,
+) -> Result<StepAction> {
     let display_names: Vec<&str> = PROVIDERS.iter().map(|p| p.display).collect();
 
     let default_idx = config
@@ -869,6 +1132,17 @@ fn configure_provider(io: &dyn WizardIo, config: &mut Config) -> Result<StepActi
                 }
             }
         }
+    }
+
+    // Connectivity validation
+    let base_url = get_provider_url(config, provider_key)
+        .unwrap_or(PROVIDERS[provider_idx].default_url)
+        .to_string();
+    let api_key = get_provider_api_key(config, provider_key)
+        .unwrap_or("")
+        .to_string();
+    if !api_key.is_empty() && !base_url.is_empty() {
+        run_connectivity_check(io, provider_key, &base_url, &api_key, connectivity_fn)?;
     }
 
     Ok(StepAction::Continue)
@@ -1329,6 +1603,20 @@ fn set_provider_api_key(config: &mut Config, provider: &str, key: &str) {
     }
 }
 
+// ── Test helpers (cfg(test) only) ─────────────────────────────
+
+#[cfg(test)]
+fn mock_connectivity_ok(
+    _provider_key: &str,
+    _base_url: &str,
+    _api_key: &str,
+) -> ConnectivityResult {
+    ConnectivityResult::Ok {
+        latency_ms: 42,
+        models: vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()],
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1766,5 +2054,154 @@ mod tests {
         assert_eq!(weixin.allowed_users, vec!["u1"]);
         assert_eq!(weixin.group_allowed_users, vec!["g1"]);
         assert!(weixin.enabled);
+    }
+
+    // ── Connectivity validation tests ──────────────────────────
+
+    fn mock_connectivity_auth_fail(
+        _provider_key: &str,
+        _base_url: &str,
+        _api_key: &str,
+    ) -> ConnectivityResult {
+        ConnectivityResult::AuthFailed("HTTP 401 Unauthorized".to_string())
+    }
+
+    fn mock_connectivity_unreachable(
+        _provider_key: &str,
+        _base_url: &str,
+        _api_key: &str,
+    ) -> ConnectivityResult {
+        ConnectivityResult::Unreachable("Connection timed out".to_string())
+    }
+
+    #[test]
+    fn connectivity_check_ok_shows_models() {
+        let mock = MockWizard::new(vec![]);
+        let result = run_connectivity_check(
+            &mock,
+            "openai",
+            "https://api.openai.com/v1",
+            "sk-test-key",
+            mock_connectivity_ok,
+        );
+        assert!(result.is_ok());
+        let output = mock.output();
+        assert!(output.contains("Connected!"));
+        assert!(output.contains("gpt-4o"));
+    }
+
+    #[test]
+    fn connectivity_check_auth_fail_asks_continue() {
+        let mock = MockWizard::new(vec![MockAction::Confirm {
+            prompt_contains: "Continue",
+            result: true,
+        }]);
+        let result = run_connectivity_check(
+            &mock,
+            "openai",
+            "https://api.openai.com/v1",
+            "bad-key",
+            mock_connectivity_auth_fail,
+        );
+        assert!(result.is_ok());
+        let output = mock.output();
+        assert!(output.contains("validation failed"));
+    }
+
+    #[test]
+    fn connectivity_check_auth_fail_user_cancels() {
+        let mock = MockWizard::new(vec![MockAction::Confirm {
+            prompt_contains: "Continue",
+            result: false,
+        }]);
+        let result = run_connectivity_check(
+            &mock,
+            "openai",
+            "https://api.openai.com/v1",
+            "bad-key",
+            mock_connectivity_auth_fail,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn connectivity_check_unreachable_asks_continue() {
+        let mock = MockWizard::new(vec![MockAction::Confirm {
+            prompt_contains: "Continue",
+            result: true,
+        }]);
+        let result = run_connectivity_check(
+            &mock,
+            "openai",
+            "https://api.openai.com/v1",
+            "sk-test",
+            mock_connectivity_unreachable,
+        );
+        assert!(result.is_ok());
+        let output = mock.output();
+        assert!(output.contains("Could not verify"));
+    }
+
+    #[test]
+    fn connectivity_check_skips_ollama() {
+        let mock = MockWizard::new(vec![]);
+        let result = run_connectivity_check(
+            &mock,
+            "ollama",
+            "http://localhost:11434",
+            "",
+            mock_connectivity_ok,
+        );
+        assert!(result.is_ok());
+        // No output for Ollama (skipped)
+        assert!(mock.output().is_empty());
+    }
+
+    #[test]
+    fn parse_models_from_openai_response() {
+        let body = r#"{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"gpt-3.5-turbo"}]}"#;
+        let models = parse_openai_models(body);
+        assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"]);
+    }
+
+    #[test]
+    fn parse_models_empty_response() {
+        let models = parse_openai_models("not json");
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn extract_error_message_from_openai_format() {
+        let body = r#"{"error":{"message":"Incorrect API key","type":"invalid_request_error"}}"#;
+        let msg = extract_error_message(body).unwrap();
+        assert_eq!(msg, "Incorrect API key");
+    }
+
+    #[test]
+    fn extract_error_message_no_message() {
+        let body = r#"{"status":"ok"}"#;
+        assert!(extract_error_message(body).is_none());
+    }
+
+    #[test]
+    fn configure_provider_with_connectivity() {
+        let mock = MockWizard::new(vec![
+            MockAction::Select { result: 0 }, // openai
+            MockAction::Input { result: "gpt-4o" },
+            MockAction::Input {
+                result: "https://api.openai.com/v1",
+            },
+            MockAction::Password {
+                result: "sk-testkey123456",
+            },
+        ]);
+
+        let mut config = Config::default();
+        configure_provider_inner(&mock, &mut config, mock_connectivity_ok).unwrap();
+
+        assert_eq!(config.agent.provider.as_deref(), Some("openai"));
+        assert_eq!(config.agent.model, "gpt-4o");
+        let output = mock.output();
+        assert!(output.contains("Connected!"));
     }
 }

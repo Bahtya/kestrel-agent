@@ -1,5 +1,25 @@
 # Changelog
 
+## [v0.9.0] - 2026-05-09
+
+### New Features
+- feat(setup): API key and URL connectivity validation during setup (#275, PR #282)
+  - Real HTTP request to provider endpoint to validate API key after entry
+  - Parse and display available model names on success
+  - Auth failure (401/403) with user-friendly messaging and option to continue
+  - Network error handling with option to proceed
+  - Provider-specific request builders for OpenAI, Anthropic, and Gemini
+  - Skip validation for Ollama (local, no API key needed)
+- feat(tools): built-in Lua script engine — ScriptTool (#279)
+  - Cross-platform scripting via Lua 5.4 sandbox
+  - Structured tracing logs, instruction count limit, safe os.* subset
+  - Optimized descriptions to guide AI tool selection
+- feat(tools): built-in terminal multiplexer — portable-pty (#280)
+
+### Bug Fixes
+- fix(feishu): rewrite WebSocket long-connection to use endpoint discovery + protobuf (#284)
+- fix(logging): add trace_id to all message processing log outputs (#285)
+
 ## [v0.8.4] - 2026-05-09
 
 ### Bug Fixes

@@ -107,8 +107,8 @@ impl ScriptTool {
             // Dangerous mode: all standard libraries
             StdLib::ALL
         } else {
-            // Safe mode: only non-dangerous libraries
-            StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8 | StdLib::PACKAGE
+            // Safe mode: only non-dangerous libraries (no PACKAGE to prevent loader abuse)
+            StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8
         };
 
         let lua = unsafe { Lua::unsafe_new_with(safe_libs, LuaOptions::default()) };
@@ -128,6 +128,9 @@ impl ScriptTool {
             globals
                 .set("loadfile", mlua::Value::Nil)
                 .map_err(|e| ToolError::Execution(format!("Failed to sandbox: {}", e)))?;
+            globals
+                .set("package", mlua::Value::Nil)
+                .map_err(|e| ToolError::Execution(format!("Failed to sandbox: {}", e)))?;
 
             // Replace os table with safe subset (date, time, clock only)
             let os_safe = lua.create_table().map_err(|e| {
@@ -143,13 +146,11 @@ impl ScriptTool {
                             .unwrap_or_default()
                             .as_secs() as i64
                     });
-                    // Use Lua's own os.date if available, otherwise return time
-                    let format = fmt.unwrap_or_else(|| "%c".to_string());
-                    // Simple implementation: return formatted time string
-                    lua.create_string(format!(
-                        "os.date({}) not fully implemented - timestamp: {}",
-                        format, time_val
-                    ))
+                    let dt = chrono::DateTime::from_timestamp(time_val, 0)
+                        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+                    let format = fmt.unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".to_string());
+                    // Lua strftime tokens are mostly compatible with chrono; pass through directly
+                    lua.create_string(dt.format(&format).to_string())
                 })
                 .map_err(|e| ToolError::Execution(format!("Failed to create os.date: {}", e)))?;
             os_safe
@@ -169,11 +170,12 @@ impl ScriptTool {
                 .set("time", os_time_fn)
                 .map_err(|e| ToolError::Execution(format!("Failed to set os.time: {}", e)))?;
 
-            // os.clock() -> elapsed CPU time
+            // os.clock() -> elapsed wall-clock time since first call
+            let clock_start = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
             let os_clock_fn = lua
-                .create_function(|_, _: ()| {
-                    // Return a simple elapsed time approximation
-                    Ok(0.0f64)
+                .create_function(move |_, _: ()| {
+                    let start = clock_start.lock().unwrap();
+                    Ok(start.elapsed().as_secs_f64())
                 })
                 .map_err(|e| ToolError::Execution(format!("Failed to create os.clock: {}", e)))?;
             os_safe
@@ -372,6 +374,7 @@ impl ScriptTool {
         // --- kestrel.mkdir(path) ---
         let mkdir_fn = lua
             .create_function(|_, path: String| {
+                validate_write_path(&path)?;
                 std::fs::create_dir_all(&path)
                     .map_err(|e| mlua::Error::external(format!("mkdir failed: {}", e)))
             })
@@ -383,6 +386,7 @@ impl ScriptTool {
         // --- kestrel.remove(path) ---
         let remove_fn = lua
             .create_function(|_, path: String| {
+                validate_write_path(&path)?;
                 let p = Path::new(&path);
                 if p.is_dir() {
                     std::fs::remove_dir_all(p)
@@ -523,10 +527,12 @@ impl Tool for ScriptTool {
 
         let lua = self.create_sandboxed_vm()?;
 
-        // Set up instruction limit via debug hook
+        // Set up instruction limit and wall-clock timeout via debug hook
+        let start = std::time::Instant::now();
         if !self.dangerous {
             let max_instructions = self.max_instructions;
             let instruction_counter = Arc::new(AtomicUsize::new(0));
+            let timeout = Duration::from_secs(timeout_secs);
             lua.set_hook(
                 HookTriggers::new().every_nth_instruction(1000),
                 move |_lua, _debug| {
@@ -539,6 +545,17 @@ impl Tool for ScriptTool {
                         return Err(mlua::Error::external(format!(
                             "Instruction limit exceeded (max {})",
                             max_instructions
+                        )));
+                    }
+                    if start.elapsed() > timeout {
+                        warn!(
+                            elapsed_secs = start.elapsed().as_secs(),
+                            timeout_secs = timeout.as_secs(),
+                            "Script timed out, aborting"
+                        );
+                        return Err(mlua::Error::external(format!(
+                            "Script timed out after {}s",
+                            timeout.as_secs()
                         )));
                     }
                     Ok(VmState::Continue)
@@ -582,22 +599,13 @@ impl Tool for ScriptTool {
             .set("print", print_capture)
             .map_err(|e| ToolError::Execution(format!("Failed to set print: {}", e)))?;
 
-        // Execute the script with timeout
+        // Execute the script
         let max_output = self.max_output_bytes;
-        let start = std::time::Instant::now();
-        let exec_result: Result<(), ToolError> = tokio::task::block_in_place(|| {
-            if start.elapsed() > Duration::from_secs(timeout_secs) {
-                return Err(ToolError::Timeout(format!(
-                    "Script timed out after {}s",
-                    timeout_secs
-                )));
-            }
-
-            match lua.load(code).exec() {
+        let exec_result: Result<(), ToolError> =
+            tokio::task::block_in_place(|| match lua.load(code).exec() {
                 Ok(()) => Ok(()),
                 Err(e) => Err(ToolError::Execution(format!("Lua error: {}", e))),
-            }
-        });
+            });
 
         let elapsed_ms = start.elapsed().as_millis();
 
@@ -808,32 +816,47 @@ fn lua_value_to_json(val: &mlua::Value) -> Result<Value, mlua::Error> {
         mlua::Value::Number(n) => Ok(json!(*n)),
         mlua::Value::String(s) => Ok(Value::String(s.to_str()?.to_string())),
         mlua::Value::Table(t) => {
-            // Determine if array or object
-            let mut is_array = true;
-            let mut max_key = 0i64;
-            for pair in t.sequence_values::<mlua::Value>() {
-                match pair {
-                    Ok(_) => max_key += 1,
-                    Err(_) => {
-                        is_array = false;
-                        break;
+            // Collect integer-keyed and string-keyed entries separately
+            let mut arr = Vec::new();
+            let mut has_int_keys = false;
+            for i in 1.. {
+                let v: mlua::Value = match t.get(i) {
+                    Ok(v) => v,
+                    Err(_) => break, // no more integer keys
+                };
+                if v.is_nil() {
+                    break;
+                }
+                has_int_keys = true;
+                arr.push(lua_value_to_json(&v)?);
+            }
+
+            let mut obj = serde_json::Map::new();
+            for pair in t.pairs::<mlua::Value, mlua::Value>() {
+                let (k, v): (mlua::Value, mlua::Value) = pair?;
+                match &k {
+                    mlua::Value::Integer(n) if *n >= 1 => continue, // already handled above
+                    mlua::Value::String(s) => {
+                        obj.insert(s.to_str()?.to_string(), lua_value_to_json(&v)?);
                     }
+                    _ => {} // skip other key types
                 }
             }
 
-            if is_array && max_key > 0 {
-                let mut arr = Vec::new();
-                for i in 1..=max_key {
-                    let v: mlua::Value = t.get(i)?;
-                    arr.push(lua_value_to_json(&v)?);
-                }
+            if has_int_keys && obj.is_empty() {
+                // Pure array
                 Ok(Value::Array(arr))
-            } else {
-                let mut obj = serde_json::Map::new();
-                for pair in t.pairs::<String, mlua::Value>() {
-                    let (k, v): (String, mlua::Value) = pair?;
-                    obj.insert(k, lua_value_to_json(&v)?);
+            } else if has_int_keys {
+                // Mixed: encode as object with integer keys as string keys
+                let mut mixed = serde_json::Map::new();
+                for (i, v) in arr.iter().enumerate() {
+                    mixed.insert((i + 1).to_string(), v.clone());
                 }
+                for (k, v) in obj {
+                    mixed.insert(k, v);
+                }
+                Ok(Value::Object(mixed))
+            } else {
                 Ok(Value::Object(obj))
             }
         }
@@ -1041,6 +1064,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_mkdir_blocked_system_path() {
+        let tool = ScriptTool::new();
+        let blocked_path = if cfg!(windows) {
+            r"C:\Windows\kestrel_test_dir"
+        } else {
+            "/etc/kestrel_test_dir"
+        };
+        let code = format!("kestrel.mkdir('{}')", blocked_path.replace('\\', "\\\\"));
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_remove_blocked_system_path() {
+        let tool = ScriptTool::new();
+        let blocked_path = if cfg!(windows) {
+            r"C:\Windows\System32\kestrel_test.txt"
+        } else {
+            "/etc/passwd"
+        };
+        let code = format!("kestrel.remove('{}')", blocked_path.replace('\\', "\\\\"));
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_script_list_dir() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
@@ -1088,6 +1137,28 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("5050"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_os_date() {
+        let tool = ScriptTool::new();
+        let result = tool
+            .execute(json!({"code": "print(os.date('%Y-%m-%d'))"}))
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // Should contain a 4-digit year (e.g. 2026)
+        assert!(output.trim().len() >= 10, "os.date output: {}", output);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_os_clock() {
+        let tool = ScriptTool::new();
+        let result = tool
+            .execute(json!({"code": "local t = os.clock(); print(type(t))"}))
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("number"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

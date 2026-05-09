@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
@@ -91,6 +91,7 @@ pub struct TerminalSession {
     cwd: Option<String>,
     cols: AtomicU16,
     rows: AtomicU16,
+    last_activity: AtomicU64,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -102,7 +103,7 @@ pub struct TerminalSession {
 // Safety: TerminalSession implements Sync because all interior mutability
 // is protected by Mutex or atomic operations:
 // - id, shell, cwd: String, inherently Send+Sync
-// - cols, rows: AtomicU16 — atomic provides Sync
+// - cols, rows, last_activity: AtomicU16/AtomicU64 — atomics provide Sync
 // - master: Mutex<Option<Box<dyn MasterPty + Send>>> — Mutex provides Sync
 // - child: Mutex<Option<Box<dyn Child + Send + Sync>>> — Mutex provides Sync
 // - writer: Mutex<Box<dyn Write + Send>> — Mutex provides Sync
@@ -110,6 +111,13 @@ pub struct TerminalSession {
 // - alive: Arc<AtomicBool> — Arc+Atomic provides Sync
 // - reader_handle: Option<JoinHandle<()>> — JoinHandle is Send+Sync (Rust 1.72+)
 unsafe impl Sync for TerminalSession {}
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 impl TerminalSession {
     /// Spawn a new PTY session.
@@ -179,6 +187,7 @@ impl TerminalSession {
             cwd: cwd.map(String::from),
             cols: AtomicU16::new(cols),
             rows: AtomicU16::new(rows),
+            last_activity: AtomicU64::new(epoch_secs()),
             master: Mutex::new(Some(master)),
             child: Mutex::new(Some(child)),
             writer: Mutex::new(writer),
@@ -199,6 +208,7 @@ impl TerminalSession {
             .write_all(input.as_bytes())
             .context("Failed to write to PTY")?;
         writer.flush().context("Failed to flush PTY writer")?;
+        self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -207,6 +217,7 @@ impl TerminalSession {
     /// If `timeout_ms` is `Some`, waits up to that many milliseconds for
     /// new output before returning.
     pub fn read_output(&self, timeout_ms: Option<u64>) -> Result<String> {
+        self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         {
             let mut buf = self.output_buffer.lock().unwrap();
             if !buf.is_empty() {
@@ -255,6 +266,7 @@ impl TerminalSession {
         }
         self.cols.store(cols, Ordering::Relaxed);
         self.rows.store(rows, Ordering::Relaxed);
+        self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -285,6 +297,11 @@ impl TerminalSession {
     /// Whether the underlying process is still alive.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed)
+    }
+
+    /// Return the epoch timestamp (seconds) of the last activity.
+    pub fn last_activity_secs(&self) -> u64 {
+        self.last_activity.load(Ordering::Relaxed)
     }
 
     /// Return session metadata.

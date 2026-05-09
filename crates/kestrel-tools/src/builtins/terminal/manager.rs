@@ -6,12 +6,22 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{info, warn};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Default maximum number of concurrent terminal sessions.
 const DEFAULT_MAX_SESSIONS: usize = 10;
+
+/// Default idle timeout in seconds (30 minutes).
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 /// Manages multiple PTY terminal sessions.
 ///
@@ -20,19 +30,24 @@ const DEFAULT_MAX_SESSIONS: usize = 10;
 ///
 /// Sessions are stored as `Arc<TerminalSession>` so async operations can
 /// release the registry lock before awaiting on session-level I/O.
+///
+/// Idle sessions (no activity for `idle_timeout_secs`) are automatically
+/// reaped during `create_session()` and `list_sessions()` calls.
 pub struct TerminalManager {
     sessions: RwLock<HashMap<String, Arc<TerminalSession>>>,
     max_sessions: usize,
     dangerous: bool,
+    idle_timeout_secs: u64,
 }
 
 impl TerminalManager {
-    /// Create a new empty session manager with default limits.
+    /// Create a new empty session manager with default limits and idle timeout.
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_sessions: DEFAULT_MAX_SESSIONS,
             dangerous: false,
+            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
         }
     }
 
@@ -42,12 +57,60 @@ impl TerminalManager {
             sessions: RwLock::new(HashMap::new()),
             max_sessions,
             dangerous,
+            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+        }
+    }
+
+    /// Create a session manager with explicit idle timeout.
+    ///
+    /// A value of 0 disables idle reaping.
+    pub fn with_idle_timeout(max_sessions: usize, dangerous: bool, idle_timeout_secs: u64) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            max_sessions,
+            dangerous,
+            idle_timeout_secs,
         }
     }
 
     /// Whether this manager runs in dangerous (unrestricted) mode.
     pub fn is_dangerous(&self) -> bool {
         self.dangerous
+    }
+
+    /// Kill and remove sessions that have been idle past the timeout.
+    ///
+    /// Returns the number of sessions reaped. A timeout of 0 disables reaping.
+    pub fn reap_idle_sessions(&self) -> usize {
+        let timeout = self.idle_timeout_secs;
+        if timeout == 0 {
+            return 0;
+        }
+
+        let now = epoch_secs();
+        let to_kill: Vec<String> = {
+            let sessions = self.sessions.read();
+            sessions
+                .iter()
+                .filter(|(_, s)| {
+                    let idle_secs = now.saturating_sub(s.last_activity_secs());
+                    idle_secs > timeout
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let count = to_kill.len();
+        for id in to_kill {
+            if let Some(session) = self.sessions.write().remove(&id) {
+                session.kill();
+                warn!(
+                    "Reaped idle terminal session '{}' (idle > {}s)",
+                    id, timeout
+                );
+            }
+        }
+        count
     }
 
     /// Spawn a new terminal session.
@@ -61,6 +124,8 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
     ) -> Result<String> {
+        self.reap_idle_sessions();
+
         let current_count = self.sessions.read().len();
         if current_count >= self.max_sessions {
             anyhow::bail!(
@@ -105,6 +170,7 @@ impl TerminalManager {
 
     /// List all sessions with their metadata.
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
+        self.reap_idle_sessions();
         let sessions = self.sessions.read();
         sessions.values().map(|s| s.info()).collect()
     }
@@ -128,12 +194,6 @@ impl TerminalManager {
         let session = sessions
             .get(session_id)
             .context(format!("Session '{}' not found", session_id))?;
-        debug!(
-            session_id = session_id,
-            cols = cols,
-            rows = rows,
-            "Resizing terminal session via manager"
-        );
         session.resize(cols, rows)
     }
 
@@ -221,13 +281,20 @@ mod tests {
 
     #[test]
     fn test_max_sessions_limit() {
-        // Create a manager with max_sessions=1 and dangerous=true to allow
-        // any shell (avoids shell validation issues in test environments).
         let mgr = TerminalManager::with_config(1, true);
         let id = mgr.create_session(None, None, 80, 24);
         assert!(id.is_ok(), "First session should succeed");
         let id2 = mgr.create_session(None, None, 80, 24);
         assert!(id2.is_err(), "Second session should fail due to limit");
         assert!(id2.unwrap_err().to_string().contains("Maximum number"));
+    }
+
+    #[test]
+    fn test_reap_idle_no_timeout() {
+        let mgr = TerminalManager::with_idle_timeout(10, true, 0);
+        let id = mgr.create_session(None, None, 80, 24);
+        assert!(id.is_ok());
+        assert_eq!(mgr.reap_idle_sessions(), 0);
+        assert_eq!(mgr.len(), 1);
     }
 }

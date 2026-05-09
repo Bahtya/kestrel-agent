@@ -32,7 +32,11 @@ aes = { workspace = true }
 url = { workspace = true }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tungstenite = "0.26"
+prost = "0.13"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 chrono = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.13"

@@ -851,7 +851,7 @@ fn test_api_key_connectivity(
         let (url, req) = build_validation_request(provider_key, base_url, api_key, &client);
 
         match req {
-            Ok(request) => match request.send().await {
+            Ok(request) => match client.execute(request).await {
                 Ok(resp) => {
                     let latency = start.elapsed().as_millis() as u64;
                     let status = resp.status();
@@ -1206,7 +1206,9 @@ fn configure_provider_inner(
     let base_url = get_provider_url(config, provider_key)
         .unwrap_or(PROVIDERS[provider_idx].default_url)
         .to_string();
-    let api_key = get_provider_api_key(config, provider_key).unwrap_or("").to_string();
+    let api_key = get_provider_api_key(config, provider_key)
+        .unwrap_or("")
+        .to_string();
     if !api_key.is_empty() && !base_url.is_empty() {
         run_connectivity_check_inner(io, provider_key, &base_url, &api_key, connectivity_fn)?;
     }

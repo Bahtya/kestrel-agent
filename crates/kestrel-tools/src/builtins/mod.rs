@@ -4,6 +4,8 @@ pub mod cron;
 pub mod filesystem;
 pub mod memory;
 pub mod message;
+#[cfg(feature = "lua-script")]
+pub mod script;
 pub mod search;
 pub mod shell;
 pub mod spawn;
@@ -44,6 +46,9 @@ pub fn register_all_with_config(registry: &ToolRegistry, config: BuiltinsConfig)
     registry.register(cron::CronTool::new());
     registry.register(spawn::SpawnTool::new());
     register_terminal_tools(registry, config.dangerous);
+
+    #[cfg(feature = "lua-script")]
+    registry.register(script::ScriptTool::new().dangerous(config.dangerous));
 }
 
 /// Register memory tools that require a memory store.
@@ -83,6 +88,8 @@ mod tests {
         );
         assert!(registry.is_mutating("cron"), "cron should be mutating");
         assert!(registry.is_mutating("spawn"), "spawn should be mutating");
+        #[cfg(feature = "lua-script")]
+        assert!(registry.is_mutating("script"), "script should be mutating");
         assert!(
             registry.is_mutating("send_message"),
             "send_message should be mutating"

@@ -1842,6 +1842,7 @@ async fn discover_ws_endpoint(
 }
 
 /// Build a new protobuf ping Frame (client heartbeat).
+#[allow(dead_code)]
 fn new_ping_frame(service_id: u64) -> pbbp2::Frame {
     let header = pbbp2::Header {
         key: HEADER_TYPE.to_string(),

@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
@@ -89,8 +89,8 @@ pub struct TerminalSession {
     id: String,
     shell: String,
     cwd: Option<String>,
-    cols: u16,
-    rows: u16,
+    cols: AtomicU16,
+    rows: AtomicU16,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -101,7 +101,8 @@ pub struct TerminalSession {
 
 // Safety: TerminalSession implements Sync because all interior mutability
 // is protected by Mutex or atomic operations:
-// - id, shell, cwd, cols, rows: String/u16, inherently Send+Sync
+// - id, shell, cwd: String, inherently Send+Sync
+// - cols, rows: AtomicU16 — atomic provides Sync
 // - master: Mutex<Option<Box<dyn MasterPty + Send>>> — Mutex provides Sync
 // - child: Mutex<Option<Box<dyn Child + Send + Sync>>> — Mutex provides Sync
 // - writer: Mutex<Box<dyn Write + Send>> — Mutex provides Sync
@@ -176,8 +177,8 @@ impl TerminalSession {
             id,
             shell: shell_cmd,
             cwd: cwd.map(String::from),
-            cols,
-            rows,
+            cols: AtomicU16::new(cols),
+            rows: AtomicU16::new(rows),
             master: Mutex::new(Some(master)),
             child: Mutex::new(Some(child)),
             writer: Mutex::new(writer),
@@ -252,11 +253,8 @@ impl TerminalSession {
             })
             .context("Failed to resize PTY")?;
         }
-        // Update stored dimensions. We need interior mutability here.
-        // Since resize is not called concurrently with itself (mutating tool),
-        // we can safely update via Cell-like pattern. However, since u16
-        // is not easily made atomic, we accept a potential brief inconsistency
-        // in info() — the PTY resize itself is the source of truth.
+        self.cols.store(cols, Ordering::Relaxed);
+        self.rows.store(rows, Ordering::Relaxed);
         Ok(())
     }
 
@@ -295,8 +293,8 @@ impl TerminalSession {
             id: self.id.clone(),
             shell: self.shell.clone(),
             cwd: self.cwd.clone(),
-            cols: self.cols,
-            rows: self.rows,
+            cols: self.cols.load(Ordering::Relaxed),
+            rows: self.rows.load(Ordering::Relaxed),
             alive: self.is_alive(),
         }
     }

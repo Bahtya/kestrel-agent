@@ -19,6 +19,8 @@
   - Automatic tool registration plus structured session lifecycle logging
 
 ### Bug Fixes
+- fix(tools): terminal resize() now updates stored cols/rows — `terminal_list_sessions` returns correct dimensions after resize (Issue #288)
+- fix(tools): ScriptTool os.date() no longer crashes on chrono-incompatible format specifiers — falls back to default format with a warning (Issue #289)
 - fix(feishu): rewrite WebSocket long-connection to use endpoint discovery + protobuf (PR #284)
   - Replace hardcoded WebSocket URL with Feishu endpoint discovery API
   - Switch frame handling from JSON auth messages to protobuf Frame protocol

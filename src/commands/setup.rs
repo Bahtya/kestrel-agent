@@ -814,7 +814,10 @@ fn validate_url(input: &str) -> Result<String> {
 /// Result of a connectivity check.
 enum ConnectivityResult {
     /// Successfully connected and authenticated.
-    Ok { latency_ms: u64, models: Vec<String> },
+    Ok {
+        latency_ms: u64,
+        models: Vec<String>,
+    },
     /// Connected to server but authentication failed (HTTP 401/403).
     AuthFailed(String),
     /// Server unreachable or other network error.
@@ -865,9 +868,8 @@ fn test_api_key_connectivity(
                         }
                     } else if status.as_u16() == 401 || status.as_u16() == 403 {
                         let body = resp.text().await.unwrap_or_default();
-                        let msg = extract_error_message(&body).unwrap_or_else(|| {
-                            format!("HTTP {} — API key may be invalid", status)
-                        });
+                        let msg = extract_error_message(&body)
+                            .unwrap_or_else(|| format!("HTTP {} — API key may be invalid", status));
                         ConnectivityResult::AuthFailed(msg)
                     } else {
                         // Other HTTP errors — server reachable but unexpected response
@@ -910,11 +912,7 @@ fn build_validation_request(
             (url, req.build())
         }
         "gemini" => {
-            let url = format!(
-                "{}?key={}",
-                base_url.trim_end_matches('/'),
-                api_key
-            );
+            let url = format!("{}?key={}", base_url.trim_end_matches('/'), api_key);
             let req = client.get(&url);
             (url, req.build())
         }
@@ -933,10 +931,7 @@ fn build_validation_request(
 }
 
 /// Try to extract model names from the validation response.
-async fn parse_models_from_response(
-    provider_key: &str,
-    resp: reqwest::Response,
-) -> Vec<String> {
+async fn parse_models_from_response(provider_key: &str, resp: reqwest::Response) -> Vec<String> {
     let body = resp.text().await.unwrap_or_default();
 
     if provider_key == "gemini" {
@@ -1007,56 +1002,10 @@ fn extract_error_message(body: &str) -> Option<String> {
     None
 }
 
-/// Test basic URL reachability with a HEAD request.
-fn test_url_reachability(base_url: &str) -> ConnectivityResult {
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => return ConnectivityResult::Unreachable(format!("Runtime error: {}", e)),
-    };
-
-    rt.block_on(async {
-        let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(8))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => return ConnectivityResult::Unreachable(format!("Client error: {}", e)),
-        };
-
-        let start = std::time::Instant::now();
-
-        match client.head(base_url).send().await {
-            Ok(_resp) => ConnectivityResult::Ok {
-                latency_ms: start.elapsed().as_millis() as u64,
-                models: vec![],
-            },
-            Err(e) => {
-                let msg = if e.is_timeout() {
-                    "Connection timed out (8s)".to_string()
-                } else if e.is_connect() {
-                    format!("Cannot reach {}", base_url)
-                } else {
-                    format!("{}", e)
-                };
-                ConnectivityResult::Unreachable(msg)
-            }
-        }
-    })
-}
-
 /// Run connectivity validation after provider config is entered.
 /// Shows results to user and asks if they want to continue on failure.
+/// Accepts a connectivity test fn (for testability).
 fn run_connectivity_check(
-    io: &dyn WizardIo,
-    provider_key: &str,
-    base_url: &str,
-    api_key: &str,
-) -> Result<()> {
-    run_connectivity_check_inner(io, provider_key, base_url, api_key, test_api_key_connectivity)
-}
-
-/// Inner function that accepts a connectivity test fn (for testability).
-fn run_connectivity_check_inner(
     io: &dyn WizardIo,
     provider_key: &str,
     base_url: &str,
@@ -1069,16 +1018,10 @@ fn run_connectivity_check_inner(
     }
 
     io.write_line("")?;
-    io.write_line(&format!(
-        "  {} Validating API key…",
-        "⟳".cyan()
-    ))?;
+    io.write_line(&format!("  {} Validating API key…", "⟳".cyan()))?;
 
     match test_fn(provider_key, base_url, api_key) {
-        ConnectivityResult::Ok {
-            latency_ms,
-            models,
-        } => {
+        ConnectivityResult::Ok { latency_ms, models } => {
             if models.is_empty() {
                 io.write_line(&format!(
                     "  {} Connected! (latency: {}ms)",
@@ -1092,10 +1035,7 @@ fn run_connectivity_check_inner(
                     latency_ms
                 ))?;
                 let models_str = models.join(", ");
-                io.write_line(&format!(
-                    "    Available models: {}",
-                    models_str.dimmed()
-                ))?;
+                io.write_line(&format!("    Available models: {}", models_str.dimmed()))?;
             }
         }
         ConnectivityResult::AuthFailed(msg) => {
@@ -1210,7 +1150,7 @@ fn configure_provider_inner(
         .unwrap_or("")
         .to_string();
     if !api_key.is_empty() && !base_url.is_empty() {
-        run_connectivity_check_inner(io, provider_key, &base_url, &api_key, connectivity_fn)?;
+        run_connectivity_check(io, provider_key, &base_url, &api_key, connectivity_fn)?;
     }
 
     Ok(StepAction::Continue)
@@ -2143,7 +2083,7 @@ mod tests {
     #[test]
     fn connectivity_check_ok_shows_models() {
         let mock = MockWizard::new(vec![]);
-        let result = run_connectivity_check_inner(
+        let result = run_connectivity_check(
             &mock,
             "openai",
             "https://api.openai.com/v1",
@@ -2162,7 +2102,7 @@ mod tests {
             prompt_contains: "Continue",
             result: true,
         }]);
-        let result = run_connectivity_check_inner(
+        let result = run_connectivity_check(
             &mock,
             "openai",
             "https://api.openai.com/v1",
@@ -2180,7 +2120,7 @@ mod tests {
             prompt_contains: "Continue",
             result: false,
         }]);
-        let result = run_connectivity_check_inner(
+        let result = run_connectivity_check(
             &mock,
             "openai",
             "https://api.openai.com/v1",
@@ -2196,7 +2136,7 @@ mod tests {
             prompt_contains: "Continue",
             result: true,
         }]);
-        let result = run_connectivity_check_inner(
+        let result = run_connectivity_check(
             &mock,
             "openai",
             "https://api.openai.com/v1",
@@ -2211,7 +2151,7 @@ mod tests {
     #[test]
     fn connectivity_check_skips_ollama() {
         let mock = MockWizard::new(vec![]);
-        let result = run_connectivity_check_inner(
+        let result = run_connectivity_check(
             &mock,
             "ollama",
             "http://localhost:11434",

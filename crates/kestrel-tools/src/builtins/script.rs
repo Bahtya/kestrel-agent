@@ -149,8 +149,24 @@ impl ScriptTool {
                     let dt = chrono::DateTime::from_timestamp(time_val, 0)
                         .unwrap_or(chrono::DateTime::UNIX_EPOCH);
                     let format = fmt.unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".to_string());
-                    // Lua strftime tokens are mostly compatible with chrono; pass through directly
-                    lua.create_string(dt.format(&format).to_string())
+                    // chrono::format() panics on unknown specifiers, so we use
+                    // DelayedFormat's fallible cousin via format_items + write.
+                    // For simplicity we catch the panic via a wrapper.
+                    let formatted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        dt.format(&format).to_string()
+                    }));
+                    match formatted {
+                        Ok(s) => lua.create_string(&s),
+                        Err(_) => {
+                            // Fallback: use a safe default format instead of crashing
+                            let fallback = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+                            warn!(
+                                format_spec = %format,
+                                "os.date: unsupported format specifier, using default"
+                            );
+                            lua.create_string(&fallback)
+                        }
+                    }
                 })
                 .map_err(|e| ToolError::Execution(format!("Failed to create os.date: {}", e)))?;
             os_safe

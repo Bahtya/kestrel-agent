@@ -7,6 +7,7 @@ pub mod message;
 pub mod search;
 pub mod shell;
 pub mod spawn;
+pub mod terminal;
 pub mod web;
 
 use crate::registry::ToolRegistry;
@@ -39,12 +40,19 @@ pub fn register_all_with_config(registry: &ToolRegistry, config: BuiltinsConfig)
     registry.register(message::MessageTool::new());
     registry.register(cron::CronTool::new());
     registry.register(spawn::SpawnTool::new());
+    register_terminal_tools(registry);
 }
 
 /// Register memory tools that require a memory store.
 pub fn register_memory_tools(registry: &ToolRegistry, store: Arc<dyn MemoryStore>) {
     registry.register(memory::StoreMemoryTool::new(store.clone()));
     registry.register(memory::RecallMemoryTool::new(store));
+}
+
+/// Register terminal multiplexer tools that require a terminal manager.
+pub fn register_terminal_tools(registry: &ToolRegistry) {
+    let mgr = Arc::new(terminal::TerminalManager::new());
+    terminal::register_terminal_tools(registry, mgr);
 }
 
 #[cfg(test)]
@@ -71,6 +79,32 @@ mod tests {
         assert!(
             registry.is_mutating("send_message"),
             "send_message should be mutating"
+        );
+
+        // Terminal multiplexer tools
+        assert!(
+            registry.is_mutating("terminal_create_session"),
+            "terminal_create_session should be mutating"
+        );
+        assert!(
+            registry.is_mutating("terminal_send_input"),
+            "terminal_send_input should be mutating"
+        );
+        assert!(
+            !registry.is_mutating("terminal_read_output"),
+            "terminal_read_output should NOT be mutating"
+        );
+        assert!(
+            !registry.is_mutating("terminal_list_sessions"),
+            "terminal_list_sessions should NOT be mutating"
+        );
+        assert!(
+            registry.is_mutating("terminal_kill_session"),
+            "terminal_kill_session should be mutating"
+        );
+        assert!(
+            registry.is_mutating("terminal_resize"),
+            "terminal_resize should be mutating"
         );
 
         // Read-only tools

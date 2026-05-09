@@ -29,6 +29,7 @@ parking_lot = { workspace = true }
 toml = { workspace = true }
 
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+portable-pty = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true }

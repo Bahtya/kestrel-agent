@@ -475,10 +475,10 @@ mod tests {
     #[tokio::test]
     async fn test_grep_depth_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let mut current = dir.path();
+        let mut current = dir.path().to_path_buf();
         for _ in 0..(DEFAULT_MAX_GREP_DEPTH + 2) {
             current = current.join("deep");
-            fs::create_dir_all(current).unwrap();
+            fs::create_dir_all(&current).unwrap();
         }
         fs::write(current.join("secret.txt"), "DEEP_MATCH\n").unwrap();
 

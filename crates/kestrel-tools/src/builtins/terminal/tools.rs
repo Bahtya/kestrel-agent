@@ -197,7 +197,6 @@ impl Tool for TerminalSendInputTool {
         );
 
         mgr.send_input(session_id, input)
-            .await
             .map_err(|e| ToolError::Execution(format!("Failed to send input: {}", e)))?;
 
         Ok(format!(
@@ -281,7 +280,6 @@ impl Tool for TerminalReadOutputTool {
 
         let output = mgr
             .read_output(session_id, timeout_ms)
-            .await
             .map_err(|e| ToolError::Execution(format!("Failed to read output: {}", e)))?;
 
         if output.is_empty() {

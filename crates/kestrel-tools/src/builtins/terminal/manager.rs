@@ -52,7 +52,7 @@ impl TerminalManager {
     }
 
     /// Send input (keystrokes) to a session.
-    pub async fn send_input(&self, session_id: &str, input: &str) -> Result<()> {
+    pub fn send_input(&self, session_id: &str, input: &str) -> Result<()> {
         let session = {
             let sessions = self.sessions.read();
             sessions
@@ -60,15 +60,11 @@ impl TerminalManager {
                 .cloned()
                 .context(format!("Session '{}' not found", session_id))?
         };
-        session.send_input(input).await
+        session.send_input(input)
     }
 
     /// Read output from a session.
-    pub async fn read_output(
-        &self,
-        session_id: &str,
-        timeout_ms: Option<u64>,
-    ) -> Result<String> {
+    pub fn read_output(&self, session_id: &str, timeout_ms: Option<u64>) -> Result<String> {
         let session = {
             let sessions = self.sessions.read();
             sessions
@@ -76,7 +72,7 @@ impl TerminalManager {
                 .cloned()
                 .context(format!("Session '{}' not found", session_id))?
         };
-        session.read_output(timeout_ms).await
+        session.read_output(timeout_ms)
     }
 
     /// List all sessions with their metadata.
@@ -162,17 +158,17 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[tokio::test]
-    async fn test_send_input_nonexistent_session() {
+    #[test]
+    fn test_send_input_nonexistent_session() {
         let mgr = TerminalManager::new();
-        let result = mgr.send_input("nonexistent", "echo hi\n").await;
+        let result = mgr.send_input("nonexistent", "echo hi\n");
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_read_output_nonexistent_session() {
+    #[test]
+    fn test_read_output_nonexistent_session() {
         let mgr = TerminalManager::new();
-        let result = mgr.read_output("nonexistent", None).await;
+        let result = mgr.read_output("nonexistent", None);
         assert!(result.is_err());
     }
 

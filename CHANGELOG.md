@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v0.9.2] - 2026-05-10
 
 ### Bug Fixes
 - fix(tools): wrap Lua script execution in catch_unwind to prevent Rust-side panics from crashing the process; also make all internal Mutex locks poison-resistant (Issue #300)

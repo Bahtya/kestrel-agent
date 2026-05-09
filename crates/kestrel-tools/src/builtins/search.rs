@@ -3,7 +3,13 @@
 use crate::trait_def::{Tool, ToolError};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tracing::warn;
+
+const DEFAULT_MAX_GREP_DEPTH: usize = 10;
+const DEFAULT_MAX_GREP_ENTRIES: usize = 10_000;
+const DEFAULT_MAX_GREP_FILE_SIZE: u64 = 1_048_576; // 1 MB
+const DEFAULT_MAX_GLOB_RESULTS: usize = 10_000;
 
 // ─── GrepTool ────────────────────────────────────────────
 
@@ -50,28 +56,61 @@ impl Tool for GrepTool {
         let pattern = args["pattern"]
             .as_str()
             .ok_or_else(|| ToolError::Validation("Missing 'pattern'".to_string()))?;
-        let path = args["path"].as_str().unwrap_or(".");
-        let include = args["include"].as_str();
+        let path_str = args["path"].as_str().unwrap_or(".");
+        let include = args["include"].as_str().map(String::from);
         let context_lines = args["context"].as_u64().unwrap_or(2) as usize;
         let max_results = args["max_results"].as_u64().unwrap_or(100) as usize;
 
         let re = regex::Regex::new(pattern)
             .map_err(|e| ToolError::Validation(format!("Invalid regex: {}", e)))?;
+        let path = PathBuf::from(path_str);
 
-        let mut results = Vec::new();
-        let path = Path::new(path);
+        let result = tokio::task::spawn_blocking(move || {
+            grep_impl(&path, &re, include.as_deref(), context_lines, max_results)
+        })
+        .await
+        .map_err(|e| ToolError::Execution(format!("Grep task failed: {}", e)))??;
 
-        if path.is_file() {
-            grep_file(path, &re, context_lines, &mut results, max_results)?;
-        } else if path.is_dir() {
-            grep_dir(path, &re, include, context_lines, &mut results, max_results)?;
-        }
+        Ok(result)
+    }
+}
 
-        if results.is_empty() {
-            Ok("No matches found.".to_string())
-        } else {
-            Ok(results.join("\n"))
-        }
+struct GrepState<'a> {
+    re: &'a regex::Regex,
+    include: Option<&'a str>,
+    context: usize,
+    max: usize,
+    depth: usize,
+    entry_count: usize,
+}
+
+fn grep_impl(
+    path: &Path,
+    re: &regex::Regex,
+    include: Option<&str>,
+    context: usize,
+    max: usize,
+) -> Result<String, ToolError> {
+    let mut state = GrepState {
+        re,
+        include,
+        context,
+        max,
+        depth: 0,
+        entry_count: 0,
+    };
+    let mut results = Vec::new();
+
+    if path.is_file() {
+        grep_file(path, state.re, state.context, &mut results, state.max)?;
+    } else if path.is_dir() {
+        grep_dir(path, &mut state, &mut results)?;
+    }
+
+    if results.is_empty() {
+        Ok("No matches found.".to_string())
+    } else {
+        Ok(results.join("\n"))
     }
 }
 
@@ -82,8 +121,39 @@ fn grep_file(
     results: &mut Vec<String>,
     max: usize,
 ) -> Result<(), ToolError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| ToolError::Execution(format!("Failed to read {}: {}", path.display(), e)))?;
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                "Grep: unreadable file, skipping path={} error={}",
+                path.display(),
+                e
+            );
+            return Ok(());
+        }
+    };
+
+    if metadata.len() > DEFAULT_MAX_GREP_FILE_SIZE {
+        warn!(
+            "Grep: file too large, skipping path={} size={} limit={}",
+            path.display(),
+            metadata.len(),
+            DEFAULT_MAX_GREP_FILE_SIZE
+        );
+        return Ok(());
+    }
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "Grep: failed to read file, skipping path={} error={}",
+                path.display(),
+                e
+            );
+            return Ok(());
+        }
+    };
 
     let lines: Vec<&str> = content.lines().collect();
     for (i, line) in lines.iter().enumerate() {
@@ -105,22 +175,39 @@ fn grep_file(
     Ok(())
 }
 
-fn grep_dir(
-    dir: &Path,
-    re: &regex::Regex,
-    include: Option<&str>,
-    context: usize,
-    results: &mut Vec<String>,
-    max: usize,
-) -> Result<(), ToolError> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| ToolError::Execution(format!("Failed to read dir: {}", e)))?;
+fn grep_dir(dir: &Path, state: &mut GrepState, results: &mut Vec<String>) -> Result<(), ToolError> {
+    if state.depth > DEFAULT_MAX_GREP_DEPTH {
+        return Ok(());
+    }
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                "Grep: unreadable directory, skipping path={} error={}",
+                dir.display(),
+                e
+            );
+            return Ok(());
+        }
+    };
 
     for entry in entries {
-        if results.len() >= max {
+        if results.len() >= state.max {
             break;
         }
-        let entry = entry.map_err(|e| ToolError::Execution(e.to_string()))?;
+        state.entry_count += 1;
+        if state.entry_count > DEFAULT_MAX_GREP_ENTRIES {
+            break;
+        }
+
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Grep: failed to read dir entry, skipping error={}", e);
+                continue;
+            }
+        };
         let path = entry.path();
 
         if path.is_dir() {
@@ -131,10 +218,12 @@ fn grep_dir(
                 && name != "target"
                 && name != "__pycache__"
             {
-                grep_dir(&path, re, include, context, results, max)?;
+                state.depth += 1;
+                grep_dir(&path, state, results)?;
+                state.depth -= 1;
             }
         } else if path.is_file() {
-            if let Some(inc) = include {
+            if let Some(inc) = state.include {
                 let glob = glob::glob(inc).map_err(|e| ToolError::Validation(e.to_string()))?;
                 let matches = glob.filter_map(|p| p.ok()).any(|p| {
                     p.file_name()
@@ -144,7 +233,7 @@ fn grep_dir(
                     continue;
                 }
             }
-            let _ = grep_file(&path, re, context, results, max);
+            let _ = grep_file(&path, state.re, state.context, results, state.max);
         }
     }
 
@@ -201,17 +290,37 @@ impl Tool for GlobTool {
             format!("{}/{}", base_path, pattern)
         };
 
-        let paths: Vec<_> = glob::glob(&full_pattern)
-            .map_err(|e| ToolError::Validation(format!("Invalid glob pattern: {}", e)))?
-            .filter_map(|p| p.ok())
-            .collect();
+        let result =
+            tokio::task::spawn_blocking(move || glob_impl(&full_pattern, DEFAULT_MAX_GLOB_RESULTS))
+                .await
+                .map_err(|e| ToolError::Execution(format!("Glob task failed: {}", e)))??;
 
-        if paths.is_empty() {
-            Ok("No files matched the pattern.".to_string())
-        } else {
-            let result: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-            Ok(result.join("\n"))
+        Ok(result)
+    }
+}
+
+fn glob_impl(pattern: &str, max: usize) -> Result<String, ToolError> {
+    let globber = glob::glob(pattern)
+        .map_err(|e| ToolError::Validation(format!("Invalid glob pattern: {}", e)))?;
+
+    let mut paths: Vec<String> = Vec::new();
+    for entry in globber {
+        if paths.len() >= max {
+            paths.push(format!("... (truncated at {} entries)", max));
+            break;
         }
+        match entry {
+            Ok(p) => paths.push(p.display().to_string()),
+            Err(e) => {
+                warn!("Glob: error reading entry, skipping error={}", e);
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        Ok("No files matched the pattern.".to_string())
+    } else {
+        Ok(paths.join("\n"))
     }
 }
 
@@ -314,8 +423,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        // The include filter uses glob matching — just verify it completes
-        // The exact behavior depends on glob implementation details
         assert!(result.contains("findme") || result == "No matches found.");
     }
 
@@ -334,7 +441,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        // Should include context lines around the match
         assert!(result.contains("line2"));
         assert!(result.contains("MATCH"));
         assert!(result.contains("line4"));
@@ -355,7 +461,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        // Should contain at most 2 file references (each match block starts with "filename:")
         let count = result.matches("test.txt").count();
         assert!(count <= 2);
         assert!(result.contains("match"));
@@ -365,6 +470,49 @@ mod tests {
     fn test_grep_tool_default() {
         let tool = GrepTool;
         assert_eq!(tool.name(), "grep");
+    }
+
+    #[tokio::test]
+    async fn test_grep_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut current = dir.path().to_path_buf();
+        for _ in 0..(DEFAULT_MAX_GREP_DEPTH + 2) {
+            current = current.join("deep");
+            fs::create_dir_all(&current).unwrap();
+        }
+        fs::write(current.join("secret.txt"), "DEEP_MATCH\n").unwrap();
+
+        let tool = GrepTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "DEEP_MATCH",
+                "path": dir.path().to_str().unwrap()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result, "No matches found.");
+    }
+
+    #[tokio::test]
+    async fn test_grep_file_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("big.txt");
+        // Write a file larger than DEFAULT_MAX_GREP_FILE_SIZE
+        fs::write(
+            &file_path,
+            "A".repeat(DEFAULT_MAX_GREP_FILE_SIZE as usize + 100) + "\nBIG_MATCH\n",
+        )
+        .unwrap();
+
+        let tool = GrepTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "BIG_MATCH",
+                "path": file_path.to_str().unwrap()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result, "No matches found.");
     }
 
     #[test]
@@ -423,5 +571,23 @@ mod tests {
     fn test_glob_tool_default() {
         let tool = GlobTool;
         assert_eq!(tool.name(), "glob");
+    }
+
+    #[tokio::test]
+    async fn test_glob_entry_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(DEFAULT_MAX_GLOB_RESULTS + 5) {
+            fs::write(dir.path().join(format!("file_{:05}.txt", i)), "").unwrap();
+        }
+
+        let tool = GlobTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "pattern": "*.txt",
+                "path": dir.path().to_str().unwrap()
+            }))
+            .await
+            .unwrap();
+        assert!(result.contains("truncated"));
     }
 }

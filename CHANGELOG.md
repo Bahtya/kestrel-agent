@@ -19,6 +19,7 @@
   - Automatic tool registration plus structured session lifecycle logging
 
 ### Bug Fixes
+- fix(tools): terminal sessions auto-cleanup after 30-minute idle timeout — prevents orphaned sessions from leaking resources (Issue #290)
 - fix(tools): terminal resize() now updates stored cols/rows — `terminal_list_sessions` returns correct dimensions after resize (Issue #288)
 - fix(tools): ScriptTool os.date() no longer crashes on chrono-incompatible format specifiers — falls back to default format with a warning (Issue #289)
 - fix(feishu): rewrite WebSocket long-connection to use endpoint discovery + protobuf (PR #284)

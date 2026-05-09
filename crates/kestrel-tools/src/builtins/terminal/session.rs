@@ -145,7 +145,7 @@ impl TerminalSession {
             debug!(session_id = %self.id, timeout_ms = ms, "Waiting for PTY output");
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(20));
                 let mut buf = self.output_buffer.lock().unwrap();
                 if !buf.is_empty() || std::time::Instant::now() >= deadline {
                     let output = buf.drain_to_string();
@@ -214,8 +214,16 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.kill();
+        // Don't join the reader thread — it may be blocked in a blocking
+        // read() on the PTY fd. Dropping the master PTY will eventually
+        // cause the read to return with an error/EOF, and the thread will
+        // check `alive == false` and exit. Detaching avoids blocking the
+        // drop path (which would hang the test suite / shutdown).
         if let Some(handle) = self.reader_handle.take() {
-            let _ = handle.join();
+            // Detach: let it clean up on its own.
+            // The thread holds an Arc<AtomicBool> (alive) so it will
+            // observe the kill signal and exit when the PTY read unblocks.
+            let _ = handle;
         }
     }
 }

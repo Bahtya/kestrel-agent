@@ -690,11 +690,11 @@ mod tests {
         assert!(send_result.contains("Sent"));
 
         // Wait briefly for output, then read
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let output = read
             .execute(json!({
                 "session_id": session_id,
-                "timeout_ms": 1000
+                "timeout_ms": 500
             }))
             .await
             .unwrap();

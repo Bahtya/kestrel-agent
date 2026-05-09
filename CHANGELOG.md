@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v0.9.11] - 2026-05-10
 
 ### Bug Fixes
 - fix(tools): add depth/entry/size limits to GrepTool and entry limit to GlobTool — recursive grep on large directories no longer hangs or exhausts memory, blocking I/O moved to `spawn_blocking` (Issue #318)

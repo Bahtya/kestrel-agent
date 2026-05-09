@@ -1026,9 +1026,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_script_write_file_blocked_system_path() {
         let tool = ScriptTool::new();
-        let result = tool
-            .execute(json!({"code": "kestrel.write_file('/etc/test', 'hacked')"}))
-            .await;
+        let blocked_path = if cfg!(windows) {
+            r"C:\Windows\System32\kestrel_test.txt"
+        } else {
+            "/etc/test"
+        };
+        let code = format!("kestrel.write_file('{}', 'hacked')", blocked_path.replace('\\', "\\\\"));
+        let result = tool.execute(json!({"code": code})).await;
         // Should either error at Lua level or Rust level
         assert!(result.is_err() || result.unwrap().contains("not allowed"));
     }

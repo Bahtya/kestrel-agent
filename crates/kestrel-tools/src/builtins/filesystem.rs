@@ -5,6 +5,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
+const FILESYSTEM_IO_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_MAX_LIST_DIR_DEPTH: usize = 10;
+const DEFAULT_MAX_LIST_DIR_ENTRIES: usize = 10_000;
+
 // ─── ReadFileTool ────────────────────────────────────────────
 
 /// Tool for reading file contents from the filesystem.
@@ -49,9 +53,18 @@ impl Tool for ReadFileTool {
             .as_str()
             .ok_or_else(|| ToolError::Validation("Missing 'path' parameter".to_string()))?;
 
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| ToolError::Execution(format!("Failed to read file: {}", e)))?;
+        let content = tokio::time::timeout(
+            std::time::Duration::from_secs(FILESYSTEM_IO_TIMEOUT_SECS),
+            tokio::fs::read_to_string(path),
+        )
+        .await
+        .map_err(|_| {
+            ToolError::Execution(format!(
+                "File read timed out after {}s",
+                FILESYSTEM_IO_TIMEOUT_SECS
+            ))
+        })?
+        .map_err(|e| ToolError::Execution(format!("Failed to read file: {}", e)))?;
 
         let lines: Vec<&str> = content.lines().collect();
         let offset = args["offset"].as_u64().unwrap_or(0) as usize;
@@ -124,34 +137,77 @@ impl Tool for WriteFileTool {
             .ok_or_else(|| ToolError::Validation("Missing 'content'".to_string()))?;
         let append = args["append"].as_bool().unwrap_or(false);
 
+        let timeout_dur = std::time::Duration::from_secs(FILESYSTEM_IO_TIMEOUT_SECS);
+
         // Create parent directory if needed
         if let Some(parent) = std::path::Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    ToolError::Execution(format!("Failed to create directory: {}", e))
-                })?;
+                tokio::time::timeout(timeout_dur, tokio::fs::create_dir_all(parent))
+                    .await
+                    .map_err(|_| {
+                        ToolError::Execution(format!(
+                            "Directory creation timed out after {}s",
+                            FILESYSTEM_IO_TIMEOUT_SECS
+                        ))
+                    })?
+                    .map_err(|e| {
+                        ToolError::Execution(format!("Failed to create directory: {}", e))
+                    })?;
             }
         }
 
         if append {
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
+            let mut file = tokio::time::timeout(
+                timeout_dur,
+                tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path),
+            )
+            .await
+            .map_err(|_| {
+                ToolError::Execution(format!(
+                    "File open timed out after {}s",
+                    FILESYSTEM_IO_TIMEOUT_SECS
+                ))
+            })?
+            .map_err(|e| ToolError::Execution(format!("Failed to open file: {}", e)))?;
+            tokio::time::timeout(timeout_dur, file.write_all(content.as_bytes()))
                 .await
-                .map_err(|e| ToolError::Execution(format!("Failed to open file: {}", e)))?;
-            file.write_all(content.as_bytes())
-                .await
+                .map_err(|_| {
+                    ToolError::Execution(format!(
+                        "File write timed out after {}s",
+                        FILESYSTEM_IO_TIMEOUT_SECS
+                    ))
+                })?
                 .map_err(|e| ToolError::Execution(format!("Failed to write: {}", e)))?;
-            file.flush()
+            tokio::time::timeout(timeout_dur, file.flush())
                 .await
+                .map_err(|_| {
+                    ToolError::Execution(format!(
+                        "File flush timed out after {}s",
+                        FILESYSTEM_IO_TIMEOUT_SECS
+                    ))
+                })?
                 .map_err(|e| ToolError::Execution(format!("Failed to flush: {}", e)))?;
-            file.sync_all()
+            tokio::time::timeout(timeout_dur, file.sync_all())
                 .await
+                .map_err(|_| {
+                    ToolError::Execution(format!(
+                        "File sync timed out after {}s",
+                        FILESYSTEM_IO_TIMEOUT_SECS
+                    ))
+                })?
                 .map_err(|e| ToolError::Execution(format!("Failed to sync: {}", e)))?;
         } else {
-            tokio::fs::write(path, content)
+            tokio::time::timeout(timeout_dur, tokio::fs::write(path, content))
                 .await
+                .map_err(|_| {
+                    ToolError::Execution(format!(
+                        "File write timed out after {}s",
+                        FILESYSTEM_IO_TIMEOUT_SECS
+                    ))
+                })?
                 .map_err(|e| ToolError::Execution(format!("Failed to write file: {}", e)))?;
         }
 
@@ -219,8 +275,16 @@ impl Tool for EditFileTool {
             .ok_or_else(|| ToolError::Validation("Missing 'new_text'".to_string()))?;
         let replace_all = args["replace_all"].as_bool().unwrap_or(false);
 
-        let content = tokio::fs::read_to_string(path)
+        let timeout_dur = std::time::Duration::from_secs(FILESYSTEM_IO_TIMEOUT_SECS);
+
+        let content = tokio::time::timeout(timeout_dur, tokio::fs::read_to_string(path))
             .await
+            .map_err(|_| {
+                ToolError::Execution(format!(
+                    "File read timed out after {}s",
+                    FILESYSTEM_IO_TIMEOUT_SECS
+                ))
+            })?
             .map_err(|e| ToolError::Execution(format!("Failed to read file: {}", e)))?;
 
         let count = if replace_all {
@@ -243,8 +307,14 @@ impl Tool for EditFileTool {
             content.replacen(old_text, new_text, 1)
         };
 
-        tokio::fs::write(path, new_content)
+        tokio::time::timeout(timeout_dur, tokio::fs::write(path, new_content))
             .await
+            .map_err(|_| {
+                ToolError::Execution(format!(
+                    "File write timed out after {}s",
+                    FILESYSTEM_IO_TIMEOUT_SECS
+                ))
+            })?
             .map_err(|e| ToolError::Execution(format!("Failed to write file: {}", e)))?;
 
         Ok(format!("Replaced {} occurrence(s) in {}", count, path))
@@ -292,11 +362,24 @@ impl Tool for ListDirTool {
     async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let path = args["path"]
             .as_str()
-            .ok_or_else(|| ToolError::Validation("Missing 'path'".to_string()))?;
+            .ok_or_else(|| ToolError::Validation("Missing 'path'".to_string()))?
+            .to_string();
         let recursive = args["recursive"].as_bool().unwrap_or(false);
 
-        let mut result = Vec::new();
-        list_dir_recursive(path, recursive, &mut result, 0)?;
+        let result = tokio::task::spawn_blocking(move || {
+            let mut result = Vec::new();
+            list_dir_recursive(
+                &path,
+                recursive,
+                &mut result,
+                0,
+                DEFAULT_MAX_LIST_DIR_DEPTH,
+                DEFAULT_MAX_LIST_DIR_ENTRIES,
+            )?;
+            Ok::<_, ToolError>(result)
+        })
+        .await
+        .map_err(|e| ToolError::Execution(format!("List dir task failed: {}", e)))??;
 
         Ok(result.join("\n"))
     }
@@ -307,25 +390,49 @@ fn list_dir_recursive(
     recursive: bool,
     result: &mut Vec<String>,
     depth: usize,
+    max_depth: usize,
+    max_entries: usize,
 ) -> Result<(), ToolError> {
-    let entries = std::fs::read_dir(path)
-        .map_err(|e| ToolError::Execution(format!("Failed to read directory: {}", e)))?;
+    if depth > max_depth {
+        result.push(format!("{}(max depth reached)", "  ".repeat(depth)));
+        return Ok(());
+    }
+
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(e) => {
+            result.push(format!("{}(unreadable: {})", "  ".repeat(depth), e));
+            return Ok(());
+        }
+    };
 
     let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
 
     let indent = "  ".repeat(depth);
     for entry in entries {
+        if result.len() >= max_entries {
+            result.push(format!(
+                "{}(truncated: max {} entries)",
+                indent, max_entries
+            ));
+            return Ok(());
+        }
+
         let name = entry.file_name().to_string_lossy().to_string();
-        let file_type = entry
-            .file_type()
-            .map_err(|e| ToolError::Execution(e.to_string()))?;
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => {
+                result.push(format!("{}{} (stat failed)", indent, name));
+                continue;
+            }
+        };
 
         if file_type.is_dir() {
             result.push(format!("{}{}/", indent, name));
             if recursive {
                 let sub_path = format!("{}/{}", path, name);
-                list_dir_recursive(&sub_path, true, result, depth + 1)?;
+                list_dir_recursive(&sub_path, true, result, depth + 1, max_depth, max_entries)?;
             }
         } else {
             result.push(format!("{}{}", indent, name));
@@ -623,5 +730,50 @@ mod tests {
             .unwrap();
         assert!(result.contains("sub/"));
         assert!(result.contains("nested.txt"));
+    }
+
+    #[test]
+    fn test_list_dir_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::create_dir_all(base.join("a/b/c/d/e/f")).unwrap();
+        std::fs::write(base.join("a/b/c/d/e/f/deep.txt"), "").unwrap();
+
+        let mut result = Vec::new();
+        list_dir_recursive(base.to_str().unwrap(), true, &mut result, 0, 2, 10000).unwrap();
+        assert!(result.iter().any(|s| s.contains("max depth reached")));
+    }
+
+    #[test]
+    fn test_list_dir_entry_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..15 {
+            std::fs::write(dir.path().join(format!("file_{:02}.txt", i)), "").unwrap();
+        }
+
+        let mut result = Vec::new();
+        list_dir_recursive(dir.path().to_str().unwrap(), false, &mut result, 0, 10, 10).unwrap();
+        assert!(result
+            .iter()
+            .any(|s| s.contains("truncated: max 10 entries")));
+    }
+
+    #[test]
+    fn test_list_dir_unreadable_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("restricted");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let mut result = Vec::new();
+        list_dir_recursive(
+            dir.path().to_str().unwrap(),
+            true,
+            &mut result,
+            0,
+            10,
+            10000,
+        )
+        .unwrap();
+        assert!(result.iter().any(|s| s.contains("restricted/")));
     }
 }

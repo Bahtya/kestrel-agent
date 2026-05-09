@@ -1172,6 +1172,7 @@ impl TelegramChannel {
                                     Ok(false) => {}
                                     Err(e) => {
                                         error!(
+                                            trace_id = %format!("tg_{}_{}", update.update_id, msg.message_id),
                                             "Failed to dispatch rewritten Telegram message: {e}"
                                         );
                                     }
@@ -1192,7 +1193,10 @@ impl TelegramChannel {
                             }
                             Ok(false) => {} // Skipped (no text/photo).
                             Err(e) => {
-                                error!("Failed to dispatch Telegram message: {e}");
+                                error!(
+                                    trace_id = %format!("tg_{}_{}", update.update_id, msg.message_id),
+                                    "Failed to dispatch Telegram message: {e}"
+                                );
                             }
                         }
                     }
@@ -1207,7 +1211,10 @@ impl TelegramChannel {
                     )
                     .await
                     {
-                        error!("Failed to dispatch Telegram callback query: {e}");
+                        error!(
+                            trace_id = %format!("tg_{}_{}", update.update_id, cq.id),
+                            "Failed to dispatch Telegram callback query: {e}"
+                        );
                     }
                 }
             }

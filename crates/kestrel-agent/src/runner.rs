@@ -168,6 +168,7 @@ impl AgentRunner {
             })?;
 
         info!(
+            trace_id = %self.trace_id.as_deref().unwrap_or("-"),
             llm_model = %model,
             llm_provider = %provider.name(),
             "Starting agent run"
@@ -195,7 +196,7 @@ impl AgentRunner {
             // Check for cancellation between iterations
             if let Some(ref token) = self.cancel_token {
                 if token.is_cancelled() {
-                    info!("Agent run cancelled at iteration {}", iteration + 1);
+                    info!(trace_id = %self.trace_id.as_deref().unwrap_or("-"), "Agent run cancelled at iteration {}", iteration + 1);
                     self.emit_stream_chunk(String::new(), true);
                     return Ok(RunResult {
                         content: "Agent run was cancelled.".to_string(),
@@ -208,7 +209,7 @@ impl AgentRunner {
                 }
             }
 
-            debug!("Agent iteration {}/{}", iteration + 1, max_iterations);
+            debug!(trace_id = %self.trace_id.as_deref().unwrap_or("-"), "Agent iteration {}/{}", iteration + 1, max_iterations);
 
             let request = CompletionRequest {
                 model: model.clone(),
@@ -252,6 +253,7 @@ impl AgentRunner {
                 _ => {
                     let content = response.content.unwrap_or_default();
                     info!(
+                        trace_id = %self.trace_id.as_deref().unwrap_or("-"),
                         llm_model = %model,
                         iterations = iteration + 1,
                         tool_calls = tool_calls_made,
@@ -304,6 +306,7 @@ impl AgentRunner {
 
             for (tc, (_, duration_ms, success)) in tool_calls.iter().zip(&results) {
                 debug!(
+                    trace_id = %self.trace_id.as_deref().unwrap_or("-"),
                     tool_name = %tc.function.name,
                     duration_ms = *duration_ms,
                     "Tool call completed"
@@ -333,7 +336,7 @@ impl AgentRunner {
             }
         }
 
-        warn!("Max iterations ({}) reached", max_iterations);
+        warn!(trace_id = %self.trace_id.as_deref().unwrap_or("-"), "Max iterations ({}) reached", max_iterations);
         Ok(RunResult {
             content: "I've reached the maximum number of iterations. Please continue the conversation if needed.".to_string(),
             reasoning_content,
@@ -370,6 +373,7 @@ impl AgentRunner {
             let connect_ms = send_start.elapsed().as_millis() as u64;
             if connect_ms > 5000 {
                 warn!(
+                    trace_id = %self.trace_id.as_deref().unwrap_or("-"),
                     elapsed_ms = connect_ms,
                     "Slow provider response: took >5s to establish stream"
                 );
@@ -400,6 +404,7 @@ impl AgentRunner {
                 let gap = now.duration_since(last_chunk_at);
                 if gap >= std::time::Duration::from_secs(10) {
                     warn!(
+                        trace_id = %self.trace_id.as_deref().unwrap_or("-"),
                         elapsed_ms = send_start.elapsed().as_millis() as u64,
                         gap_ms = gap.as_millis() as u64,
                         "SSE stream slow: long gap between chunks"
@@ -426,6 +431,7 @@ impl AgentRunner {
                             stream_attempt += 1;
                             let backoff = std::time::Duration::from_millis(500 << stream_attempt);
                             warn!(
+                                trace_id = %self.trace_id.as_deref().unwrap_or("-"),
                                 attempt = stream_attempt,
                                 max_retries = max_stream_retries,
                                 backoff_ms = backoff.as_millis() as u64,
@@ -449,6 +455,7 @@ impl AgentRunner {
                             stream_attempt += 1;
                             let backoff = std::time::Duration::from_millis(500 << stream_attempt);
                             warn!(
+                                trace_id = %self.trace_id.as_deref().unwrap_or("-"),
                                 attempt = stream_attempt,
                                 max_retries = max_stream_retries,
                                 backoff_ms = backoff.as_millis() as u64,
@@ -464,6 +471,7 @@ impl AgentRunner {
 
                 if !first_byte_logged {
                     debug!(
+                        trace_id = %self.trace_id.as_deref().unwrap_or("-"),
                         elapsed_ms = send_start.elapsed().as_millis() as u64,
                         "SSE first-byte received"
                     );
@@ -528,6 +536,7 @@ impl AgentRunner {
         let (full_content, full_reasoning, usage, tool_calls_map, send_start) = result?;
 
         debug!(
+            trace_id = %self.trace_id.as_deref().unwrap_or("-"),
             total_ms = send_start.elapsed().as_millis() as u64,
             "SSE stream completed"
         );

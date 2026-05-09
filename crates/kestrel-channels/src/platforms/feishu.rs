@@ -146,7 +146,10 @@ impl FeishuBatcher {
 
         // message_id dedup
         if !message_id.is_empty() && self.dedup.is_duplicate(message_id) {
-            debug!("Feishu dedup: skipping duplicate message_id={}", message_id);
+            debug!(
+                trace_id = %msg.trace_id.as_deref().unwrap_or("-"),
+                "Feishu dedup: skipping duplicate message_id={}", message_id
+            );
             return Err(msg);
         }
 
@@ -155,6 +158,7 @@ impl FeishuBatcher {
         let content_key = format!("{}:{}", sender_id, &msg.content[..prefix_len]);
         if self.dedup.is_duplicate(&content_key) {
             debug!(
+                trace_id = %msg.trace_id.as_deref().unwrap_or("-"),
                 "Feishu dedup: skipping content duplicate from {}",
                 sender_id
             );
@@ -278,6 +282,7 @@ fn merge_batch(messages: Vec<InboundMessage>) -> Option<InboundMessage> {
     };
 
     info!(
+        trace_id = %merged.trace_id.as_deref().unwrap_or("-"),
         "Feishu batcher: merged {} messages for chat {}",
         messages.len(),
         merged.chat_id
@@ -835,6 +840,11 @@ pub fn parse_webhook(body: &[u8], config: Option<&FeishuConfig>) -> Result<Webho
         );
     }
 
+    let trace_id = message_id
+        .as_deref()
+        .map(|mid| format!("fs_{mid}"))
+        .unwrap_or_else(kestrel_core::generate_trace_id);
+
     let inbound = InboundMessage {
         channel: Platform::Feishu,
         sender_id: sender_id.clone(),
@@ -854,7 +864,7 @@ pub fn parse_webhook(body: &[u8], config: Option<&FeishuConfig>) -> Result<Webho
         }),
         message_type,
         message_id,
-        trace_id: None,
+        trace_id: Some(trace_id),
         reply_to: None,
         timestamp: chrono::Local::now(),
     };
@@ -2016,8 +2026,12 @@ async fn ws_connect_and_listen(
                                         match parse_webhook(payload, None) {
                                             Ok(WebhookResult::Messages(msgs)) => {
                                                 for msg in msgs {
+                                                    let tid = msg.trace_id.clone();
                                                     if let Err(e) = handler.send(msg).await {
-                                                        warn!("[feishu:ws] failed to forward message: {e}");
+                                                        warn!(
+                                                            trace_id = %tid.as_deref().unwrap_or("-"),
+                                                            "[feishu:ws] failed to forward message: {e}"
+                                                        );
                                                     }
                                                 }
                                             }
@@ -2179,11 +2193,14 @@ impl BaseChannel for FeishuChannel {
         self.send_text_message(chat_id, content, reply_to).await
     }
 
-    async fn send_typing(&self, chat_id: &str, _trace_id: Option<&str>) -> Result<()> {
+    async fn send_typing(&self, chat_id: &str, trace_id: Option<&str>) -> Result<()> {
         let message_id = match self.last_message_ids.lock().get(chat_id).cloned() {
             Some(id) => id,
             None => {
-                debug!("Feishu typing: no message_id tracked for chat {chat_id}");
+                debug!(
+                    trace_id = %trace_id.unwrap_or("-"),
+                    "Feishu typing: no message_id tracked for chat {chat_id}"
+                );
                 return Ok(());
             }
         };
@@ -2199,7 +2216,10 @@ impl BaseChannel for FeishuChannel {
                     .insert(chat_id.to_string(), reaction_id);
             }
             Err(e) => {
-                debug!("Feishu typing reaction failed: {e}");
+                debug!(
+                    trace_id = %trace_id.unwrap_or("-"),
+                    "Feishu typing reaction failed: {e}"
+                );
             }
         }
 

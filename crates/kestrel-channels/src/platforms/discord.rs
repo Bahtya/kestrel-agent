@@ -1021,6 +1021,8 @@ impl DiscordChannel {
             metadata.insert("discord_guild_id".to_string(), serde_json::json!(guild_id));
         }
 
+        let trace_id = format!("dc_{}", msg.id);
+
         let inbound = InboundMessage {
             channel: Platform::Discord,
             sender_id,
@@ -1031,13 +1033,16 @@ impl DiscordChannel {
             source: Some(source),
             message_type,
             message_id: Some(msg.id.clone()),
-            trace_id: Some(format!("dc_{}", msg.id)),
+            trace_id: Some(trace_id.clone()),
             reply_to: None,
             timestamp: chrono::Local::now(),
         };
 
         if let Err(e) = handler.send(inbound).await {
-            warn!("Failed to dispatch Discord message: {}", e);
+            warn!(
+                trace_id = %trace_id,
+                "Failed to dispatch Discord message: {}", e
+            );
         }
         true
     }

@@ -454,6 +454,7 @@ impl LlmProvider for OpenAiCompatProvider {
         );
 
         debug!(
+            trace_id = %trace_id,
             "Sending completion request to {} (model: {})",
             url, request.model
         );
@@ -565,6 +566,7 @@ impl LlmProvider for OpenAiCompatProvider {
         );
 
         debug!(
+            trace_id = %trace_id,
             "Sending streaming request to {} (model: {})",
             url, request.model
         );

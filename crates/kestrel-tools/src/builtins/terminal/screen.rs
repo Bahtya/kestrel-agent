@@ -9,6 +9,51 @@ use super::emulator::{EraseMode, TerminalOp};
 use serde::Serialize;
 use std::hash::Hasher;
 
+// ─── Screen Diff ──────────────────────────────────────────────────
+
+/// A single changed line within a screen diff.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ChangedLine {
+    /// 0-based line index.
+    pub row: usize,
+    /// Content before the change.
+    pub old: String,
+    /// Content after the change.
+    pub new: String,
+}
+
+/// Structured difference between two [`ScreenSnapshot`] instances.
+///
+/// Produced by [`ScreenSnapshot::diff`], this type reports only the lines,
+/// cursor position, title, and mode that actually changed, making it suitable
+/// for LLM consumption without transmitting the full screen on every frame.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScreenDiff {
+    /// Lines that differ between the two snapshots.
+    pub changed_lines: Vec<ChangedLine>,
+    /// `true` when the cursor moved.
+    pub cursor_changed: bool,
+    /// (old_row, old_col, new_row, new_col) when the cursor moved.
+    pub cursor_delta: Option<(usize, usize, usize, usize)>,
+    /// `true` when the active buffer (primary/alternate) switched.
+    pub mode_changed: bool,
+    /// New window title when it changed, `None` otherwise.
+    pub title_changed: Option<String>,
+    /// `true` when the screen dimensions changed.
+    pub dims_changed: bool,
+}
+
+impl ScreenDiff {
+    /// Returns `true` if nothing changed between the two snapshots.
+    pub fn is_empty(&self) -> bool {
+        self.changed_lines.is_empty()
+            && !self.cursor_changed
+            && !self.mode_changed
+            && self.title_changed.is_none()
+            && !self.dims_changed
+    }
+}
+
 // ─── FNV-1a Hash (inline, no external dep) ────────────────────────
 
 /// Minimal FNV-1a hasher for screen state hashing. Avoids pulling in a
@@ -759,7 +804,7 @@ impl TerminalScreen {
 // ─── Screen Snapshot ───────────────────────────────────────────────
 
 /// Immutable snapshot of the current terminal screen state.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ScreenSnapshot {
     /// Visible lines (one String per row, trailing spaces stripped).
     pub lines: Vec<String>,
@@ -775,6 +820,60 @@ pub struct ScreenSnapshot {
     pub is_alternate: bool,
     /// Current window title.
     pub window_title: String,
+}
+
+impl ScreenSnapshot {
+    /// Compute a structured diff between `self` (old) and `other` (new).
+    ///
+    /// Returns a [`ScreenDiff`] enumerating every line that changed, cursor
+    /// movement, buffer mode switches, window title changes, and dimension
+    /// changes. Intended for LLM consumption: callers can present only the
+    /// delta rather than retransmitting the full screen.
+    pub fn diff(&self, other: &ScreenSnapshot) -> ScreenDiff {
+        let max_rows = self.lines.len().max(other.lines.len());
+        let mut changed_lines = Vec::new();
+        for row in 0..max_rows {
+            let old_line = self.lines.get(row).map(|s| s.as_str()).unwrap_or("");
+            let new_line = other.lines.get(row).map(|s| s.as_str()).unwrap_or("");
+            if old_line != new_line {
+                changed_lines.push(ChangedLine {
+                    row,
+                    old: old_line.to_string(),
+                    new: new_line.to_string(),
+                });
+            }
+        }
+
+        let cursor_changed =
+            self.cursor_row != other.cursor_row || self.cursor_col != other.cursor_col;
+        let cursor_delta = if cursor_changed {
+            Some((
+                self.cursor_row,
+                self.cursor_col,
+                other.cursor_row,
+                other.cursor_col,
+            ))
+        } else {
+            None
+        };
+
+        let mode_changed = self.is_alternate != other.is_alternate;
+        let title_changed = if self.window_title != other.window_title {
+            Some(other.window_title.clone())
+        } else {
+            None
+        };
+        let dims_changed = self.cols != other.cols || self.rows != other.rows;
+
+        ScreenDiff {
+            changed_lines,
+            cursor_changed,
+            cursor_delta,
+            mode_changed,
+            title_changed,
+            dims_changed,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1361,5 +1460,296 @@ mod tests {
         s.process_op(&TerminalOp::DecPrivateModeSet(1049));
         let h2 = s.state_hash();
         assert_ne!(h1, h2, "Hash should change when entering alternate screen");
+    }
+
+    // ─── Screen diff tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_diff_identical_snapshots() {
+        let s = new_screen();
+        let snap = s.snapshot();
+        let d = snap.diff(&snap);
+        assert!(d.is_empty());
+        assert!(d.changed_lines.is_empty());
+        assert!(!d.cursor_changed);
+        assert!(d.cursor_delta.is_none());
+        assert!(!d.mode_changed);
+        assert!(d.title_changed.is_none());
+        assert!(!d.dims_changed);
+    }
+
+    #[test]
+    fn test_diff_detects_line_change() {
+        let mut s = new_screen();
+        let snap1 = s.snapshot();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        let snap2 = s.snapshot();
+
+        let d = snap1.diff(&snap2);
+        assert!(!d.is_empty());
+        assert_eq!(d.changed_lines.len(), 1);
+        assert_eq!(d.changed_lines[0].row, 0);
+        assert_eq!(d.changed_lines[0].old, "");
+        assert_eq!(d.changed_lines[0].new, "Hello");
+    }
+
+    #[test]
+    fn test_diff_detects_multiple_line_changes() {
+        let mut s = TerminalScreen::new(10, 3);
+        s.process_op(&TerminalOp::Print("AAA".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("BBB".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("CCC".to_string()));
+        let snap1 = s.snapshot();
+
+        // Overwrite line 1
+        s.process_op(&TerminalOp::CursorPosition { row: 2, col: 1 });
+        s.process_op(&TerminalOp::Print("XXX".to_string()));
+        let snap2 = s.snapshot();
+
+        let d = snap1.diff(&snap2);
+        assert_eq!(d.changed_lines.len(), 1);
+        assert_eq!(d.changed_lines[0].row, 1);
+        assert_eq!(d.changed_lines[0].old, "BBB");
+        assert_eq!(d.changed_lines[0].new, "XXX");
+    }
+
+    #[test]
+    fn test_diff_detects_cursor_change() {
+        let mut s = new_screen();
+        let snap1 = s.snapshot();
+        s.process_op(&TerminalOp::CursorPosition { row: 10, col: 5 });
+        let snap2 = s.snapshot();
+
+        let d = snap1.diff(&snap2);
+        assert!(d.cursor_changed);
+        assert_eq!(d.cursor_delta, Some((0, 0, 9, 4)));
+        // No line changes
+        assert!(d.changed_lines.is_empty());
+    }
+
+    #[test]
+    fn test_diff_detects_mode_change() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Primary".to_string()));
+        let snap1 = s.snapshot();
+
+        s.process_op(&TerminalOp::DecPrivateModeSet(1049));
+        let snap2 = s.snapshot();
+
+        let d = snap1.diff(&snap2);
+        assert!(d.mode_changed);
+        // Alternate screen is cleared, so lines differ
+        assert!(!d.changed_lines.is_empty());
+    }
+
+    #[test]
+    fn test_diff_detects_title_change() {
+        let mut s = new_screen();
+        let snap1 = s.snapshot();
+        s.process_op(&TerminalOp::SetWindowTitle("New Title".to_string()));
+        let snap2 = s.snapshot();
+
+        let d = snap1.diff(&snap2);
+        assert_eq!(d.title_changed.as_deref(), Some("New Title"));
+        assert!(d.changed_lines.is_empty());
+    }
+
+    #[test]
+    fn test_diff_detects_dimension_change() {
+        let mut s = TerminalScreen::new(80, 24);
+        let snap1 = s.snapshot();
+        s.resize(120, 40);
+        let snap2 = s.snapshot();
+
+        let d = snap1.diff(&snap2);
+        assert!(d.dims_changed);
+    }
+
+    #[test]
+    fn test_diff_serializable() {
+        let mut s = new_screen();
+        let snap1 = s.snapshot();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        s.process_op(&TerminalOp::SetWindowTitle("Test".to_string()));
+        let snap2 = s.snapshot();
+
+        let d = snap1.diff(&snap2);
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("changed_lines"));
+        assert!(json.contains("cursor_changed"));
+        assert!(json.contains("title_changed"));
+    }
+
+    // ─── Regression fixture: partial UTF-8 across reads ─────────
+
+    #[test]
+    fn test_fixture_partial_utf8_across_feeds() {
+        let mut screen = TerminalScreen::new(20, 5);
+        // Simulate feeding the 3-byte UTF-8 你 (0xE4 0xBD 0xA0) in two chunks
+        let mut parser = crate::emulator::AnsiParser::new();
+
+        // First feed: only 2 bytes of 你
+        let ops1 = parser.parse(&[0xE4, 0xBD]);
+        for op in &ops1 {
+            screen.process_op(op);
+        }
+        // No complete chars yet — screen should be empty
+        let snap = screen.snapshot();
+        assert_eq!(snap.lines[0], "");
+
+        // Second feed: the last byte
+        let ops2 = parser.parse(&[0xA0]);
+        for op in &ops2 {
+            screen.process_op(op);
+        }
+        let snap = screen.snapshot();
+        assert_eq!(snap.lines[0], "你");
+    }
+
+    // ─── Regression fixture: partial ANSI sequence split across reads ──
+
+    #[test]
+    fn test_fixture_partial_ansi_across_feeds() {
+        let mut screen = TerminalScreen::new(20, 5);
+        let mut parser = crate::emulator::AnsiParser::new();
+
+        // Feed "Hello" then start a CSI sequence "\x1b[" but don't finish
+        let ops1 = parser.parse(b"Hello\x1b[");
+        for op in &ops1 {
+            screen.process_op(op);
+        }
+        let snap = screen.snapshot();
+        assert_eq!(snap.lines[0], "Hello");
+
+        // Now finish the cursor-position sequence
+        let ops2 = parser.parse(b"5;10HWorld");
+        for op in &ops2 {
+            screen.process_op(op);
+        }
+        let snap = screen.snapshot();
+        assert_eq!(snap.lines[0], "Hello");
+        // "World" printed at cursor position (4, 9) — row 4
+        assert!(snap.lines[4].contains("World"));
+    }
+
+    // ─── Regression fixture: alternate screen enter/exit restore ─────
+
+    #[test]
+    fn test_fixture_alternate_screen_restore() {
+        let mut screen = TerminalScreen::new(20, 5);
+        screen.process_op(&TerminalOp::Print("Line1".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("Line2".to_string()));
+
+        let primary_snap = screen.snapshot();
+        assert_eq!(primary_snap.lines[0], "Line1");
+        assert_eq!(primary_snap.lines[1], "Line2");
+
+        // Enter alternate screen
+        screen.process_op(&TerminalOp::DecPrivateModeSet(1049));
+        let alt_snap = screen.snapshot();
+        assert!(alt_snap.is_alternate);
+        assert_eq!(alt_snap.lines[0], ""); // Cleared on enter
+
+        // Write on alternate screen
+        screen.process_op(&TerminalOp::Print("AltContent".to_string()));
+        let alt_content = screen.snapshot();
+        assert_eq!(alt_content.lines[0], "AltContent");
+
+        // Leave alternate screen — primary must be restored
+        screen.process_op(&TerminalOp::DecPrivateModeReset(1049));
+        let restored = screen.snapshot();
+        assert!(!restored.is_alternate);
+        assert_eq!(restored.lines[0], "Line1");
+        assert_eq!(restored.lines[1], "Line2");
+    }
+
+    // ─── Regression fixture: full-screen redraw ─────────────────────
+
+    #[test]
+    fn test_fixture_full_screen_redraw() {
+        let mut screen = TerminalScreen::new(10, 3);
+
+        // Draw initial content
+        screen.process_op(&TerminalOp::Print("AAA".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("BBB".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("CCC".to_string()));
+
+        // Full erase + redraw
+        screen.process_op(&TerminalOp::EraseInDisplay(EraseMode::All));
+        screen.process_op(&TerminalOp::CursorPosition { row: 1, col: 1 });
+        screen.process_op(&TerminalOp::Print("XXX".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("YYY".to_string()));
+
+        let snap = screen.snapshot();
+        assert_eq!(snap.lines[0], "XXX");
+        assert_eq!(snap.lines[1], "YYY");
+        assert_eq!(snap.lines[2], "");
+    }
+
+    // ─── Regression fixture: wide char / CJK alignment ──────────────
+
+    #[test]
+    fn test_fixture_wide_char_alignment() {
+        let mut screen = TerminalScreen::new(10, 3);
+
+        // Print CJK text mixed with ASCII
+        screen.process_op(&TerminalOp::Print("AB你好CD".to_string()));
+        let snap = screen.snapshot();
+        // A(1) B(1) 你(2) 好(2) C(1) D(1) = 8 cols
+        assert_eq!(snap.lines[0], "AB你好CD");
+
+        // Verify wide continuation cells
+        // 你 at col 2-3, 好 at col 4-5
+        let buf = screen.active_buf();
+        assert!(
+            buf.cell(0, 3).wide,
+            "col 3 should be wide continuation for 你"
+        );
+        assert!(
+            buf.cell(0, 5).wide,
+            "col 5 should be wide continuation for 好"
+        );
+    }
+
+    // ─── Regression fixture: menu navigation via cursor movement ────
+
+    #[test]
+    fn test_fixture_menu_navigation() {
+        let mut screen = TerminalScreen::new(20, 10);
+
+        // Simulate a simple menu with highlighted item
+        screen.process_op(&TerminalOp::Print("Option 1".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("> Option 2".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("Option 3".to_string()));
+
+        let snap1 = screen.snapshot();
+        assert!(snap1.lines[1].contains("> Option 2"));
+
+        // Simulate arrow-down: redraw menu with highlight moved
+        screen.process_op(&TerminalOp::CursorPosition { row: 1, col: 1 });
+        screen.process_op(&TerminalOp::EraseInDisplay(EraseMode::All));
+
+        screen.process_op(&TerminalOp::Print("Option 1".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("Option 2".to_string()));
+        screen.process_op(&TerminalOp::Linefeed);
+        screen.process_op(&TerminalOp::Print("> Option 3".to_string()));
+
+        let snap2 = screen.snapshot();
+        assert!(snap2.lines[2].contains("> Option 3"));
+        assert!(!snap2.lines[1].contains(">"));
+
+        // Diff should show lines 1 and 2 changed
+        let d = snap1.diff(&snap2);
+        assert!(d.changed_lines.iter().any(|c| c.row == 1));
+        assert!(d.changed_lines.iter().any(|c| c.row == 2));
     }
 }

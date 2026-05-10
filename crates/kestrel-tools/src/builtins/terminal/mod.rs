@@ -14,7 +14,9 @@ pub use emulator::{
     escape_control, strip_ansi, AnsiParser, EraseMode, IncrementalUtf8Decoder, ReadMode, TerminalOp,
 };
 pub use manager::TerminalManager;
-pub use screen::{Cell, CellAttributes, Color, ScreenSnapshot, TerminalScreen};
+pub use screen::{
+    Cell, CellAttributes, ChangedLine, Color, ScreenDiff, ScreenSnapshot, TerminalScreen,
+};
 pub use session::{validate_shell, SessionInfo, TerminalSession};
 pub use tools::register_terminal_tools;
 pub use tools::{

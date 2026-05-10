@@ -137,7 +137,6 @@ const DEFAULT_MAX_REQUESTS_PER_SCRIPT: usize = 50;
 const DEFAULT_MAX_REDIRECTS: u32 = 5;
 
 /// System paths that are never writable from Lua scripts.
-#[cfg(unix)]
 const BLOCKED_WRITE_PATHS_UNIX: &[&str] = &[
     "/usr", "/bin", "/sbin", "/etc", "/var", "/sys", "/proc", "/dev", "/boot", "/lib", "/lib64",
     "/opt",
@@ -4343,15 +4342,15 @@ mod tests {
     async fn test_abuse_copy_respects_write_file_count() {
         let dir = tempfile::tempdir().unwrap();
         let dst_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
+        std::fs::write(dir.path().join("src1.txt"), "data1").unwrap();
+        std::fs::write(dir.path().join("src2.txt"), "data2").unwrap();
 
         let tool = ScriptTool::new().with_max_write_files(1);
         // First copy should succeed, second should fail
         let code = format!(
             r#"
                 local src1 = '{d}/src1.txt'
-                kestrel.write_file(src1, 'data1')
                 local src2 = '{d}/src2.txt'
-                kestrel.write_file(src2, 'data2')
                 local ok1, err1 = pcall(kestrel.copy, src1, '{d}/c1.txt')
                 local ok2, err2 = pcall(kestrel.copy, src2, '{d}/c2.txt')
                 print(ok1, ok2)

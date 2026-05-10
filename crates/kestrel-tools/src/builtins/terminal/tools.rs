@@ -1432,7 +1432,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_screen_change_timeout() {
-        let (_, create, _, _, _, kill, _, _, _, _, wait) = make_tools();
+        let (_, create, _, _, _, kill, _, _, capture, _, wait) = make_tools();
 
         let create_result = create.execute(json!({})).await.unwrap();
         let session_id = create_result
@@ -1440,6 +1440,11 @@ mod tests {
             .nth(1)
             .expect("should have session id")
             .to_string();
+
+        capture
+            .execute(json!({"session_id": session_id}))
+            .await
+            .unwrap();
 
         // Wait with very short timeout — no output sent, should time out
         let result = wait

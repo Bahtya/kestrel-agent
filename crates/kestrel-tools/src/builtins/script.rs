@@ -635,6 +635,493 @@ impl ScriptTool {
                 .map_err(|e| ToolError::Execution(format!("Failed to set env: {}", e)))?;
         }
 
+        // --- kestrel.cwd() ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let cwd_fn = lua
+                .create_function(|lua, _: ()| {
+                    let cwd = std::env::current_dir()
+                        .map_err(|e| mlua::Error::external(format!("cwd failed: {}", e)))?;
+                    lua.create_string(cwd.to_string_lossy().as_ref())
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create cwd: {}", e)))?;
+            kestrel_table
+                .set("cwd", cwd_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set cwd: {}", e)))?;
+        }
+
+        // --- kestrel.abspath(path) ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let abspath_fn = lua
+                .create_function(|lua, path: String| {
+                    let abs = std::fs::canonicalize(&path)
+                        .or_else(|_| std::env::current_dir().map(|d| d.join(&path)))
+                        .map_err(|e| mlua::Error::external(format!("abspath failed: {}", e)))?;
+                    lua.create_string(abs.to_string_lossy().as_ref())
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create abspath: {}", e)))?;
+            kestrel_table
+                .set("abspath", abspath_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set abspath: {}", e)))?;
+        }
+
+        // --- kestrel.join_path(...) ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let join_path_fn = lua
+                .create_function(|lua, parts: mlua::MultiValue| {
+                    let components: Vec<std::path::PathBuf> = parts
+                        .iter()
+                        .filter_map(|v| {
+                            if let mlua::Value::String(s) = v {
+                                s.to_str()
+                                    .ok()
+                                    .map(|s| std::path::PathBuf::from(s.to_string()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if components.is_empty() {
+                        return Err(mlua::Error::external(
+                            "join_path requires at least one argument",
+                        ));
+                    }
+                    let joined = components
+                        .iter()
+                        .fold(std::path::PathBuf::new(), |acc, p| acc.join(p));
+                    lua.create_string(joined.to_string_lossy().as_ref())
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create join_path: {}", e)))?;
+            kestrel_table
+                .set("join_path", join_path_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set join_path: {}", e)))?;
+        }
+
+        // --- kestrel.basename(path) ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let basename_fn = lua
+                .create_function(|lua, path: String| {
+                    let name = Path::new(&path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    lua.create_string(name)
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create basename: {}", e)))?;
+            kestrel_table
+                .set("basename", basename_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set basename: {}", e)))?;
+        }
+
+        // --- kestrel.dirname(path) ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let dirname_fn = lua
+                .create_function(|lua, path: String| {
+                    let dir = Path::new(&path)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or(".");
+                    lua.create_string(dir)
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create dirname: {}", e)))?;
+            kestrel_table
+                .set("dirname", dirname_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set dirname: {}", e)))?;
+        }
+
+        // --- kestrel.read_lines(path [, offset, limit]) ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let max_output = self.max_output_bytes;
+            let read_lines_fn = lua
+                .create_function(
+                    move |lua, (path, offset, limit): (String, Option<usize>, Option<usize>)| {
+                        let content = std::fs::read_to_string(&path).map_err(|e| {
+                            mlua::Error::external(format!("Failed to read {}: {}", path, e))
+                        })?;
+
+                        let lines: Vec<&str> = content.lines().collect();
+                        let off = offset.unwrap_or(0);
+                        let iter = lines.iter().skip(off);
+                        let taken: Vec<&str> = if let Some(l) = limit {
+                            iter.take(l).copied().collect()
+                        } else {
+                            iter.copied().collect()
+                        };
+
+                        let mut total_bytes = 0usize;
+                        let table = lua.create_table()?;
+                        for line in &taken {
+                            total_bytes += line.len();
+                            if total_bytes > max_output {
+                                break;
+                            }
+                            table.push(lua.create_string(line)?)?;
+                        }
+                        Ok(table)
+                    },
+                )
+                .map_err(|e| ToolError::Execution(format!("Failed to create read_lines: {}", e)))?;
+            kestrel_table
+                .set("read_lines", read_lines_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set read_lines: {}", e)))?;
+        }
+
+        // --- kestrel.append_file(path, content) ---
+        if caps.contains(ScriptCapability::FS_WRITE) {
+            let max_write_bytes = self.max_write_bytes;
+            let max_write_files = self.max_write_files;
+            let append_counter = Arc::new(AtomicUsize::new(0));
+            let append_file_counter = Arc::new(AtomicUsize::new(0));
+
+            let ac = append_counter.clone();
+            let afc = append_file_counter.clone();
+            let append_file_fn = lua
+                .create_function(move |_, (path, content): (String, String)| {
+                    validate_write_path(&path)?;
+
+                    let content_len = content.len();
+                    let prev = ac.fetch_add(content_len, Ordering::SeqCst);
+                    if prev + content_len > max_write_bytes {
+                        return Err(mlua::Error::external(format!(
+                            "Write limit exceeded: {} bytes (max {})",
+                            prev + content_len,
+                            max_write_bytes
+                        )));
+                    }
+                    let file_count = afc.fetch_add(1, Ordering::SeqCst) + 1;
+                    if file_count > max_write_files {
+                        return Err(mlua::Error::external(format!(
+                            "File count limit exceeded: {} files (max {})",
+                            file_count, max_write_files
+                        )));
+                    }
+
+                    if let Some(parent) = Path::new(&path).parent() {
+                        if !parent.as_os_str().is_empty() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                mlua::Error::external(format!("Failed to create dir: {}", e))
+                            })?;
+                        }
+                    }
+
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .map_err(|e| {
+                            mlua::Error::external(format!("Failed to open {}: {}", path, e))
+                        })?;
+                    file.write_all(content.as_bytes())
+                        .map_err(|e| mlua::Error::external(format!("Failed to append: {}", e)))?;
+                    file.flush()
+                        .map_err(|e| mlua::Error::external(format!("Failed to flush: {}", e)))?;
+
+                    Ok(format!("Appended {} bytes to {}", content_len, path))
+                })
+                .map_err(|e| {
+                    ToolError::Execution(format!("Failed to create append_file: {}", e))
+                })?;
+            kestrel_table
+                .set("append_file", append_file_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set append_file: {}", e)))?;
+        }
+
+        // --- kestrel.copy(src, dst) ---
+        if caps.contains(ScriptCapability::FS_WRITE) {
+            let max_write_bytes = self.max_write_bytes;
+            let max_write_files = self.max_write_files;
+            let copy_counter = Arc::new(AtomicUsize::new(0));
+            let copy_file_counter = Arc::new(AtomicUsize::new(0));
+
+            let cc = copy_counter.clone();
+            let cfc = copy_file_counter.clone();
+            let copy_fn = lua
+                .create_function(move |_, (src, dst): (String, String)| {
+                    validate_write_path(&dst)?;
+
+                    let meta = std::fs::metadata(&src).map_err(|e| {
+                        mlua::Error::external(format!("Cannot stat source {}: {}", src, e))
+                    })?;
+                    if !meta.is_file() {
+                        return Err(mlua::Error::external(format!(
+                            "copy only supports files, not directories: {}",
+                            src
+                        )));
+                    }
+
+                    let size = meta.len() as usize;
+                    let prev = cc.fetch_add(size, Ordering::SeqCst);
+                    if prev + size > max_write_bytes {
+                        return Err(mlua::Error::external(format!(
+                            "Write limit exceeded: {} bytes (max {})",
+                            prev + size,
+                            max_write_bytes
+                        )));
+                    }
+                    let file_count = cfc.fetch_add(1, Ordering::SeqCst) + 1;
+                    if file_count > max_write_files {
+                        return Err(mlua::Error::external(format!(
+                            "File count limit exceeded: {} files (max {})",
+                            file_count, max_write_files
+                        )));
+                    }
+
+                    if let Some(parent) = Path::new(&dst).parent() {
+                        if !parent.as_os_str().is_empty() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                mlua::Error::external(format!("Failed to create dir: {}", e))
+                            })?;
+                        }
+                    }
+
+                    std::fs::copy(&src, &dst)
+                        .map_err(|e| mlua::Error::external(format!("copy failed: {}", e)))?;
+
+                    Ok(format!("Copied {} -> {} ({} bytes)", src, dst, size))
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create copy: {}", e)))?;
+            kestrel_table
+                .set("copy", copy_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set copy: {}", e)))?;
+        }
+
+        // --- kestrel.move(src, dst) ---
+        if caps.contains(ScriptCapability::FS_WRITE) && caps.contains(ScriptCapability::FS_DELETE) {
+            let move_fn = lua
+                .create_function(|_, (src, dst): (String, String)| {
+                    validate_write_path(&dst)?;
+
+                    if let Some(parent) = Path::new(&dst).parent() {
+                        if !parent.as_os_str().is_empty() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                mlua::Error::external(format!("Failed to create dir: {}", e))
+                            })?;
+                        }
+                    }
+
+                    std::fs::rename(&src, &dst)
+                        .map_err(|e| mlua::Error::external(format!("move failed: {}", e)))?;
+
+                    Ok(format!("Moved {} -> {}", src, dst))
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create move: {}", e)))?;
+            kestrel_table
+                .set("move", move_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set move: {}", e)))?;
+        }
+
+        // --- kestrel.glob(pattern [, opts]) ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let glob_fn = lua
+                .create_function(|lua, (pattern, opts): (String, Option<mlua::Table>)| {
+                    let max_entries = opts
+                        .as_ref()
+                        .and_then(|o| o.get::<usize>("max_entries").ok())
+                        .unwrap_or(DEFAULT_MAX_LIST_DIR_ENTRIES);
+
+                    let mut results = Vec::new();
+                    let walker = glob::glob(&pattern).map_err(|e| {
+                        mlua::Error::external(format!("Invalid glob pattern: {}", e))
+                    })?;
+
+                    for entry in walker {
+                        if results.len() >= max_entries {
+                            break;
+                        }
+                        match entry {
+                            Ok(path) => {
+                                results.push(lua.create_string(path.to_string_lossy().as_ref())?);
+                            }
+                            Err(e) => {
+                                debug!(error = %e, "glob: skipping unreadable path");
+                            }
+                        }
+                    }
+
+                    let table = lua.create_table()?;
+                    for r in results {
+                        table.push(r)?;
+                    }
+                    Ok(table)
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create glob: {}", e)))?;
+            kestrel_table
+                .set("glob", glob_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set glob: {}", e)))?;
+        }
+
+        // --- kestrel.walk(path [, opts]) ---
+        if caps.contains(ScriptCapability::FS_READ) {
+            let walk_fn = lua
+                .create_function(|lua, (path, opts): (String, Option<mlua::Table>)| {
+                    let max_depth = opts
+                        .as_ref()
+                        .and_then(|o| o.get::<usize>("max_depth").ok())
+                        .unwrap_or(DEFAULT_MAX_LIST_DIR_DEPTH);
+                    let max_entries = opts
+                        .as_ref()
+                        .and_then(|o| o.get::<usize>("max_entries").ok())
+                        .unwrap_or(DEFAULT_MAX_LIST_DIR_ENTRIES);
+
+                    let mut results: Vec<WalkEntry> = Vec::new();
+                    walk_dir(&path, &mut results, 0, max_depth, max_entries)
+                        .map_err(|e| mlua::Error::external(e.to_string()))?;
+
+                    let table = lua.create_table()?;
+                    for entry in &results {
+                        let t = lua.create_table()?;
+                        t.set("path", lua.create_string(&entry.path)?)?;
+                        t.set("name", lua.create_string(&entry.name)?)?;
+                        t.set("type", lua.create_string(entry.file_type)?)?;
+                        t.set("depth", entry.depth)?;
+                        table.push(t)?;
+                    }
+                    Ok(table)
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create walk: {}", e)))?;
+            kestrel_table
+                .set("walk", walk_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set walk: {}", e)))?;
+        }
+
+        // --- kestrel.read_json(path) ---
+        if caps.contains(ScriptCapability::FS_READ) && caps.contains(ScriptCapability::JSON) {
+            let max_output = self.max_output_bytes;
+            let read_json_fn = lua
+                .create_function(move |lua, path: String| {
+                    let content = std::fs::read_to_string(&path).map_err(|e| {
+                        mlua::Error::external(format!("Failed to read {}: {}", path, e))
+                    })?;
+
+                    if content.len() > max_output {
+                        return Err(mlua::Error::external(format!(
+                            "File too large: {} bytes (max {})",
+                            content.len(),
+                            max_output
+                        )));
+                    }
+
+                    let val: Value = serde_json::from_str(&content)
+                        .map_err(|e| mlua::Error::external(format!("JSON parse error: {}", e)))?;
+                    json_value_to_lua(lua, &val)
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create read_json: {}", e)))?;
+            kestrel_table
+                .set("read_json", read_json_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set read_json: {}", e)))?;
+        }
+
+        // --- kestrel.write_json(path, value [, pretty]) ---
+        if caps.contains(ScriptCapability::FS_WRITE) && caps.contains(ScriptCapability::JSON) {
+            let max_write_bytes = self.max_write_bytes;
+            let max_write_files = self.max_write_files;
+            let wj_counter = Arc::new(AtomicUsize::new(0));
+            let wj_file_counter = Arc::new(AtomicUsize::new(0));
+
+            let wjc = wj_counter.clone();
+            let wjfc = wj_file_counter.clone();
+            let write_json_fn = lua
+                .create_function(
+                    move |_, (path, table, pretty): (String, mlua::Value, Option<bool>)| {
+                        validate_write_path(&path)?;
+
+                        let json_val = lua_value_to_json(&table)?;
+                        let content = if pretty.unwrap_or(true) {
+                            serde_json::to_string_pretty(&json_val).map_err(|e| {
+                                mlua::Error::external(format!("JSON encode error: {}", e))
+                            })?
+                        } else {
+                            serde_json::to_string(&json_val).map_err(|e| {
+                                mlua::Error::external(format!("JSON encode error: {}", e))
+                            })?
+                        };
+
+                        let content_len = content.len();
+                        let prev = wjc.fetch_add(content_len, Ordering::SeqCst);
+                        if prev + content_len > max_write_bytes {
+                            return Err(mlua::Error::external(format!(
+                                "Write limit exceeded: {} bytes (max {})",
+                                prev + content_len,
+                                max_write_bytes
+                            )));
+                        }
+                        let file_count = wjfc.fetch_add(1, Ordering::SeqCst) + 1;
+                        if file_count > max_write_files {
+                            return Err(mlua::Error::external(format!(
+                                "File count limit exceeded: {} files (max {})",
+                                file_count, max_write_files
+                            )));
+                        }
+
+                        if let Some(parent) = Path::new(&path).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                std::fs::create_dir_all(parent).map_err(|e| {
+                                    mlua::Error::external(format!("Failed to create dir: {}", e))
+                                })?;
+                            }
+                        }
+
+                        std::fs::write(&path, &content).map_err(|e| {
+                            mlua::Error::external(format!("Failed to write {}: {}", path, e))
+                        })?;
+
+                        Ok(format!("Wrote {} bytes to {}", content_len, path))
+                    },
+                )
+                .map_err(|e| ToolError::Execution(format!("Failed to create write_json: {}", e)))?;
+            kestrel_table
+                .set("write_json", write_json_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set write_json: {}", e)))?;
+        }
+
+        // --- kestrel.tempdir() ---
+        if caps.contains(ScriptCapability::FS_WRITE) && caps.contains(ScriptCapability::FS_MKDIR) {
+            let tempdir_fn = lua
+                .create_function(|lua, _: ()| {
+                    let base = std::env::temp_dir();
+                    let name = format!(
+                        "kestrel-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    );
+                    let dir = base.join(&name);
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| mlua::Error::external(format!("tempdir failed: {}", e)))?;
+                    lua.create_string(dir.to_string_lossy().as_ref())
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create tempdir: {}", e)))?;
+            kestrel_table
+                .set("tempdir", tempdir_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set tempdir: {}", e)))?;
+        }
+
+        // --- kestrel.tempfile([prefix]) ---
+        if caps.contains(ScriptCapability::FS_WRITE) {
+            let tempfile_fn = lua
+                .create_function(|lua, prefix: Option<String>| {
+                    let base = std::env::temp_dir();
+                    let prefix_str = prefix.unwrap_or_else(|| "tmp".to_string());
+                    let name = format!(
+                        "{}-{}",
+                        prefix_str,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    );
+                    let path = base.join(&name);
+                    // Create empty file
+                    std::fs::File::create(&path)
+                        .map_err(|e| mlua::Error::external(format!("tempfile failed: {}", e)))?;
+                    lua.create_string(path.to_string_lossy().as_ref())
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create tempfile: {}", e)))?;
+            kestrel_table
+                .set("tempfile", tempfile_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set tempfile: {}", e)))?;
+        }
+
         // --- kestrel.platform() ---
         let platform_fn = lua
             .create_function(|lua, _: ()| {
@@ -682,7 +1169,11 @@ impl Tool for ScriptTool {
          when shell commands are unavailable or unreliable (e.g. Windows). \
          Available APIs: kestrel.read_file, kestrel.write_file, kestrel.list_dir, \
          kestrel.exists, kestrel.stat, kestrel.mkdir, kestrel.remove, \
-         kestrel.json_decode, kestrel.json_encode, kestrel.env, kestrel.platform."
+         kestrel.json_decode, kestrel.json_encode, kestrel.env, kestrel.platform, \
+         kestrel.cwd, kestrel.abspath, kestrel.join_path, kestrel.basename, \
+         kestrel.dirname, kestrel.read_lines, kestrel.append_file, kestrel.copy, \
+         kestrel.move, kestrel.glob, kestrel.walk, kestrel.read_json, \
+         kestrel.write_json, kestrel.tempdir, kestrel.tempfile."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -881,6 +1372,67 @@ impl Tool for ScriptTool {
             }
         }
     }
+}
+
+// --- Walk helper ---
+
+struct WalkEntry {
+    path: String,
+    name: String,
+    file_type: &'static str,
+    depth: usize,
+}
+
+fn walk_dir(
+    path: &str,
+    results: &mut Vec<WalkEntry>,
+    depth: usize,
+    max_depth: usize,
+    max_entries: usize,
+) -> Result<(), ToolError> {
+    if depth > max_depth {
+        return Ok(());
+    }
+
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(e) => {
+            debug!(path, error = %e, "walk: unreadable directory, skipping");
+            return Ok(());
+        }
+    };
+
+    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        if results.len() >= max_entries {
+            return Ok(());
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        let file_type = match entry.file_type() {
+            Ok(ft) if ft.is_dir() => "dir",
+            Ok(ft) if ft.is_file() => "file",
+            Ok(_) => "other",
+            Err(_) => continue,
+        };
+
+        let entry_path = entry.path().to_string_lossy().to_string();
+
+        results.push(WalkEntry {
+            path: entry_path.clone(),
+            name,
+            file_type,
+            depth,
+        });
+
+        if file_type == "dir" {
+            walk_dir(&entry_path, results, depth + 1, max_depth, max_entries)?;
+        }
+    }
+
+    Ok(())
 }
 
 // --- Path validation ---
@@ -1747,5 +2299,505 @@ mod tests {
             result
         );
         assert!(result.unwrap().contains("all apis present"));
+    }
+
+    // ── Path API tests ──────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_cwd() {
+        let tool = ScriptTool::new();
+        let result = tool
+            .execute(json!({"code": "local cwd = kestrel.cwd(); print(type(cwd), #cwd > 0)"}))
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.contains("string"),
+            "cwd should return a string, got: {}",
+            output
+        );
+        assert!(
+            output.contains("true"),
+            "cwd should be non-empty, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_abspath() {
+        let tool = ScriptTool::new();
+        let result = tool
+            .execute(json!({"code": "local abs = kestrel.abspath('.'); print(abs)"}))
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.starts_with('/'),
+            "abspath should return absolute path, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_join_path() {
+        let tool = ScriptTool::new();
+        let result = tool
+            .execute(json!({"code": "print(kestrel.join_path('a', 'b', 'c.txt'))"}))
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap().trim().to_string();
+        assert!(
+            output.contains("a") && output.contains("b") && output.contains("c.txt"),
+            "join_path should join components, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_basename() {
+        let tool = ScriptTool::new();
+        let result = tool
+            .execute(json!({"code": "print(kestrel.basename('/foo/bar/baz.txt'))"}))
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("baz.txt"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_dirname() {
+        let tool = ScriptTool::new();
+        let result = tool
+            .execute(json!({"code": "print(kestrel.dirname('/foo/bar/baz.txt'))"}))
+            .await;
+        assert!(result.is_ok());
+        let output = result.unwrap().trim().to_string();
+        assert!(
+            output.contains("bar"),
+            "dirname should return parent dir, got: {}",
+            output
+        );
+    }
+
+    // ── read_lines tests ────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_read_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("lines.txt");
+        std::fs::write(&file_path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!(
+            "local lines = kestrel.read_lines('{}', 1, 2); for _, l in ipairs(lines) do print(l) end",
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("line2"));
+        assert!(output.contains("line3"));
+        assert!(!output.contains("line1"));
+        assert!(!output.contains("line4"));
+    }
+
+    // ── append_file tests ───────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_append_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("append.txt");
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+
+        let tool = ScriptTool::new();
+        let code1 = format!("kestrel.write_file('{}', 'hello')", path_str);
+        tool.execute(json!({"code": code1})).await.unwrap();
+
+        let code2 = format!("kestrel.append_file('{}', ' world')", path_str);
+        let result = tool.execute(json!({"code": code2})).await;
+        assert!(result.is_ok());
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "hello world");
+    }
+
+    // ── copy tests ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, "copy me").unwrap();
+
+        let src_str = src.to_str().unwrap().replace('\\', "\\\\");
+        let dst_str = dst.to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!("kestrel.copy('{}', '{}')", src_str, dst_str);
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+
+        let content = std::fs::read_to_string(&dst).unwrap();
+        assert_eq!(content, "copy me");
+    }
+
+    // ── move tests ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("original.txt");
+        let dst = dir.path().join("moved.txt");
+        std::fs::write(&src, "move me").unwrap();
+
+        let src_str = src.to_str().unwrap().replace('\\', "\\\\");
+        let dst_str = dst.to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!("kestrel.move('{}', '{}')", src_str, dst_str);
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+
+        assert!(!src.exists(), "source should be gone after move");
+        let content = std::fs::read_to_string(&dst).unwrap();
+        assert_eq!(content, "move me");
+    }
+
+    // ── glob tests ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "").unwrap();
+
+        let path_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!(
+            "local files = kestrel.glob('{}/*.rs'); for _, f in ipairs(files) do print(f) end",
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.contains("a.rs"),
+            "glob should find a.rs, got: {}",
+            output
+        );
+        assert!(
+            output.contains("b.rs"),
+            "glob should find b.rs, got: {}",
+            output
+        );
+        assert!(
+            !output.contains("c.txt"),
+            "glob should not find c.txt, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_glob_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..20 {
+            std::fs::write(dir.path().join(format!("f{:03}.txt", i)), "").unwrap();
+        }
+
+        let path_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!(
+            "local files = kestrel.glob('{}/*.txt', {{max_entries = 5}}); print(#files)",
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap().trim();
+        assert_eq!(
+            output, "5",
+            "glob should respect max_entries, got: {}",
+            output
+        );
+    }
+
+    // ── walk tests ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.txt"), "").unwrap();
+
+        let path_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!(
+            "local entries = kestrel.walk('{}'); for _, e in ipairs(entries) do print(e.type, e.name) end",
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.contains("a.txt"),
+            "walk should find a.txt, got: {}",
+            output
+        );
+        assert!(
+            output.contains("b.txt"),
+            "walk should find b.txt in sub dir, got: {}",
+            output
+        );
+        assert!(
+            output.contains("sub"),
+            "walk should list sub directory, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_walk_respects_max_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        for i in 0..5 {
+            deep.push(format!("d{}", i));
+            std::fs::create_dir_all(&deep).unwrap();
+            std::fs::write(deep.join("file.txt"), "x").unwrap();
+        }
+
+        let path_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!(
+            "local entries = kestrel.walk('{}', {{max_depth = 2}}); print(#entries)",
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+    }
+
+    // ── read_json / write_json tests ────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_read_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("data.json");
+        std::fs::write(&file_path, r#"{"name": "test", "value": 42}"#).unwrap();
+
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!(
+            "local data = kestrel.read_json('{}'); print(data.name, data.value)",
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("test"));
+        assert!(output.contains("42"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_write_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("output.json");
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+
+        let tool = ScriptTool::new();
+        let code = format!(
+            r#"kestrel.write_json('{}', {{hello = "world", num = 123}})"#,
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("hello"));
+        assert!(content.contains("world"));
+        assert!(content.contains("123"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_read_write_json_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("roundtrip.json");
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+
+        let tool = ScriptTool::new();
+        let code = format!(
+            r#"
+                local data = {{items = {{1, 2, 3}}, name = "test"}}
+                kestrel.write_json('{path}', data)
+                local loaded = kestrel.read_json('{path}')
+                print(loaded.name, #loaded.items)
+            "#,
+            path = path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("test"));
+        assert!(output.contains("3"));
+    }
+
+    // ── tempdir / tempfile tests ────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_tempdir() {
+        let tool = ScriptTool::new();
+        let code = r#"
+            local dir = kestrel.tempdir()
+            print(type(dir), #dir > 0)
+            -- Write a file to the temp dir to verify it exists
+            kestrel.write_file(dir .. "/test.txt", "temp content")
+            print(kestrel.exists(dir .. "/test.txt"))
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.contains("string"),
+            "tempdir should return string, got: {}",
+            output
+        );
+        assert!(
+            output.contains("true"),
+            "tempdir should be usable, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_tempfile() {
+        let tool = ScriptTool::new();
+        let code = r#"
+            local path = kestrel.tempfile()
+            print(type(path), #path > 0)
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.contains("string"),
+            "tempfile should return string, got: {}",
+            output
+        );
+    }
+
+    // ── Capability gating for new APIs ──────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_capability_gates_path_apis() {
+        // Without FS_READ, path APIs should be nil
+        let tool = ScriptTool::new().with_capabilities(ScriptCapability::JSON);
+        let result = tool
+            .execute(json!({"code": "print(kestrel.cwd == nil, kestrel.abspath == nil, kestrel.join_path == nil, kestrel.basename == nil, kestrel.dirname == nil)"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("true"),
+            "path APIs should be nil without FS_READ, got: {}",
+            result
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_capability_gates_copy() {
+        // Without FS_WRITE, copy should be nil
+        let tool = ScriptTool::new().with_capabilities(ScriptCapability::FS_READ);
+        let result = tool
+            .execute(json!({"code": "print(kestrel.copy == nil)"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("true"),
+            "copy should be nil without FS_WRITE"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_capability_gates_move() {
+        // Without FS_WRITE+FS_DELETE, move should be nil
+        let tool = ScriptTool::new().with_capabilities(ScriptCapability::FS_READ);
+        let result = tool
+            .execute(json!({"code": "print(kestrel.move == nil)"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("true"),
+            "move should be nil without FS_WRITE+FS_DELETE"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_capability_gates_read_json() {
+        // Without JSON, read_json should be nil
+        let tool = ScriptTool::new().with_capabilities(ScriptCapability::FS_READ);
+        let result = tool
+            .execute(json!({"code": "print(kestrel.read_json == nil)"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("true"),
+            "read_json should be nil without JSON+FS_READ"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_capability_gates_write_json() {
+        // Without JSON, write_json should be nil
+        let tool = ScriptTool::new().with_capabilities(ScriptCapability::FS_WRITE);
+        let result = tool
+            .execute(json!({"code": "print(kestrel.write_json == nil)"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("true"),
+            "write_json should be nil without JSON+FS_WRITE"
+        );
+    }
+
+    // ── Copy/move write path validation ─────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_copy_blocked_system_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, "data").unwrap();
+
+        let src_str = src.to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!("kestrel.copy('{}', '/etc/evil_copy.txt')", src_str);
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_err(), "copy to system path should fail");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_move_blocked_system_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        std::fs::write(&src, "data").unwrap();
+
+        let src_str = src.to_str().unwrap().replace('\\', "\\\\");
+        let tool = ScriptTool::new();
+        let code = format!("kestrel.move('{}', '/etc/evil_move.txt')", src_str);
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_err(), "move to system path should fail");
+    }
+
+    // ── Append respects write limits ────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_script_append_file_respects_write_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("append_limited.txt");
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+
+        let tool = ScriptTool::new().with_max_write_bytes(10);
+        let code = format!(
+            "kestrel.append_file('{}', 'this is way more than ten bytes of content')",
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        assert!(result.is_err(), "append_file should respect write limit");
     }
 }

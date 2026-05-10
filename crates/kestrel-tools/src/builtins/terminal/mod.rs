@@ -4,14 +4,16 @@
 //! suitable for AI-driven terminal orchestration. Each session wraps a PTY
 //! backed by the system's native pseudo-terminal (Unix PTY or Windows ConPTY).
 
+mod emulator;
 mod manager;
 mod session;
 mod tools;
 
+pub use emulator::{escape_control, strip_ansi, IncrementalUtf8Decoder, ReadMode};
 pub use manager::TerminalManager;
 pub use session::{validate_shell, SessionInfo, TerminalSession};
 pub use tools::register_terminal_tools;
 pub use tools::{
     TerminalCreateSessionTool, TerminalKillSessionTool, TerminalListSessionsTool,
-    TerminalReadOutputTool, TerminalResizeTool, TerminalSendInputTool,
+    TerminalReadOutputTool, TerminalResizeTool, TerminalSendInputTool, TerminalSendKeyTool,
 };

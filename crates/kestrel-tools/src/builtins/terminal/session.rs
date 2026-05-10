@@ -1,5 +1,6 @@
 //! Single PTY terminal session backed by `portable-pty`.
 
+use super::emulator::{IncrementalUtf8Decoder, TerminalEmulatorHandle};
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -95,7 +96,15 @@ pub struct TerminalSession {
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     writer: Mutex<Box<dyn Write + Send>>,
-    output_buffer: Arc<Mutex<RingBuffer>>,
+    /// Raw PTY byte buffer (for debug/escaped modes).
+    #[allow(dead_code)] // Used by future escaped mode and debug output
+    raw_buffer: Arc<Mutex<RingBuffer>>,
+    /// Incremental UTF-8 decoder state (shared with reader thread).
+    utf8_decoder: Arc<Mutex<IncrementalUtf8Decoder>>,
+    /// Decoded text stream for normal reading.
+    decoded_buffer: Arc<Mutex<String>>,
+    /// Terminal emulator handle (placeholder for future parser/screen model).
+    emulator: Arc<Mutex<TerminalEmulatorHandle>>,
     alive: Arc<AtomicBool>,
     reader_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -107,7 +116,10 @@ pub struct TerminalSession {
 // - master: Mutex<Option<Box<dyn MasterPty + Send>>> — Mutex provides Sync
 // - child: Mutex<Option<Box<dyn Child + Send + Sync>>> — Mutex provides Sync
 // - writer: Mutex<Box<dyn Write + Send>> — Mutex provides Sync
-// - output_buffer: Arc<Mutex<RingBuffer>> — Arc+Mutex provides Sync
+// - raw_buffer: Arc<Mutex<RingBuffer>> — Arc+Mutex provides Sync
+// - utf8_decoder: Arc<Mutex<IncrementalUtf8Decoder>> — Arc+Mutex provides Sync
+// - decoded_buffer: Arc<Mutex<String>> — Arc+Mutex provides Sync
+// - emulator: Arc<Mutex<TerminalEmulatorHandle>> — Arc+Mutex provides Sync
 // - alive: Arc<AtomicBool> — Arc+Atomic provides Sync
 // - reader_handle: Option<JoinHandle<()>> — JoinHandle is Send+Sync (Rust 1.72+)
 unsafe impl Sync for TerminalSession {}
@@ -168,16 +180,28 @@ impl TerminalSession {
             .context("Failed to clone PTY reader")?;
         let writer = master.take_writer().context("Failed to take PTY writer")?;
 
-        let output_buffer = Arc::new(Mutex::new(RingBuffer::new(MAX_BUFFER_SIZE)));
+        let raw_buffer = Arc::new(Mutex::new(RingBuffer::new(MAX_BUFFER_SIZE)));
+        let decoded_buffer = Arc::new(Mutex::new(String::new()));
+        let utf8_decoder = Arc::new(Mutex::new(IncrementalUtf8Decoder::new()));
+        let emulator = Arc::new(Mutex::new(TerminalEmulatorHandle::new(cols, rows)));
         let alive = Arc::new(AtomicBool::new(true));
 
-        let buf_clone = output_buffer.clone();
+        let raw_clone = raw_buffer.clone();
+        let decoder_clone = utf8_decoder.clone();
+        let decoded_clone = decoded_buffer.clone();
         let alive_clone = alive.clone();
         let session_id = id.clone();
         let reader_handle = std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
             .spawn(move || {
-                pump_output(reader, &buf_clone, &alive_clone, &session_id);
+                pump_output(
+                    reader,
+                    &raw_clone,
+                    &decoder_clone,
+                    &decoded_clone,
+                    &alive_clone,
+                    &session_id,
+                );
             })
             .context("Failed to spawn PTY reader thread")?;
 
@@ -191,7 +215,10 @@ impl TerminalSession {
             master: Mutex::new(Some(master)),
             child: Mutex::new(Some(child)),
             writer: Mutex::new(writer),
-            output_buffer,
+            raw_buffer,
+            utf8_decoder,
+            decoded_buffer,
+            emulator,
             alive,
             reader_handle: Some(reader_handle),
         })
@@ -212,16 +239,19 @@ impl TerminalSession {
         Ok(())
     }
 
-    /// Drain and return all pending output since the last read.
+    /// Drain and return all pending decoded output since the last read.
     ///
     /// If `timeout_ms` is `Some`, waits up to that many milliseconds for
     /// new output before returning.
     pub fn read_output(&self, timeout_ms: Option<u64>) -> Result<String> {
         self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         {
-            let mut buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-            if !buf.is_empty() {
-                let output = buf.drain_to_string();
+            let mut decoded = self
+                .decoded_buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !decoded.is_empty() {
+                let output = std::mem::take(&mut *decoded);
                 debug!(session_id = %self.id, output_len = output.len(), "Returning buffered output");
                 return Ok(output);
             }
@@ -235,12 +265,21 @@ impl TerminalSession {
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 if !self.alive.load(Ordering::Relaxed) {
                     debug!(session_id = %self.id, "Session killed while waiting for output");
-                    let mut buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-                    return Ok(buf.drain_to_string());
+                    let mut decoded = self
+                        .decoded_buffer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let mut decoder = self.utf8_decoder.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut output = std::mem::take(&mut *decoded);
+                    output.push_str(&decoder.flush_lossy());
+                    return Ok(output);
                 }
-                let mut buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-                if !buf.is_empty() || std::time::Instant::now() >= deadline {
-                    let output = buf.drain_to_string();
+                let mut decoded = self
+                    .decoded_buffer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if !decoded.is_empty() || std::time::Instant::now() >= deadline {
+                    let output = std::mem::take(&mut *decoded);
                     debug!(session_id = %self.id, output_len = output.len(), "Returning waited output");
                     return Ok(output);
                 }
@@ -250,13 +289,16 @@ impl TerminalSession {
         Ok(String::new())
     }
 
-    /// Read all accumulated output without draining.
+    /// Read all accumulated decoded output without draining.
     pub fn peek_output(&self) -> String {
-        let buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-        buf.peek_string()
+        let decoded = self
+            .decoded_buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        decoded.clone()
     }
 
-    /// Resize the PTY.
+    /// Resize the PTY and synchronize internal dimensions.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         debug!(session_id = %self.id, cols = cols, rows = rows, "Resizing PTY");
         let master = self.master.lock().unwrap_or_else(|e| e.into_inner());
@@ -271,6 +313,10 @@ impl TerminalSession {
         }
         self.cols.store(cols, Ordering::Relaxed);
         self.rows.store(rows, Ordering::Relaxed);
+        self.emulator
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resize(cols, rows);
         self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         Ok(())
     }
@@ -343,10 +389,13 @@ impl Drop for TerminalSession {
     }
 }
 
-/// Background output pump: reads from PTY into the ring buffer.
+/// Background output pump: reads from PTY, stores raw bytes, and incrementally
+/// decodes UTF-8 into the decoded text buffer.
 fn pump_output(
     mut reader: Box<dyn Read + Send>,
-    buffer: &Arc<Mutex<RingBuffer>>,
+    raw_buffer: &Arc<Mutex<RingBuffer>>,
+    utf8_decoder: &Arc<Mutex<IncrementalUtf8Decoder>>,
+    decoded_buffer: &Arc<Mutex<String>>,
     alive: &AtomicBool,
     session_id: &str,
 ) {
@@ -358,12 +407,34 @@ fn pump_output(
         match reader.read(&mut tmp) {
             Ok(0) => {
                 debug!("PTY reader for session '{}' got EOF", session_id);
+                // Flush any remaining incomplete UTF-8 bytes.
+                if let Ok(mut decoder) = utf8_decoder.lock() {
+                    let tail = decoder.flush_lossy();
+                    if !tail.is_empty() {
+                        if let Ok(mut decoded) = decoded_buffer.lock() {
+                            decoded.push_str(&tail);
+                        }
+                    }
+                }
                 alive.store(false, Ordering::Relaxed);
                 break;
             }
             Ok(n) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.write(&tmp[..n]);
+                let chunk = &tmp[..n];
+
+                // Store raw bytes.
+                if let Ok(mut raw) = raw_buffer.lock() {
+                    raw.write(chunk);
+                }
+
+                // Incrementally decode UTF-8 and append to decoded buffer.
+                if let Ok(mut decoder) = utf8_decoder.lock() {
+                    let decoded_text = decoder.decode(chunk);
+                    if !decoded_text.is_empty() {
+                        if let Ok(mut decoded) = decoded_buffer.lock() {
+                            decoded.push_str(&decoded_text);
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -372,6 +443,15 @@ fn pump_output(
                     continue;
                 }
                 warn!("PTY reader error for session '{}': {}", session_id, e);
+                // Flush incomplete UTF-8 before dying.
+                if let Ok(mut decoder) = utf8_decoder.lock() {
+                    let tail = decoder.flush_lossy();
+                    if !tail.is_empty() {
+                        if let Ok(mut decoded) = decoded_buffer.lock() {
+                            decoded.push_str(&tail);
+                        }
+                    }
+                }
                 alive.store(false, Ordering::Relaxed);
                 break;
             }
@@ -432,10 +512,12 @@ impl RingBuffer {
         }
     }
 
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.pending_len == 0
     }
 
+    #[allow(dead_code)]
     fn drain_to_string(&mut self) -> String {
         if self.pending_len == 0 {
             return String::new();
@@ -450,6 +532,7 @@ impl RingBuffer {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    #[allow(dead_code)]
     fn peek_string(&self) -> String {
         if self.pending_len == 0 {
             return String::new();

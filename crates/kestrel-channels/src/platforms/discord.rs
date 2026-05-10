@@ -325,48 +325,79 @@ impl DiscordChannel {
 
         let dns = kestrel_core::dns::build_dns_resolver();
 
-        match proxy_url {
+        let builder = match proxy_url {
             Some(ref url) if url.starts_with("socks5") => {
                 info!("Discord HTTP client using SOCKS5 proxy: {}", url);
-                let proxy =
-                    reqwest::Proxy::all(url).expect("Failed to create SOCKS5 proxy from config");
-                reqwest::Client::builder()
-                    .dns_resolver(dns)
-                    .proxy(proxy)
-                    .build()
-                    .expect("Failed to build HTTP client with SOCKS5 proxy")
+                match reqwest::Proxy::all(url) {
+                    Ok(proxy) => {
+                        let b = reqwest::Client::builder()
+                            .dns_resolver(dns.clone())
+                            .proxy(proxy);
+                        match b.build() {
+                            Ok(client) => return client,
+                            Err(e) => {
+                                warn!("Discord: failed to build SOCKS5 client ({}), falling back to direct", e);
+                                reqwest::Client::builder().dns_resolver(dns)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Discord: invalid SOCKS5 proxy '{}' ({}), falling back to direct",
+                            url, e
+                        );
+                        reqwest::Client::builder().dns_resolver(dns)
+                    }
+                }
             }
             Some(ref url) if url.starts_with("http") => {
                 info!("Discord HTTP client using HTTP proxy: {}", url);
-                let http_proxy =
-                    reqwest::Proxy::http(url).expect("Failed to create HTTP proxy from config");
-                let https_proxy =
-                    reqwest::Proxy::https(url).expect("Failed to create HTTPS proxy from config");
-                reqwest::Client::builder()
-                    .dns_resolver(dns)
-                    .proxy(http_proxy)
-                    .proxy(https_proxy)
-                    .build()
-                    .expect("Failed to build HTTP client with HTTP proxy")
+                let http_proxy = reqwest::Proxy::http(url);
+                let https_proxy = reqwest::Proxy::https(url);
+                match (http_proxy, https_proxy) {
+                    (Ok(hp), Ok(sp)) => {
+                        let b = reqwest::Client::builder()
+                            .dns_resolver(dns.clone())
+                            .proxy(hp)
+                            .proxy(sp);
+                        match b.build() {
+                            Ok(client) => return client,
+                            Err(e) => {
+                                warn!("Discord: failed to build HTTP proxy client ({}), falling back to direct", e);
+                                reqwest::Client::builder().dns_resolver(dns)
+                            }
+                        }
+                    }
+                    (http_res, https_res) => {
+                        if let Err(e) = http_res {
+                            warn!("Discord: invalid HTTP proxy config for '{}' ({}), falling back to direct", url, e);
+                        } else if let Err(e) = https_res {
+                            warn!("Discord: invalid HTTPS proxy config for '{}' ({}), falling back to direct", url, e);
+                        }
+                        reqwest::Client::builder().dns_resolver(dns)
+                    }
+                }
             }
             Some(ref url) => {
                 info!(
                     "Discord HTTP client: unsupported proxy scheme in '{}', falling back to direct",
                     url
                 );
-                reqwest::Client::builder()
-                    .dns_resolver(dns)
-                    .build()
-                    .expect("Failed to build HTTP client")
+                reqwest::Client::builder().dns_resolver(dns)
             }
             None => {
                 info!("Discord HTTP client: no proxy configured (direct connection)");
-                reqwest::Client::builder()
-                    .dns_resolver(dns)
-                    .build()
-                    .expect("Failed to build HTTP client")
+                reqwest::Client::builder().dns_resolver(dns)
             }
-        }
+        };
+
+        builder.build().unwrap_or_else(|e| {
+            warn!(
+                "Discord: failed to build direct client ({}), using default",
+                e
+            );
+            reqwest::Client::new()
+        })
     }
 
     /// Create a new `DiscordChannel`.

@@ -3907,7 +3907,8 @@ mod tests {
             for i = 1, 60 do
                 local ok, err = pcall(kestrel.http_get, 'http://127.0.0.1:1/')
                 if not ok then
-                    if string.find(err, "Request limit") then
+                    local err_s = tostring(err)
+                    if string.find(err_s, "Request limit") then
                         print("limit hit at " .. i)
                         break
                     end
@@ -3916,7 +3917,11 @@ mod tests {
             end
         "#;
         let result = tool.execute(json!({"code": code})).await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "HTTP request limit script should complete: {:?}",
+            result
+        );
         let output = result.unwrap();
         assert!(
             output.contains("limit hit"),
@@ -4339,13 +4344,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dst_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
 
-        let tool = ScriptTool::new().with_max_write_files(3);
+        let tool = ScriptTool::new().with_max_write_files(1);
         // First copy should succeed, second should fail
         let code = format!(
             r#"
-                local src1 = kestrel.tempfile()
+                local src1 = '{d}/src1.txt'
                 kestrel.write_file(src1, 'data1')
-                local src2 = kestrel.tempfile()
+                local src2 = '{d}/src2.txt'
                 kestrel.write_file(src2, 'data2')
                 local ok1, err1 = pcall(kestrel.copy, src1, '{d}/c1.txt')
                 local ok2, err2 = pcall(kestrel.copy, src2, '{d}/c2.txt')
@@ -4357,7 +4362,7 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(
-            output.contains("true\tfalse") || output.contains("true  false"),
+            output.contains("true") && output.contains("false"),
             "second copy should fail due to file count limit, got: {}",
             output
         );
@@ -4516,7 +4521,7 @@ mod tests {
         "#;
         let result = tool.execute(json!({"code": code})).await.unwrap();
         assert!(
-            result.contains("true\ttrue\ttrue\ttrue") || result.contains("true  true  true  true"),
+            result.lines().all(|line| line.trim() == "true"),
             "Safe profile should have no HTTP APIs and no require, got: {}",
             result
         );

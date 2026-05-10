@@ -723,6 +723,7 @@ impl TerminalScreen {
     }
 
     fn linefeed(&mut self) {
+        self.cursor.col = 0;
         if self.cursor.row == self.scroll_bottom {
             self.scroll_up(1);
         } else if self.cursor.row < self.active_buf().rows - 1 {

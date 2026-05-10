@@ -108,6 +108,12 @@ pub struct TerminalSession {
     emulator: Arc<Mutex<TerminalEmulatorHandle>>,
     /// Last screen hash observed by capture/wait APIs.
     last_observed_screen_hash: AtomicU64,
+    /// Monotonic count of user inputs sent to this session.
+    input_sequence: AtomicU64,
+    /// Input sequence associated with the last observed screen state.
+    observed_input_sequence: AtomicU64,
+    /// Whether any screen baseline has been established yet.
+    screen_observed: AtomicBool,
     alive: Arc<AtomicBool>,
     reader_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -230,6 +236,9 @@ impl TerminalSession {
             decoded_buffer,
             emulator,
             last_observed_screen_hash: AtomicU64::new(initial_hash),
+            input_sequence: AtomicU64::new(0),
+            observed_input_sequence: AtomicU64::new(0),
+            screen_observed: AtomicBool::new(false),
             alive,
             reader_handle: Some(reader_handle),
         })
@@ -246,6 +255,7 @@ impl TerminalSession {
             .write_all(input.as_bytes())
             .context("Failed to write to PTY")?;
         writer.flush().context("Failed to flush PTY writer")?;
+        self.input_sequence.fetch_add(1, Ordering::Relaxed);
         self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         Ok(())
     }
@@ -392,6 +402,11 @@ impl TerminalSession {
         let snapshot = emulator.screen().snapshot();
         self.last_observed_screen_hash
             .store(emulator.state_hash(), Ordering::Relaxed);
+        self.observed_input_sequence.store(
+            self.input_sequence.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.screen_observed.store(true, Ordering::Relaxed);
         snapshot
     }
 
@@ -417,7 +432,25 @@ impl TerminalSession {
         timeout_ms: u64,
         match_pattern: Option<&str>,
     ) -> Result<ScreenSnapshot> {
-        let baseline_hash = self.last_observed_screen_hash.load(Ordering::Relaxed);
+        let current_input_seq = self.input_sequence.load(Ordering::Relaxed);
+        let observed_input_seq = self.observed_input_sequence.load(Ordering::Relaxed);
+        let baseline_hash = {
+            let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+            let current_hash = emulator.state_hash();
+            let should_reset_baseline = (!self.screen_observed.load(Ordering::Relaxed)
+                && current_input_seq == 0)
+                || current_input_seq == observed_input_seq;
+            if should_reset_baseline {
+                self.last_observed_screen_hash
+                    .store(current_hash, Ordering::Relaxed);
+                self.observed_input_sequence
+                    .store(current_input_seq, Ordering::Relaxed);
+                self.screen_observed.store(true, Ordering::Relaxed);
+                current_hash
+            } else {
+                self.last_observed_screen_hash.load(Ordering::Relaxed)
+            }
+        };
 
         let compiled_regex = match_pattern
             .map(|p| regex::Regex::new(p).context(format!("Invalid regex pattern: {}", p)))
@@ -443,6 +476,9 @@ impl TerminalSession {
                 }
                 self.last_observed_screen_hash
                     .store(current_hash, Ordering::Relaxed);
+                self.observed_input_sequence
+                    .store(current_input_seq, Ordering::Relaxed);
+                self.screen_observed.store(true, Ordering::Relaxed);
                 emulator.screen().snapshot()
             };
 

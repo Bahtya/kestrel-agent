@@ -445,6 +445,9 @@ impl AnsiParser {
     }
 
     fn parse_csi_params(buf: &[u8]) -> Vec<u16> {
+        if buf.is_empty() {
+            return Vec::new();
+        }
         std::str::from_utf8(buf)
             .unwrap_or("")
             .split(';')
@@ -468,14 +471,14 @@ impl AnsiParser {
                 nums.first().copied().unwrap_or(1).max(1),
             )),
             b'H' | b'f' => Some(TerminalOp::CursorPosition {
-                row: nums.first().copied().unwrap_or(1),
-                col: nums.get(1).copied().unwrap_or(1),
+                row: nums.first().copied().filter(|n| *n != 0).unwrap_or(1),
+                col: nums.get(1).copied().filter(|n| *n != 0).unwrap_or(1),
             }),
             b'G' => Some(TerminalOp::CursorHorizontalAbsolute(
-                nums.first().copied().unwrap_or(1),
+                nums.first().copied().filter(|n| *n != 0).unwrap_or(1),
             )),
             b'd' => Some(TerminalOp::CursorVerticalAbsolute(
-                nums.first().copied().unwrap_or(1),
+                nums.first().copied().filter(|n| *n != 0).unwrap_or(1),
             )),
             b'J' => Some(TerminalOp::EraseInDisplay(erase_mode_from(
                 nums.first().copied().unwrap_or(0),
@@ -582,6 +585,8 @@ pub struct TerminalEmulatorHandle {
     parser: AnsiParser,
     /// Accumulated parsed operations (consumed by screen model).
     pending_ops: Vec<TerminalOp>,
+    /// Plain-text chunks deferred until an explicit flush.
+    deferred_text_ops: Vec<TerminalOp>,
     /// Terminal screen model (grid with primary/alternate buffers).
     screen: super::screen::TerminalScreen,
 }
@@ -593,6 +598,7 @@ impl TerminalEmulatorHandle {
             rows,
             parser: AnsiParser::new(),
             pending_ops: Vec::new(),
+            deferred_text_ops: Vec::new(),
             screen: super::screen::TerminalScreen::new(cols as usize, rows as usize),
         }
     }
@@ -620,7 +626,13 @@ impl TerminalEmulatorHandle {
         for op in &ops {
             self.screen.process_op(op);
         }
-        self.pending_ops.extend(ops);
+        let pure_print_chunk = ops.iter().all(|op| matches!(op, TerminalOp::Print(_)))
+            && bytes.iter().all(|b| !matches!(b, 0x00..=0x1F | 0x7F));
+        if pure_print_chunk {
+            self.deferred_text_ops.extend(ops);
+        } else {
+            self.pending_ops.extend(ops);
+        }
     }
 
     /// Take all pending terminal operations (consumed by screen model).
@@ -631,6 +643,9 @@ impl TerminalEmulatorHandle {
 
     /// Flush parser state (call on EOF/session close).
     pub fn flush_parser(&mut self) {
+        if !self.deferred_text_ops.is_empty() {
+            self.pending_ops.append(&mut self.deferred_text_ops);
+        }
         let ops = self.parser.flush();
         for op in &ops {
             self.screen.process_op(op);

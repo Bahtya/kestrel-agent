@@ -392,6 +392,68 @@ impl TerminalSession {
         let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
         emulator.screen().scrollback_lines(max_lines)
     }
+
+    /// Wait for the screen state to change, with optional pattern matching.
+    ///
+    /// Takes a baseline snapshot and polls until either:
+    /// - The screen state hash differs from the baseline, AND
+    /// - (if `match_pattern` is provided) the screen text matches the pattern
+    /// - The timeout elapses
+    ///
+    /// Returns the final snapshot on success, or an error on timeout.
+    pub fn wait_for_screen_change(
+        &self,
+        timeout_ms: u64,
+        match_pattern: Option<&str>,
+    ) -> Result<ScreenSnapshot> {
+        let baseline_hash = {
+            let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+            emulator.state_hash()
+        };
+
+        let compiled_regex = match_pattern
+            .map(|p| regex::Regex::new(p).context(format!("Invalid regex pattern: {}", p)))
+            .transpose()?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let poll_interval = std::time::Duration::from_millis(50);
+
+        loop {
+            std::thread::sleep(poll_interval);
+
+            let snapshot = {
+                let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+                let current_hash = emulator.state_hash();
+                if current_hash == baseline_hash {
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "Timeout waiting for screen change ({}ms elapsed)",
+                            timeout_ms
+                        );
+                    }
+                    continue;
+                }
+                emulator.screen().snapshot()
+            };
+
+            // Screen changed — check optional pattern match
+            if let Some(ref re) = compiled_regex {
+                let screen_text = snapshot.lines.join("\n");
+                if !re.is_match(&screen_text) {
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "Screen changed but pattern '{}' not found within timeout ({}ms)",
+                            match_pattern.unwrap_or(""),
+                            timeout_ms
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            return Ok(snapshot);
+        }
+    }
 }
 
 impl Drop for TerminalSession {

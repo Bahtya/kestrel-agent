@@ -1,6 +1,6 @@
 //! Terminal multiplexer tools for AI-driven session management.
 //!
-//! Exposes nine tools that let the LLM create, interact with, and manage
+//! Exposes ten tools that let the LLM create, interact with, and manage
 //! PTY-backed terminal sessions:
 //!
 //! - `terminal_create_session`   — spawn a new shell in a PTY
@@ -12,6 +12,7 @@
 //! - `terminal_send_key`         — send special keys (arrows, enter, etc.)
 //! - `terminal_capture_screen`   — capture current visible screen state
 //! - `terminal_capture_scrollback` — capture scrollback history
+//! - `terminal_wait_for_screen_change` — wait for screen state change (event-driven TUI)
 
 use crate::builtins::terminal::emulator::{escape_control, strip_ansi, ReadMode};
 use crate::trait_def::{Tool, ToolError};
@@ -937,6 +938,128 @@ impl Tool for TerminalCaptureScrollbackTool {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// 10. terminal_wait_for_screen_change
+// ═══════════════════════════════════════════════════════════════════
+
+pub struct TerminalWaitForScreenChangeTool {
+    mgr: Option<Arc<TerminalManager>>,
+}
+
+impl TerminalWaitForScreenChangeTool {
+    pub fn new() -> Self {
+        Self { mgr: None }
+    }
+
+    pub fn with_manager(mut self, mgr: Arc<TerminalManager>) -> Self {
+        self.mgr = Some(mgr);
+        self
+    }
+}
+
+impl Default for TerminalWaitForScreenChangeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalWaitForScreenChangeTool {
+    fn name(&self) -> &str {
+        "terminal_wait_for_screen_change"
+    }
+
+    fn description(&self) -> &str {
+        "Wait for the terminal screen to change, then return the new screen snapshot. \
+         This is event-driven TUI automation: instead of blind sleep loops, the tool \
+         polls the emulator's screen model (not raw PTY bytes) and returns as soon as \
+         the visible state differs from when the call began. \
+         Optionally provide a 'match' regex to wait for specific content to appear. \
+         Works in both normal and alternate-screen (full-screen TUI) modes."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The session ID returned by terminal_create_session"
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Maximum milliseconds to wait for a screen change (default: 5000)"
+                },
+                "match": {
+                    "type": "string",
+                    "description": "Optional regex pattern that must appear in the screen content after the change. The tool waits until both a screen mutation occurs AND this pattern matches."
+                }
+            },
+            "required": ["session_id"]
+        })
+    }
+
+    fn is_mutating(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+        let mgr = require_manager(&self.mgr)?;
+        let session_id = args["session_id"]
+            .as_str()
+            .ok_or_else(|| ToolError::Validation("Missing 'session_id'".to_string()))?;
+        let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(5000);
+        let match_pattern = args["match"].as_str();
+
+        debug!(
+            session_id = session_id,
+            timeout_ms = timeout_ms,
+            match_pattern = match_pattern.unwrap_or("none"),
+            "Waiting for screen change"
+        );
+
+        let sid = session_id.to_string();
+        let pattern_owned = match_pattern.map(String::from);
+        let snapshot = tokio::task::spawn_blocking(move || {
+            mgr.wait_for_screen_change(&sid, timeout_ms, pattern_owned.as_deref())
+        })
+        .await
+        .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?
+        .map_err(|e| ToolError::Execution(e.to_string()))?;
+
+        let mut output = String::new();
+        for (i, line) in snapshot.lines.iter().enumerate() {
+            if i == snapshot.cursor_row {
+                output.push_str(&format!(
+                    ">{:>3} |{}\n",
+                    i,
+                    if line.is_empty() { "" } else { line }
+                ));
+            } else {
+                output.push_str(&format!(
+                    " {:>3} |{}\n",
+                    i,
+                    if line.is_empty() { "" } else { line }
+                ));
+            }
+        }
+        output.push_str(&format!(
+            "\ncursor: ({}, {})  dims: {}x{}  alternate: {}  title: {}",
+            snapshot.cursor_row,
+            snapshot.cursor_col,
+            snapshot.cols,
+            snapshot.rows,
+            snapshot.is_alternate,
+            if snapshot.window_title.is_empty() {
+                "-"
+            } else {
+                &snapshot.window_title
+            }
+        ));
+        Ok(output)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Registration helper
 // ═══════════════════════════════════════════════════════════════════
 
@@ -953,7 +1076,8 @@ pub fn register_terminal_tools(
     registry.register(TerminalResizeTool::new().with_manager(mgr.clone()));
     registry.register(TerminalSendKeyTool::new().with_manager(mgr.clone()));
     registry.register(TerminalCaptureScreenTool::new().with_manager(mgr.clone()));
-    registry.register(TerminalCaptureScrollbackTool::new().with_manager(mgr));
+    registry.register(TerminalCaptureScrollbackTool::new().with_manager(mgr.clone()));
+    registry.register(TerminalWaitForScreenChangeTool::new().with_manager(mgr));
 }
 
 #[cfg(test)]
@@ -972,6 +1096,7 @@ mod tests {
         TerminalSendKeyTool,
         TerminalCaptureScreenTool,
         TerminalCaptureScrollbackTool,
+        TerminalWaitForScreenChangeTool,
     ) {
         let mgr = Arc::new(TerminalManager::with_config(10, true));
         (
@@ -984,13 +1109,14 @@ mod tests {
             TerminalResizeTool::new().with_manager(mgr.clone()),
             TerminalSendKeyTool::new().with_manager(mgr.clone()),
             TerminalCaptureScreenTool::new().with_manager(mgr.clone()),
-            TerminalCaptureScrollbackTool::new().with_manager(mgr),
+            TerminalCaptureScrollbackTool::new().with_manager(mgr.clone()),
+            TerminalWaitForScreenChangeTool::new().with_manager(mgr),
         )
     }
 
     #[test]
     fn test_tool_names() {
-        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback, wait) =
             make_tools();
         assert_eq!(create.name(), "terminal_create_session");
         assert_eq!(send.name(), "terminal_send_input");
@@ -1001,11 +1127,12 @@ mod tests {
         assert_eq!(send_key.name(), "terminal_send_key");
         assert_eq!(capture.name(), "terminal_capture_screen");
         assert_eq!(scrollback.name(), "terminal_capture_scrollback");
+        assert_eq!(wait.name(), "terminal_wait_for_screen_change");
     }
 
     #[test]
     fn test_mutating_classification() {
-        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback, wait) =
             make_tools();
         assert!(create.is_mutating());
         assert!(send.is_mutating());
@@ -1016,11 +1143,12 @@ mod tests {
         assert!(send_key.is_mutating());
         assert!(!capture.is_mutating());
         assert!(!scrollback.is_mutating());
+        assert!(!wait.is_mutating());
     }
 
     #[test]
     fn test_descriptions_nonempty() {
-        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback, wait) =
             make_tools();
         assert!(!create.description().is_empty());
         assert!(!send.description().is_empty());
@@ -1031,11 +1159,12 @@ mod tests {
         assert!(!send_key.description().is_empty());
         assert!(!capture.description().is_empty());
         assert!(!scrollback.description().is_empty());
+        assert!(!wait.description().is_empty());
     }
 
     #[test]
     fn test_schemas_are_valid_json() {
-        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback, wait) =
             make_tools();
         for schema in &[
             create.parameters_schema(),
@@ -1047,6 +1176,7 @@ mod tests {
             send_key.parameters_schema(),
             capture.parameters_schema(),
             scrollback.parameters_schema(),
+            wait.parameters_schema(),
         ] {
             assert_eq!(schema["type"], "object");
         }
@@ -1054,21 +1184,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions_empty() {
-        let (_, _, _, _, list, _, _, _, _, _) = make_tools();
+        let (_, _, _, _, list, _, _, _, _, _, _) = make_tools();
         let result = list.execute(json!({})).await.unwrap();
         assert!(result.contains("No active terminal sessions"));
     }
 
     #[tokio::test]
     async fn test_kill_nonexistent_session() {
-        let (_, _, _, _, _, kill, _, _, _, _) = make_tools();
+        let (_, _, _, _, _, kill, _, _, _, _, _) = make_tools();
         let result = kill.execute(json!({"session_id": "nope"})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_send_input_missing_params() {
-        let (_, _, send, _, _, _, _, _, _, _) = make_tools();
+        let (_, _, send, _, _, _, _, _, _, _, _) = make_tools();
         let result = send.execute(json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("session_id"));
@@ -1076,28 +1206,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_output_missing_session() {
-        let (_, _, _, read, _, _, _, _, _, _) = make_tools();
+        let (_, _, _, read, _, _, _, _, _, _, _) = make_tools();
         let result = read.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_resize_missing_params() {
-        let (_, _, _, _, _, _, resize, _, _, _) = make_tools();
+        let (_, _, _, _, _, _, resize, _, _, _, _) = make_tools();
         let result = resize.execute(json!({"session_id": "x"})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_send_key_missing_params() {
-        let (_, _, _, _, _, _, _, send_key, _, _) = make_tools();
+        let (_, _, _, _, _, _, _, send_key, _, _, _) = make_tools();
         let result = send_key.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_send_key_unknown_key() {
-        let (_, _, _, _, _, _, _, send_key, _, _) = make_tools();
+        let (_, _, _, _, _, _, _, send_key, _, _, _) = make_tools();
         let result = send_key
             .execute(json!({"session_id": "x", "key": "UnknownKey"}))
             .await;
@@ -1106,14 +1236,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_capture_screen_missing_session() {
-        let (_, _, _, _, _, _, _, _, capture, _) = make_tools();
+        let (_, _, _, _, _, _, _, _, capture, _, _) = make_tools();
         let result = capture.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_capture_screen_nonexistent_session() {
-        let (_, _, _, _, _, _, _, _, capture, _) = make_tools();
+        let (_, _, _, _, _, _, _, _, capture, _, _) = make_tools();
         let result = capture.execute(json!({"session_id": "nonexistent"})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
@@ -1121,14 +1251,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_capture_scrollback_missing_session() {
-        let (_, _, _, _, _, _, _, _, _, scrollback) = make_tools();
+        let (_, _, _, _, _, _, _, _, _, scrollback, _) = make_tools();
         let result = scrollback.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_capture_scrollback_nonexistent_session() {
-        let (_, _, _, _, _, _, _, _, _, scrollback) = make_tools();
+        let (_, _, _, _, _, _, _, _, _, scrollback, _) = make_tools();
         let result = scrollback
             .execute(json!({"session_id": "nonexistent"}))
             .await;
@@ -1137,8 +1267,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_wait_for_screen_change_missing_session() {
+        let (_, _, _, _, _, _, _, _, _, _, wait) = make_tools();
+        let result = wait.execute(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_screen_change_nonexistent_session() {
+        let (_, _, _, _, _, _, _, _, _, _, wait) = make_tools();
+        let result = wait.execute(json!({"session_id": "nonexistent"})).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
     async fn test_create_and_list_session() {
-        let (_, create, _, _, list, _, _, _, _, _) = make_tools();
+        let (_, create, _, _, list, _, _, _, _, _, _) = make_tools();
 
         let result = create.execute(json!({})).await.unwrap();
         assert!(result.contains("Created terminal session"));
@@ -1150,7 +1295,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_capture_screen_and_scrollback() {
-        let (_, create, send, _, _, kill, _, _, capture, scrollback) = make_tools();
+        let (_, create, send, _, _, kill, _, _, capture, scrollback, _) = make_tools();
 
         // Create session
         let create_result = create.execute(json!({})).await.unwrap();
@@ -1210,8 +1355,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_wait_for_screen_change_detects_output() {
+        let (_, create, send, _, _, kill, _, _, _, _, wait) = make_tools();
+
+        let create_result = create.execute(json!({})).await.unwrap();
+        let session_id = create_result
+            .split('\'')
+            .nth(1)
+            .expect("should have session id")
+            .to_string();
+
+        // Send output that will change the screen
+        send.execute(json!({
+            "session_id": session_id,
+            "input": "echo test_change_marker\n"
+        }))
+        .await
+        .unwrap();
+
+        // Wait should detect the screen change quickly
+        let result = wait
+            .execute(json!({
+                "session_id": session_id,
+                "timeout_ms": 3000
+            }))
+            .await;
+
+        // The wait should succeed (screen changed from the echo output)
+        assert!(
+            result.is_ok(),
+            "Expected screen change detection, got: {:?}",
+            result
+        );
+        let output = result.unwrap();
+        assert!(output.contains("cursor:") || output.contains("dims:"));
+
+        kill.execute(json!({"session_id": session_id}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_screen_change_with_pattern() {
+        let (_, create, send, _, _, kill, _, _, _, _, wait) = make_tools();
+
+        let create_result = create.execute(json!({})).await.unwrap();
+        let session_id = create_result
+            .split('\'')
+            .nth(1)
+            .expect("should have session id")
+            .to_string();
+
+        // Send output with a unique marker
+        send.execute(json!({
+            "session_id": session_id,
+            "input": "echo UNIQUE_PATTERN_42\n"
+        }))
+        .await
+        .unwrap();
+
+        // Wait for the specific pattern
+        let result = wait
+            .execute(json!({
+                "session_id": session_id,
+                "timeout_ms": 3000,
+                "match": "UNIQUE_PATTERN_42"
+            }))
+            .await;
+
+        assert!(result.is_ok(), "Expected pattern match, got: {:?}", result);
+
+        kill.execute(json!({"session_id": session_id}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_screen_change_timeout() {
+        let (_, create, _, _, _, kill, _, _, _, _, wait) = make_tools();
+
+        let create_result = create.execute(json!({})).await.unwrap();
+        let session_id = create_result
+            .split('\'')
+            .nth(1)
+            .expect("should have session id")
+            .to_string();
+
+        // Wait with very short timeout — no output sent, should time out
+        let result = wait
+            .execute(json!({
+                "session_id": session_id,
+                "timeout_ms": 100
+            }))
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Timeout")
+                || result.unwrap_err().to_string().contains("timeout"),
+            "Expected timeout error"
+        );
+
+        kill.execute(json!({"session_id": session_id}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_screen_change_invalid_regex() {
+        let (_, _, _, _, _, _, _, _, _, _, wait) = make_tools();
+
+        let result = wait
+            .execute(json!({
+                "session_id": "fake",
+                "timeout_ms": 100,
+                "match": "[invalid"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_create_send_read_kill_lifecycle() {
-        let (_, create, send, read, _, kill, _, _, _, _) = make_tools();
+        let (_, create, send, read, _, kill, _, _, _, _, _) = make_tools();
 
         // Create session
         let create_result = create.execute(json!({})).await.unwrap();
@@ -1270,6 +1536,7 @@ mod tests {
         assert!(registry.get("terminal_send_key").is_some());
         assert!(registry.get("terminal_capture_screen").is_some());
         assert!(registry.get("terminal_capture_scrollback").is_some());
+        assert!(registry.get("terminal_wait_for_screen_change").is_some());
 
         assert!(registry.is_mutating("terminal_create_session"));
         assert!(registry.is_mutating("terminal_send_input"));
@@ -1280,6 +1547,7 @@ mod tests {
         assert!(registry.is_mutating("terminal_send_key"));
         assert!(!registry.is_mutating("terminal_capture_screen"));
         assert!(!registry.is_mutating("terminal_capture_scrollback"));
+        assert!(!registry.is_mutating("terminal_wait_for_screen_change"));
     }
 
     #[test]

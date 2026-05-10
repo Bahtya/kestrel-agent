@@ -20,5 +20,5 @@ pub use tools::register_terminal_tools;
 pub use tools::{
     TerminalCaptureScreenTool, TerminalCaptureScrollbackTool, TerminalCreateSessionTool,
     TerminalKillSessionTool, TerminalListSessionsTool, TerminalReadOutputTool, TerminalResizeTool,
-    TerminalSendInputTool, TerminalSendKeyTool,
+    TerminalSendInputTool, TerminalSendKeyTool, TerminalWaitForScreenChangeTool,
 };

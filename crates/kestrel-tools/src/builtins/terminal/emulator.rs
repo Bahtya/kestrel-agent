@@ -623,6 +623,11 @@ impl TerminalEmulatorHandle {
     pub fn screen_mut(&mut self) -> &mut super::screen::TerminalScreen {
         &mut self.screen
     }
+
+    /// Compute a fast hash of the current screen state for change detection.
+    pub fn state_hash(&self) -> u64 {
+        self.screen.state_hash()
+    }
 }
 
 /// Strip ANSI/VT control sequences from a string, returning only visible text.

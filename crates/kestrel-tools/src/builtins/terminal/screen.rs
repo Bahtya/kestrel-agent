@@ -7,6 +7,38 @@
 
 use super::emulator::{EraseMode, TerminalOp};
 use serde::Serialize;
+use std::hash::Hasher;
+
+// ─── FNV-1a Hash (inline, no external dep) ────────────────────────
+
+/// Minimal FNV-1a hasher for screen state hashing. Avoids pulling in a
+/// separate crate for a simple change-detection use case.
+struct FnvHasher(u64);
+
+impl FnvHasher {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+}
+
+impl Hasher for FnvHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        const FNV_PRIME: u64 = 0x100000001b3;
+        for &b in bytes {
+            self.0 ^= b as u64;
+            self.0 = self.0.wrapping_mul(FNV_PRIME);
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.write(&[i]);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write(&i.to_ne_bytes());
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
 
 // ─── Cell & Attributes ─────────────────────────────────────────────
 
@@ -500,6 +532,31 @@ impl TerminalScreen {
             is_alternate: self.active == ActiveBuffer::Alternate,
             window_title: self.window_title.clone(),
         }
+    }
+
+    /// Compute a lightweight hash of the current screen state for change detection.
+    ///
+    /// Uses a simple FNV-1a-inspired hash over all cell characters, cursor position,
+    /// active buffer flag, and window title. This is intentionally fast rather than
+    /// cryptographically strong — its purpose is to detect *any* visible mutation.
+    pub fn state_hash(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = FnvHasher::new(0xcbf29ce484222325);
+        let buf = self.active_buf();
+        for cell in &buf.cells {
+            h.write_u8(cell.char as u32 as u8);
+        }
+        h.write_usize(self.cursor.row);
+        h.write_usize(self.cursor.col);
+        h.write_u8(if self.active == ActiveBuffer::Alternate {
+            1
+        } else {
+            0
+        });
+        for b in self.window_title.as_bytes() {
+            h.write_u8(*b);
+        }
+        h.finish()
     }
 
     /// Number of lines in the scrollback buffer.
@@ -1269,5 +1326,40 @@ mod tests {
         assert!(json.contains("Hello"));
         assert!(json.contains("cursor_row"));
         assert!(json.contains("is_alternate"));
+    }
+
+    #[test]
+    fn test_state_hash_stable_when_unchanged() {
+        let s = new_screen();
+        let h1 = s.state_hash();
+        let h2 = s.state_hash();
+        assert_eq!(h1, h2, "Hash should be stable for identical screen state");
+    }
+
+    #[test]
+    fn test_state_hash_changes_on_mutation() {
+        let mut s = new_screen();
+        let h1 = s.state_hash();
+        s.process_op(&TerminalOp::Print("X".to_string()));
+        let h2 = s.state_hash();
+        assert_ne!(h1, h2, "Hash should change when screen content changes");
+    }
+
+    #[test]
+    fn test_state_hash_changes_on_cursor_move() {
+        let mut s = new_screen();
+        let h1 = s.state_hash();
+        s.process_op(&TerminalOp::CursorPosition { row: 5, col: 5 });
+        let h2 = s.state_hash();
+        assert_ne!(h1, h2, "Hash should change when cursor moves");
+    }
+
+    #[test]
+    fn test_state_hash_changes_on_alternate_screen() {
+        let mut s = new_screen();
+        let h1 = s.state_hash();
+        s.process_op(&TerminalOp::DecPrivateModeSet(1049));
+        let h2 = s.state_hash();
+        assert_ne!(h1, h2, "Hash should change when entering alternate screen");
     }
 }

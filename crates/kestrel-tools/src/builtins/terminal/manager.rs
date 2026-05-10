@@ -241,6 +241,23 @@ impl TerminalManager {
         Ok(session.capture_scrollback(max_lines))
     }
 
+    /// Wait for the screen state of a session to change.
+    pub fn wait_for_screen_change(
+        &self,
+        session_id: &str,
+        timeout_ms: u64,
+        match_pattern: Option<&str>,
+    ) -> Result<ScreenSnapshot> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        session.wait_for_screen_change(timeout_ms, match_pattern)
+    }
+
     /// Number of active sessions.
     pub fn len(&self) -> usize {
         self.sessions.read().len()

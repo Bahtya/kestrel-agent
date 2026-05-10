@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.9.14] - 2026-05-10
+
+### Bug Fixes
+- fix(channels): emit `InterruptRequested` event when WebSocket client disconnects — prevents cascading "client not connected" errors and wasted agent processing for disconnected sessions (Issue #326, PR #327)
+
 ## [v0.9.13] - 2026-05-10
 
 ### Bug Fixes

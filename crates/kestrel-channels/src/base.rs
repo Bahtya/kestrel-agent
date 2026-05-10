@@ -119,4 +119,7 @@ pub trait BaseChannel: Send + Sync {
 
     /// Set the event sender for emitting agent events.
     fn set_event_sender(&mut self, _tx: tokio::sync::broadcast::Sender<AgentEvent>) {}
+
+    /// Inject the message bus for channels that need it (e.g. WebSocket streaming).
+    fn set_bus(&mut self, _bus: std::sync::Arc<kestrel_bus::MessageBus>) {}
 }

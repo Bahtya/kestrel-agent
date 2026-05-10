@@ -69,6 +69,9 @@ impl ChannelManager {
         // Inject event sender so channels can emit events (e.g. InterruptRequested).
         channel.set_event_sender(bus.event_sender());
 
+        // Inject message bus for channels that need it (e.g. WebSocket streaming).
+        channel.set_bus(bus.clone());
+
         let connected = channel.connect().await?;
         if connected {
             info!("Channel '{}' connected", name);

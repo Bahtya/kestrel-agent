@@ -24,13 +24,14 @@
 //!
 //! **Welcome (sent on connect):**
 //! ```json
-//! {"type": "welcome", "id": "uuid", "client_id": "...", "server_version": "0.1.1"}
+//! {"type": "welcome", "id": "uuid", "client_id": "...", "session_id": "...", "server_version": "0.1.1"}
 //! ```
 //!
 //! **Streaming:**
 //! ```json
 //! {"type": "streaming", "id": "uuid", "chunk": "Hello ", "done": false}
 //! {"type": "streaming", "id": "uuid", "chunk": "", "done": true}
+//! {"type": "done", "id": "uuid"}
 //! ```
 //!
 //! **Error:**
@@ -126,6 +127,10 @@ pub struct WsEnvelope {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Session ID — same as client_id for WebSocket (alias for convenience).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Server version (for type=welcome).
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,6 +155,7 @@ impl WsEnvelope {
             args: None,
             code: None,
             client_id: None,
+            session_id: None,
             server_version: None,
             trace_id: None,
         }
@@ -171,6 +177,7 @@ impl WsEnvelope {
     pub fn welcome(client_id: &str) -> Self {
         let mut env = Self::new("welcome");
         env.client_id = Some(client_id.to_string());
+        env.session_id = Some(client_id.to_string());
         env.server_version = Some(VERSION.to_string());
         env.trace_id = Some(format!("kst_ws_{}", &env.id[..8.min(env.id.len())]));
         env
@@ -192,6 +199,11 @@ impl WsEnvelope {
         env.chunk = Some(chunk.to_string());
         env.done = Some(done);
         env
+    }
+
+    /// Create a done signal envelope (sent after streaming completes).
+    pub fn done() -> Self {
+        Self::new("done")
     }
 
     /// Serialize the envelope to a JSON string.
@@ -274,6 +286,8 @@ pub struct WebSocketChannel {
     auth_token: Option<String>,
     /// Broadcast sender for emitting agent events (e.g. InterruptRequested on disconnect).
     event_tx: Option<tokio::sync::broadcast::Sender<AgentEvent>>,
+    /// Message bus for subscribing to streaming chunks.
+    bus: Option<Arc<kestrel_bus::MessageBus>>,
     /// Pre-bound TCP listener for zero-port-contention tests.
     #[cfg(test)]
     pre_bound_listener: Option<TcpListener>,
@@ -291,6 +305,7 @@ impl WebSocketChannel {
             auth_required: false,
             auth_token: None,
             event_tx: None,
+            bus: None,
             #[cfg(test)]
             pre_bound_listener: None,
         }
@@ -307,6 +322,7 @@ impl WebSocketChannel {
             auth_required: false,
             auth_token: None,
             event_tx: None,
+            bus: None,
             #[cfg(test)]
             pre_bound_listener: None,
         }
@@ -327,6 +343,7 @@ impl WebSocketChannel {
             auth_required,
             auth_token: token,
             event_tx: None,
+            bus: None,
             #[cfg(test)]
             pre_bound_listener: None,
         }
@@ -340,6 +357,11 @@ impl WebSocketChannel {
     /// Set the event sender for emitting agent events (e.g. InterruptRequested on disconnect).
     pub fn set_event_tx(&mut self, tx: tokio::sync::broadcast::Sender<AgentEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Inject the message bus for streaming chunk delivery.
+    pub fn set_bus(&mut self, bus: Arc<kestrel_bus::MessageBus>) {
+        self.bus = Some(bus);
     }
 
     /// Send a text reply envelope to a WebSocket client.
@@ -898,6 +920,16 @@ impl BaseChannel for WebSocketChannel {
         self.connected = true;
         self.running.store(true, Ordering::Relaxed);
 
+        // Spawn streaming chunk consumer so LLM tokens flow to WebSocket clients.
+        if let Some(bus) = self.bus.clone() {
+            let clients = self.clients.clone();
+            let running = self.running.clone();
+            tokio::spawn(async move {
+                run_ws_stream_consumer(bus, clients, move || running.load(Ordering::Relaxed)).await;
+            });
+            info!("WebSocket streaming consumer spawned");
+        }
+
         if let Some(handler) = self.message_handler.clone() {
             let running = self.running.clone();
             let clients = self.clients.clone();
@@ -996,6 +1028,17 @@ impl BaseChannel for WebSocketChannel {
                         "WS OUT"
                     );
                 }
+
+                // Send done signal after the response message so clients know
+                // the agent turn is complete.
+                if reply_to.is_some() {
+                    let mut done_env = WsEnvelope::done();
+                    done_env.trace_id = trace_id.map(|t| t.to_string());
+                    if let Ok(done_json) = done_env.to_json() {
+                        let _ = client.send(done_json);
+                    }
+                }
+
                 Ok(SendResult {
                     success: true,
                     message_id: Some(format!("ws_{}", chat_id)),
@@ -1079,6 +1122,10 @@ impl BaseChannel for WebSocketChannel {
 
     fn set_event_sender(&mut self, tx: tokio::sync::broadcast::Sender<AgentEvent>) {
         self.set_event_tx(tx);
+    }
+
+    fn set_bus(&mut self, bus: Arc<kestrel_bus::MessageBus>) {
+        self.bus = Some(bus);
     }
 }
 

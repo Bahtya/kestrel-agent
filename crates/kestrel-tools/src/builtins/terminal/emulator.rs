@@ -27,6 +27,78 @@ impl ReadMode {
     }
 }
 
+/// Semantic terminal operation emitted by the ANSI/VT parser.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerminalOp {
+    /// Printable text run.
+    Print(String),
+    /// Line feed (LF).
+    Linefeed,
+    /// Carriage return (CR).
+    CarriageReturn,
+    /// Backspace (BS).
+    Backspace,
+    /// Horizontal tab (HT).
+    Tab,
+    /// Bell (BEL).
+    Bell,
+    /// CUU — Cursor Up.
+    CursorUp(u16),
+    /// CUD — Cursor Down.
+    CursorDown(u16),
+    /// CUF — Cursor Forward.
+    CursorForward(u16),
+    /// CUB — Cursor Back.
+    CursorBack(u16),
+    /// CUP — Cursor Position (1-based; 0 means default-to-1).
+    CursorPosition { row: u16, col: u16 },
+    /// CHA — Cursor Horizontal Absolute.
+    CursorHorizontalAbsolute(u16),
+    /// VPA — Vertical Position Absolute.
+    CursorVerticalAbsolute(u16),
+    /// ED — Erase in Display.
+    EraseInDisplay(EraseMode),
+    /// EL — Erase in Line.
+    EraseInLine(EraseMode),
+    /// SGR — Select Graphic Rendition (raw parameter codes).
+    SetGraphicRendition(Vec<u16>),
+    /// DECSC — Save Cursor.
+    SaveCursor,
+    /// DECRC — Restore Cursor.
+    RestoreCursor,
+    /// SU — Scroll Up.
+    ScrollUp(u16),
+    /// SD — Scroll Down.
+    ScrollDown(u16),
+    /// DECSTBM — Set Scrolling Region (1-based; 0 = default).
+    SetScrollingRegion { top: u16, bottom: u16 },
+    /// DECSET — DEC Private Mode Set (e.g. 1049 = alternate screen).
+    DecPrivateModeSet(u16),
+    /// DECRST — DEC Private Mode Reset.
+    DecPrivateModeReset(u16),
+    /// OSC 0/2 — Set Window Title.
+    SetWindowTitle(String),
+}
+
+/// Erase scope for ED/EL operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraseMode {
+    /// From cursor to end.
+    ToEnd,
+    /// From start to cursor.
+    ToStart,
+    /// Entire display/line.
+    All,
+}
+
+fn erase_mode_from(n: u16) -> EraseMode {
+    match n {
+        0 => EraseMode::ToEnd,
+        1 => EraseMode::ToStart,
+        _ => EraseMode::All,
+    }
+}
+
 /// Incremental UTF-8 decoder that preserves incomplete multibyte tails
 /// across PTY reads.
 ///
@@ -112,6 +184,330 @@ impl Default for IncrementalUtf8Decoder {
     }
 }
 
+// ─── ANSI/VT Parser ────────────────────────────────────────────────
+
+/// Internal state for the ANSI/VT parser state machine.
+#[derive(Debug)]
+enum ParserState {
+    /// Processing normal printable text.
+    Ground,
+    /// Saw ESC (0x1B).
+    Escape,
+    /// Collecting CSI parameters.
+    Csi { buf: Vec<u8>, private: bool },
+    /// Collecting OSC payload.
+    Osc { buf: Vec<u8> },
+    /// Saw ESC O (SS3), awaiting final byte.
+    Ss3,
+}
+
+/// Incremental ANSI/VT100 parser.
+///
+/// Consumes raw PTY bytes and emits semantic [`TerminalOp`] values.
+/// Uses a state-machine approach (inspired by tmux `input.c`) so it
+/// correctly handles escape sequences split across reads.
+pub struct AnsiParser {
+    state: ParserState,
+    /// Accumulated printable bytes awaiting flush.
+    print_buf: Vec<u8>,
+}
+
+impl AnsiParser {
+    pub fn new() -> Self {
+        Self {
+            state: ParserState::Ground,
+            print_buf: Vec::with_capacity(256),
+        }
+    }
+
+    /// Feed a chunk of raw PTY bytes through the parser.
+    ///
+    /// Returns parsed terminal operations. State persists across calls so
+    /// partial escape sequences spanning reads are handled correctly.
+    pub fn parse(&mut self, input: &[u8]) -> Vec<TerminalOp> {
+        let mut ops = Vec::new();
+        for &byte in input {
+            if let Some(op) = self.process_byte(byte) {
+                ops.push(op);
+            }
+        }
+        ops
+    }
+
+    /// Flush remaining parser state (call on EOF/session close).
+    pub fn flush(&mut self) -> Vec<TerminalOp> {
+        let mut ops = Vec::new();
+        if let Some(op) = self.take_print() {
+            ops.push(op);
+        }
+        // Lossy flush of any remaining incomplete bytes.
+        if !self.print_buf.is_empty() {
+            let text = String::from_utf8_lossy(&self.print_buf).into_owned();
+            self.print_buf.clear();
+            ops.push(TerminalOp::Print(text));
+        }
+        ops
+    }
+
+    fn process_byte(&mut self, byte: u8) -> Option<TerminalOp> {
+        match &self.state {
+            ParserState::Ground => self.on_ground(byte),
+            ParserState::Escape => self.on_escape(byte),
+            ParserState::Csi { .. } => self.on_csi(byte),
+            ParserState::Osc { .. } => self.on_osc(byte),
+            ParserState::Ss3 => self.on_ss3(byte),
+        }
+    }
+
+    fn on_ground(&mut self, byte: u8) -> Option<TerminalOp> {
+        match byte {
+            0x07 => Some(TerminalOp::Bell),
+            0x08 => Some(TerminalOp::Backspace),
+            0x09 => Some(TerminalOp::Tab),
+            0x0A => Some(TerminalOp::Linefeed),
+            0x0D => Some(TerminalOp::CarriageReturn),
+            0x1B => {
+                let op = self.take_print();
+                self.state = ParserState::Escape;
+                op
+            }
+            0x00..=0x1F => None,
+            _ => {
+                self.print_buf.push(byte);
+                None
+            }
+        }
+    }
+
+    fn on_escape(&mut self, byte: u8) -> Option<TerminalOp> {
+        match byte {
+            b'[' => {
+                self.state = ParserState::Csi {
+                    buf: Vec::with_capacity(16),
+                    private: false,
+                };
+                None
+            }
+            b']' => {
+                self.state = ParserState::Osc {
+                    buf: Vec::with_capacity(64),
+                };
+                None
+            }
+            b'7' => {
+                self.state = ParserState::Ground;
+                Some(TerminalOp::SaveCursor)
+            }
+            b'8' => {
+                self.state = ParserState::Ground;
+                Some(TerminalOp::RestoreCursor)
+            }
+            b'O' => {
+                self.state = ParserState::Ss3;
+                None
+            }
+            b'D' => {
+                self.state = ParserState::Ground;
+                Some(TerminalOp::Linefeed) // IND — Index
+            }
+            b'M' => {
+                self.state = ParserState::Ground;
+                Some(TerminalOp::ScrollUp(1)) // RI — Reverse Index
+            }
+            b'E' => {
+                self.state = ParserState::Ground;
+                // NEL — Next Line (equivalent to CR + LF)
+                Some(TerminalOp::CarriageReturn)
+            }
+            _ => {
+                self.state = ParserState::Ground;
+                None
+            }
+        }
+    }
+
+    fn on_csi(&mut self, byte: u8) -> Option<TerminalOp> {
+        match byte {
+            // Parameter bytes: digits, semicolons, '?'
+            0x30..=0x3F => {
+                if let ParserState::Csi {
+                    ref mut buf,
+                    ref mut private,
+                } = self.state
+                {
+                    if byte == b'?' && buf.is_empty() {
+                        *private = true;
+                    } else {
+                        buf.push(byte);
+                    }
+                }
+                None
+            }
+            // Intermediate bytes: 0x20–0x2F — skip
+            0x20..=0x2F => None,
+            // Final byte: 0x40–0x7E — dispatch
+            0x40..=0x7E => {
+                let op = match &self.state {
+                    ParserState::Csi { buf, private } => {
+                        if *private {
+                            Self::dispatch_csi_private(buf, byte)
+                        } else {
+                            Self::dispatch_csi(buf, byte)
+                        }
+                    }
+                    _ => None,
+                };
+                self.state = ParserState::Ground;
+                op
+            }
+            _ => {
+                self.state = ParserState::Ground;
+                None
+            }
+        }
+    }
+
+    fn on_osc(&mut self, byte: u8) -> Option<TerminalOp> {
+        match byte {
+            // BEL terminates OSC
+            0x07 => {
+                let op = match &self.state {
+                    ParserState::Osc { buf } => Self::dispatch_osc(buf),
+                    _ => None,
+                };
+                self.state = ParserState::Ground;
+                op
+            }
+            // ESC may start ST (ESC \); terminate OSC and enter escape
+            0x1B => {
+                let op = match &self.state {
+                    ParserState::Osc { buf } => Self::dispatch_osc(buf),
+                    _ => None,
+                };
+                self.state = ParserState::Escape;
+                op
+            }
+            _ => {
+                if let ParserState::Osc { ref mut buf } = self.state {
+                    buf.push(byte);
+                }
+                None
+            }
+        }
+    }
+
+    fn on_ss3(&mut self, _byte: u8) -> Option<TerminalOp> {
+        self.state = ParserState::Ground;
+        None
+    }
+
+    /// Flush accumulated printable bytes as a `Print` op, keeping any
+    /// trailing incomplete UTF-8 sequence in the buffer.
+    fn take_print(&mut self) -> Option<TerminalOp> {
+        if self.print_buf.is_empty() {
+            return None;
+        }
+        let boundary = find_utf8_boundary(&self.print_buf);
+        if boundary == 0 {
+            return None;
+        }
+        let text_bytes = self.print_buf[..boundary].to_vec();
+        self.print_buf.drain(..boundary);
+        // Safety: find_utf8_boundary guarantees a valid UTF-8 prefix.
+        let text = unsafe { String::from_utf8_unchecked(text_bytes) };
+        Some(TerminalOp::Print(text))
+    }
+
+    fn parse_csi_params(buf: &[u8]) -> Vec<u16> {
+        std::str::from_utf8(buf)
+            .unwrap_or("")
+            .split(';')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect()
+    }
+
+    fn dispatch_csi(buf: &[u8], final_byte: u8) -> Option<TerminalOp> {
+        let nums = Self::parse_csi_params(buf);
+        match final_byte {
+            b'A' => Some(TerminalOp::CursorUp(
+                nums.first().copied().unwrap_or(1).max(1),
+            )),
+            b'B' => Some(TerminalOp::CursorDown(
+                nums.first().copied().unwrap_or(1).max(1),
+            )),
+            b'C' => Some(TerminalOp::CursorForward(
+                nums.first().copied().unwrap_or(1).max(1),
+            )),
+            b'D' => Some(TerminalOp::CursorBack(
+                nums.first().copied().unwrap_or(1).max(1),
+            )),
+            b'H' | b'f' => Some(TerminalOp::CursorPosition {
+                row: nums.first().copied().unwrap_or(1),
+                col: nums.get(1).copied().unwrap_or(1),
+            }),
+            b'G' => Some(TerminalOp::CursorHorizontalAbsolute(
+                nums.first().copied().unwrap_or(1),
+            )),
+            b'd' => Some(TerminalOp::CursorVerticalAbsolute(
+                nums.first().copied().unwrap_or(1),
+            )),
+            b'J' => Some(TerminalOp::EraseInDisplay(erase_mode_from(
+                nums.first().copied().unwrap_or(0),
+            ))),
+            b'K' => Some(TerminalOp::EraseInLine(erase_mode_from(
+                nums.first().copied().unwrap_or(0),
+            ))),
+            b'm' => Some(TerminalOp::SetGraphicRendition(if nums.is_empty() {
+                vec![0]
+            } else {
+                nums
+            })),
+            b's' => Some(TerminalOp::SaveCursor),
+            b'u' => Some(TerminalOp::RestoreCursor),
+            b'S' => Some(TerminalOp::ScrollUp(nums.first().copied().unwrap_or(1))),
+            b'T' => Some(TerminalOp::ScrollDown(nums.first().copied().unwrap_or(1))),
+            b'r' => Some(TerminalOp::SetScrollingRegion {
+                top: nums.first().copied().unwrap_or(0),
+                bottom: nums.get(1).copied().unwrap_or(0),
+            }),
+            _ => None,
+        }
+    }
+
+    fn dispatch_csi_private(buf: &[u8], final_byte: u8) -> Option<TerminalOp> {
+        let nums = Self::parse_csi_params(buf);
+        match final_byte {
+            b'h' => Some(TerminalOp::DecPrivateModeSet(
+                nums.first().copied().unwrap_or(0),
+            )),
+            b'l' => Some(TerminalOp::DecPrivateModeReset(
+                nums.first().copied().unwrap_or(0),
+            )),
+            _ => None,
+        }
+    }
+
+    fn dispatch_osc(buf: &[u8]) -> Option<TerminalOp> {
+        let s = std::str::from_utf8(buf).unwrap_or("");
+        if let Some(pos) = s.find(';') {
+            if let Ok(code) = s[..pos].parse::<u16>() {
+                let content = &s[pos + 1..];
+                match code {
+                    0 | 2 => return Some(TerminalOp::SetWindowTitle(content.to_string())),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+}
+
+impl Default for AnsiParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Find the byte index of the longest valid UTF-8 prefix in `input`.
 ///
 /// Returns `input.len()` if the entire slice is valid UTF-8.
@@ -147,21 +543,29 @@ fn find_utf8_boundary(input: &[u8]) -> usize {
     }
 }
 
-/// Placeholder handle for the future terminal emulator.
+/// Terminal emulator handle holding the ANSI parser and parsed operations.
 ///
-/// Issues #330 (ANSI/VT parser) and #331 (screen/grid model) will populate
-/// this with actual parsing and screen state. For now it exists so the
-/// session can hold an `Option<TerminalEmulatorHandle>` without type changes
-/// later.
+/// The parser (#330) consumes raw PTY bytes and produces semantic
+/// [`TerminalOp`] values. The screen model (#331) will consume these ops
+/// to maintain a grid representation of the terminal state.
 pub struct TerminalEmulatorHandle {
     /// Current session dimensions, kept in sync with PTY resizes.
     cols: u16,
     rows: u16,
+    /// ANSI parser state machine.
+    parser: AnsiParser,
+    /// Accumulated parsed operations (consumed by screen model).
+    pending_ops: Vec<TerminalOp>,
 }
 
 impl TerminalEmulatorHandle {
     pub fn new(cols: u16, rows: u16) -> Self {
-        Self { cols, rows }
+        Self {
+            cols,
+            rows,
+            parser: AnsiParser::new(),
+            pending_ops: Vec::new(),
+        }
     }
 
     /// Update dimensions after a PTY resize.
@@ -178,6 +582,24 @@ impl TerminalEmulatorHandle {
     #[allow(dead_code)]
     pub fn rows(&self) -> u16 {
         self.rows
+    }
+
+    /// Feed raw PTY bytes through the ANSI parser.
+    pub fn feed_bytes(&mut self, bytes: &[u8]) {
+        let ops = self.parser.parse(bytes);
+        self.pending_ops.extend(ops);
+    }
+
+    /// Take all pending terminal operations (consumed by screen model).
+    #[allow(dead_code)]
+    pub fn take_ops(&mut self) -> Vec<TerminalOp> {
+        std::mem::take(&mut self.pending_ops)
+    }
+
+    /// Flush parser state (call on EOF/session close).
+    pub fn flush_parser(&mut self) {
+        let ops = self.parser.flush();
+        self.pending_ops.extend(ops);
     }
 }
 
@@ -454,5 +876,294 @@ mod tests {
         handle.resize(120, 40);
         assert_eq!(handle.cols(), 120);
         assert_eq!(handle.rows(), 40);
+    }
+
+    // ─── ANSI Parser tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_parser_plain_text() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"hello world");
+        assert_eq!(ops, vec![TerminalOp::Print("hello world".to_string())]);
+    }
+
+    #[test]
+    fn test_parser_c0_controls() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"line1\nline2\r\t");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::Print("line1".to_string()),
+                TerminalOp::Linefeed,
+                TerminalOp::Print("line2".to_string()),
+                TerminalOp::CarriageReturn,
+                TerminalOp::Tab,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_cursor_movement() {
+        let mut p = AnsiParser::new();
+        // Up 5, Down 2, Right 10, Left 3
+        let ops = p.parse(b"\x1b[5A\x1b[2B\x1b[10C\x1b[3D");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::CursorUp(5),
+                TerminalOp::CursorDown(2),
+                TerminalOp::CursorForward(10),
+                TerminalOp::CursorBack(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_cursor_position() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[5;10H\x1b[H");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::CursorPosition { row: 5, col: 10 },
+                TerminalOp::CursorPosition { row: 1, col: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_erase_display() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[J\x1b[1J\x1b[2J");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::EraseInDisplay(EraseMode::ToEnd),
+                TerminalOp::EraseInDisplay(EraseMode::ToStart),
+                TerminalOp::EraseInDisplay(EraseMode::All),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_erase_line() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[K\x1b[1K\x1b[2K");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::EraseInLine(EraseMode::ToEnd),
+                TerminalOp::EraseInLine(EraseMode::ToStart),
+                TerminalOp::EraseInLine(EraseMode::All),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_sgr() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[31m\x1b[1;32m\x1b[0m");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::SetGraphicRendition(vec![31]),
+                TerminalOp::SetGraphicRendition(vec![1, 32]),
+                TerminalOp::SetGraphicRendition(vec![0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_save_restore_cursor() {
+        let mut p = AnsiParser::new();
+        // CSI s/u and ESC 7/8
+        let ops = p.parse(b"\x1b[s\x1b[u\x1b7\x1b8");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::SaveCursor,
+                TerminalOp::RestoreCursor,
+                TerminalOp::SaveCursor,
+                TerminalOp::RestoreCursor,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_alternate_screen() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[?1049h\x1b[?1049l");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::DecPrivateModeSet(1049),
+                TerminalOp::DecPrivateModeReset(1049),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_osc_title() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b]0;My Title\x07data");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::SetWindowTitle("My Title".to_string()),
+                TerminalOp::Print("data".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_osc_title_st() {
+        let mut p = AnsiParser::new();
+        // OSC terminated by ST (ESC \)
+        let ops = p.parse(b"\x1b]2;title\x1b\\data");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::SetWindowTitle("title".to_string()),
+                TerminalOp::Print("data".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_scroll() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[3S\x1b[2T");
+        assert_eq!(
+            ops,
+            vec![TerminalOp::ScrollUp(3), TerminalOp::ScrollDown(2)]
+        );
+    }
+
+    #[test]
+    fn test_parser_scrolling_region() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[5;20r");
+        assert_eq!(
+            ops,
+            vec![TerminalOp::SetScrollingRegion { top: 5, bottom: 20 }]
+        );
+    }
+
+    #[test]
+    fn test_parser_mixed_sequence() {
+        let mut p = AnsiParser::new();
+        // Typical TUI init: clear screen, set cursor, print
+        let input = b"\x1b[2J\x1b[H\x1b[?1049hHello World\x1b[31mRed\x1b[0m";
+        let ops = p.parse(input);
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::EraseInDisplay(EraseMode::All),
+                TerminalOp::CursorPosition { row: 1, col: 1 },
+                TerminalOp::DecPrivateModeSet(1049),
+                TerminalOp::Print("Hello World".to_string()),
+                TerminalOp::SetGraphicRendition(vec![31]),
+                TerminalOp::Print("Red".to_string()),
+                TerminalOp::SetGraphicRendition(vec![0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_split_sequence() {
+        let mut p = AnsiParser::new();
+        // CSI sequence split across two reads
+        let ops1 = p.parse(b"\x1b[3");
+        assert!(ops1.is_empty());
+        let ops2 = p.parse(b"1m");
+        assert_eq!(ops2, vec![TerminalOp::SetGraphicRendition(vec![31])]);
+    }
+
+    #[test]
+    fn test_parser_split_text() {
+        let mut p = AnsiParser::new();
+        let ops1 = p.parse(b"hel");
+        assert!(ops1.is_empty());
+        let ops2 = p.parse(b"lo");
+        assert!(ops2.is_empty());
+        // Flush should emit the accumulated text
+        let flush_ops = p.flush();
+        assert_eq!(flush_ops, vec![TerminalOp::Print("hello".to_string())]);
+    }
+
+    #[test]
+    fn test_parser_default_params() {
+        let mut p = AnsiParser::new();
+        // Cursor Up without param defaults to 1
+        let ops = p.parse(b"\x1b[A\x1b[H");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::CursorUp(1),
+                TerminalOp::CursorPosition { row: 1, col: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_cha_vpa() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1b[20G\x1b[5d");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::CursorHorizontalAbsolute(20),
+                TerminalOp::CursorVerticalAbsolute(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_esc_d_m_e() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x1bD\x1bM\x1bE");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::Linefeed,
+                TerminalOp::ScrollUp(1),
+                TerminalOp::CarriageReturn,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_bell_backspace() {
+        let mut p = AnsiParser::new();
+        let ops = p.parse(b"\x07\x08");
+        assert_eq!(ops, vec![TerminalOp::Bell, TerminalOp::Backspace]);
+    }
+
+    #[test]
+    fn test_parser_emulator_feed() {
+        let mut emu = TerminalEmulatorHandle::new(80, 24);
+        emu.feed_bytes(b"\x1b[2J\x1b[1;1HHello");
+        let ops = emu.take_ops();
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::EraseInDisplay(EraseMode::All),
+                TerminalOp::CursorPosition { row: 1, col: 1 },
+                TerminalOp::Print("Hello".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parser_emulator_flush() {
+        let mut emu = TerminalEmulatorHandle::new(80, 24);
+        emu.feed_bytes(b"pending text");
+        // Text not flushed yet (no escape sequence trigger)
+        assert!(emu.take_ops().is_empty());
+        // Flush forces it out
+        emu.flush_parser();
+        let ops = emu.take_ops();
+        assert_eq!(ops, vec![TerminalOp::Print("pending text".to_string())]);
     }
 }

@@ -189,6 +189,7 @@ impl TerminalSession {
         let raw_clone = raw_buffer.clone();
         let decoder_clone = utf8_decoder.clone();
         let decoded_clone = decoded_buffer.clone();
+        let emulator_clone = emulator.clone();
         let alive_clone = alive.clone();
         let session_id = id.clone();
         let reader_handle = std::thread::Builder::new()
@@ -199,6 +200,7 @@ impl TerminalSession {
                     &raw_clone,
                     &decoder_clone,
                     &decoded_clone,
+                    &emulator_clone,
                     &alive_clone,
                     &session_id,
                 );
@@ -389,13 +391,14 @@ impl Drop for TerminalSession {
     }
 }
 
-/// Background output pump: reads from PTY, stores raw bytes, and incrementally
-/// decodes UTF-8 into the decoded text buffer.
+/// Background output pump: reads from PTY, stores raw bytes, feeds the ANSI
+/// parser, and incrementally decodes UTF-8 into the decoded text buffer.
 fn pump_output(
     mut reader: Box<dyn Read + Send>,
     raw_buffer: &Arc<Mutex<RingBuffer>>,
     utf8_decoder: &Arc<Mutex<IncrementalUtf8Decoder>>,
     decoded_buffer: &Arc<Mutex<String>>,
+    emulator: &Arc<Mutex<TerminalEmulatorHandle>>,
     alive: &AtomicBool,
     session_id: &str,
 ) {
@@ -416,6 +419,10 @@ fn pump_output(
                         }
                     }
                 }
+                // Flush ANSI parser state.
+                if let Ok(mut emu) = emulator.lock() {
+                    emu.flush_parser();
+                }
                 alive.store(false, Ordering::Relaxed);
                 break;
             }
@@ -425,6 +432,11 @@ fn pump_output(
                 // Store raw bytes.
                 if let Ok(mut raw) = raw_buffer.lock() {
                     raw.write(chunk);
+                }
+
+                // Feed bytes through ANSI parser.
+                if let Ok(mut emu) = emulator.lock() {
+                    emu.feed_bytes(chunk);
                 }
 
                 // Incrementally decode UTF-8 and append to decoded buffer.
@@ -444,6 +456,9 @@ fn pump_output(
                 }
                 warn!("PTY reader error for session '{}': {}", session_id, e);
                 // Flush incomplete UTF-8 before dying.
+                if let Ok(mut emu) = emulator.lock() {
+                    emu.flush_parser();
+                }
                 if let Ok(mut decoder) = utf8_decoder.lock() {
                     let tail = decoder.flush_lossy();
                     if !tail.is_empty() {

@@ -1,0 +1,1188 @@
+//! Terminal screen/grid model for the terminal emulator.
+//!
+//! Implements a cell-based terminal screen with primary and alternate buffers,
+//! cursor tracking, cell attributes, scroll regions, and scrollback history.
+//! Consumes [`TerminalOp`] values produced by the ANSI parser and maintains
+//! a structured representation of the visible terminal state.
+
+use super::emulator::{EraseMode, TerminalOp};
+
+// ─── Cell & Attributes ─────────────────────────────────────────────
+
+/// ANSI terminal color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Color {
+    /// Default terminal color (inherited from terminal theme).
+    #[default]
+    Default,
+    /// ANSI 256-color palette index (0–255).
+    Index(u8),
+}
+
+/// Per-cell style attributes tracked by the emulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellAttributes {
+    pub fg: Color,
+    pub bg: Color,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub reverse: bool,
+}
+
+impl Default for CellAttributes {
+    fn default() -> Self {
+        Self {
+            fg: Color::Default,
+            bg: Color::Default,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        }
+    }
+}
+
+impl CellAttributes {
+    /// Apply an SGR parameter list to the attributes, returning the updated state.
+    pub fn apply_sgr(&mut self, params: &[u16]) {
+        for &p in params {
+            match p {
+                0 => *self = CellAttributes::default(),
+                1 => self.bold = true,
+                3 => self.italic = true,
+                4 => self.underline = true,
+                7 => self.reverse = true,
+                22 => self.bold = false,
+                23 => self.italic = false,
+                24 => self.underline = false,
+                27 => self.reverse = false,
+                30..=37 => self.fg = Color::Index((p - 30) as u8),
+                39 => self.fg = Color::Default,
+                40..=47 => self.bg = Color::Index((p - 40) as u8),
+                49 => self.bg = Color::Default,
+                // High-intensity FG (90–97)
+                90..=97 => self.fg = Color::Index((p - 90 + 8) as u8),
+                // High-intensity BG (100–107)
+                100..=107 => self.bg = Color::Index((p - 100 + 8) as u8),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A single cell in the terminal grid.
+#[derive(Debug, Clone)]
+pub struct Cell {
+    /// Character displayed in this cell.
+    pub char: char,
+    /// True if this cell is the second column of a wide character.
+    pub wide: bool,
+    /// Cell visual attributes.
+    pub attrs: CellAttributes,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            char: ' ',
+            wide: false,
+            attrs: CellAttributes::default(),
+        }
+    }
+}
+
+impl Cell {
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.char == ' ' && !self.wide && self.attrs == CellAttributes::default()
+    }
+}
+
+// ─── Screen Buffer ─────────────────────────────────────────────────
+
+/// A 2D grid of cells representing one screen buffer (primary or alternate).
+pub struct ScreenBuffer {
+    cells: Vec<Cell>,
+    cols: usize,
+    rows: usize,
+}
+
+impl ScreenBuffer {
+    pub fn new(cols: usize, rows: usize) -> Self {
+        Self {
+            cells: vec![Cell::default(); cols * rows],
+            cols,
+            rows,
+        }
+    }
+
+    pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
+        if new_cols == self.cols && new_rows == self.rows {
+            return;
+        }
+        let mut new_cells = vec![Cell::default(); new_cols * new_rows];
+        let copy_rows = self.rows.min(new_rows);
+        let copy_cols = self.cols.min(new_cols);
+        for row in 0..copy_rows {
+            for col in 0..copy_cols {
+                let src_idx = row * self.cols + col;
+                let dst_idx = row * new_cols + col;
+                new_cells[dst_idx] = self.cells[src_idx].clone();
+            }
+        }
+        self.cells = new_cells;
+        self.cols = new_cols;
+        self.rows = new_rows;
+    }
+
+    #[inline]
+    fn idx(&self, row: usize, col: usize) -> usize {
+        row * self.cols + col
+    }
+
+    fn cell(&self, row: usize, col: usize) -> &Cell {
+        &self.cells[self.idx(row, col)]
+    }
+
+    #[allow(dead_code)]
+    fn cell_mut(&mut self, row: usize, col: usize) -> &mut Cell {
+        let idx = self.idx(row, col);
+        &mut self.cells[idx]
+    }
+
+    fn clear(&mut self) {
+        for cell in &mut self.cells {
+            *cell = Cell::default();
+        }
+    }
+
+    fn clear_row(&mut self, row: usize) {
+        let start = row * self.cols;
+        for i in 0..self.cols {
+            self.cells[start + i] = Cell::default();
+        }
+    }
+
+    /// Erase cells in a row according to the erase mode.
+    fn erase_line(&mut self, row: usize, col: usize, mode: EraseMode) {
+        let start = row * self.cols;
+        match mode {
+            EraseMode::ToEnd => {
+                for c in col..self.cols {
+                    self.cells[start + c] = Cell::default();
+                }
+            }
+            EraseMode::ToStart => {
+                let end = col.min(self.cols - 1);
+                for c in 0..=end {
+                    self.cells[start + c] = Cell::default();
+                }
+            }
+            EraseMode::All => {
+                self.clear_row(row);
+            }
+        }
+    }
+
+    /// Erase cells in the display according to the erase mode.
+    fn erase_display(&mut self, row: usize, col: usize, mode: EraseMode) {
+        match mode {
+            EraseMode::ToEnd => {
+                // Cursor to end of current line
+                self.erase_line(row, col, EraseMode::ToEnd);
+                // All lines below
+                for r in (row + 1)..self.rows {
+                    self.clear_row(r);
+                }
+            }
+            EraseMode::ToStart => {
+                // All lines above
+                for r in 0..row {
+                    self.clear_row(r);
+                }
+                // Start of current line to cursor
+                self.erase_line(row, col, EraseMode::ToStart);
+            }
+            EraseMode::All => {
+                self.clear();
+            }
+        }
+    }
+
+    /// Scroll the buffer up by n lines within [top, bottom] region.
+    fn scroll_up(&mut self, n: usize, top: usize, bottom: usize) {
+        if top >= bottom || n == 0 {
+            return;
+        }
+        let n = n.min(bottom - top);
+        // Shift rows up
+        for row in top..=(bottom - n) {
+            let src_start = (row + n) * self.cols;
+            let dst_start = row * self.cols;
+            for i in 0..self.cols {
+                self.cells[dst_start + i] = self.cells[src_start + i].clone();
+            }
+        }
+        // Clear the vacated rows at the bottom of the region
+        for row in (bottom - n + 1)..=bottom {
+            self.clear_row(row);
+        }
+    }
+
+    /// Scroll the buffer down by n lines within [top, bottom] region.
+    fn scroll_down(&mut self, n: usize, top: usize, bottom: usize) {
+        if top >= bottom || n == 0 {
+            return;
+        }
+        let n = n.min(bottom - top);
+        // Shift rows down (iterate in reverse to avoid overwriting)
+        for row in (top..=(bottom - n)).rev() {
+            let src_start = row * self.cols;
+            let dst_start = (row + n) * self.cols;
+            for i in 0..self.cols {
+                self.cells[dst_start + i] = self.cells[src_start + i].clone();
+            }
+        }
+        // Clear the vacated rows at the top of the region
+        for row in top..(top + n) {
+            self.clear_row(row);
+        }
+    }
+
+    /// Extract a row of cells as a string of visible characters.
+    fn row_to_string(&self, row: usize) -> String {
+        let mut s = String::with_capacity(self.cols);
+        let mut col = 0;
+        while col < self.cols {
+            let cell = self.cell(row, col);
+            if cell.wide {
+                col += 1;
+                continue;
+            }
+            s.push(cell.char);
+            col += 1;
+        }
+        s
+    }
+}
+
+// ─── Cursor State ──────────────────────────────────────────────────
+
+/// Current and saved cursor state.
+#[derive(Debug, Clone)]
+struct CursorState {
+    row: usize,
+    col: usize,
+    saved_row: usize,
+    saved_col: usize,
+}
+
+impl CursorState {
+    fn new() -> Self {
+        Self {
+            row: 0,
+            col: 0,
+            saved_row: 0,
+            saved_col: 0,
+        }
+    }
+
+    fn save(&mut self) {
+        self.saved_row = self.row;
+        self.saved_col = self.col;
+    }
+
+    fn restore(&mut self) {
+        self.row = self.saved_row;
+        self.col = self.saved_col;
+    }
+}
+
+// ─── Character Width ───────────────────────────────────────────────
+
+/// Determine the display width of a character (1 or 2 columns).
+///
+/// Handles the most common cases: CJK ideographs, Hangul, fullwidth forms,
+/// and emoji. Returns 0 for control characters.
+fn char_width(c: char) -> usize {
+    if c < '\u{20}' {
+        return 0;
+    }
+    if c < '\u{1100}' {
+        return 1;
+    }
+    // Fullwidth and wide ranges based on Unicode east asian width
+    match c {
+        // Hangul Jamo
+        '\u{1100}'..='\u{115F}' => 2,
+        // CJK Radicals Supplement, Kangxi Radicals, CJK Symbols and Punctuation
+        '\u{2E80}'..='\u{303E}' => 2,
+        // Hiragana, Katakana, Bopomofo
+        '\u{3040}'..='\u{33FF}' => 2,
+        // CJK Unified Ideographs
+        '\u{4E00}'..='\u{9FFF}' => 2,
+        // Hangul Syllables
+        '\u{AC00}'..='\u{D7AF}' => 2,
+        // CJK Compatibility Ideographs
+        '\u{F900}'..='\u{FAFF}' => 2,
+        // Halfwidth and Fullwidth Forms
+        '\u{FF01}'..='\u{FF60}' => 2,
+        // Supplementary CJK
+        '\u{20000}'..='\u{2FFFD}' => 2,
+        '\u{30000}'..='\u{3FFFD}' => 2,
+        // Emoji (simplified — most common ranges)
+        '\u{1F600}'..='\u{1F64F}' => 2,
+        '\u{1F300}'..='\u{1F5FF}' => 2,
+        '\u{1F680}'..='\u{1F6FF}' => 2,
+        '\u{1F900}'..='\u{1F9FF}' => 2,
+        '\u{1FA00}'..='\u{1FA6F}' => 2,
+        '\u{1FA70}'..='\u{1FAFF}' => 2,
+        '\u{2600}'..='\u{27BF}' => 2,
+        // Variations and tags
+        '\u{FE00}'..='\u{FE0F}' => 0, // Variation selectors are zero-width
+        '\u{200D}' => 0,              // ZWJ is zero-width
+        _ => 1,
+    }
+}
+
+// ─── Terminal Screen ───────────────────────────────────────────────
+
+/// Which screen buffer is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveBuffer {
+    Primary,
+    Alternate,
+}
+
+/// The terminal screen model: owns primary/alternate buffers, cursor, attributes,
+/// scroll region, and scrollback history. Consumes [`TerminalOp`] values to
+/// maintain a structured representation of the terminal state.
+pub struct TerminalScreen {
+    primary: ScreenBuffer,
+    alternate: ScreenBuffer,
+    active: ActiveBuffer,
+    cursor: CursorState,
+    scroll_top: usize,
+    scroll_bottom: usize,
+    attrs: CellAttributes,
+    scrollback: Vec<Vec<Cell>>,
+    window_title: String,
+}
+
+impl TerminalScreen {
+    pub fn new(cols: usize, rows: usize) -> Self {
+        let scroll_bottom = rows.saturating_sub(1);
+        Self {
+            primary: ScreenBuffer::new(cols, rows),
+            alternate: ScreenBuffer::new(cols, rows),
+            active: ActiveBuffer::Primary,
+            cursor: CursorState::new(),
+            scroll_top: 0,
+            scroll_bottom,
+            attrs: CellAttributes::default(),
+            scrollback: Vec::new(),
+            window_title: String::new(),
+        }
+    }
+
+    pub fn cols(&self) -> usize {
+        self.active_buf().cols
+    }
+
+    pub fn rows(&self) -> usize {
+        self.active_buf().rows
+    }
+
+    /// Resize the screen model to new dimensions.
+    pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
+        self.primary.resize(new_cols, new_rows);
+        self.alternate.resize(new_cols, new_rows);
+        self.scroll_bottom = new_rows.saturating_sub(1);
+        // Clamp cursor to new dimensions
+        self.cursor.row = self.cursor.row.min(new_rows.saturating_sub(1));
+        self.cursor.col = self.cursor.col.min(new_cols.saturating_sub(1));
+    }
+
+    /// Process a terminal operation, mutating screen state.
+    pub fn process_op(&mut self, op: &TerminalOp) {
+        match op {
+            TerminalOp::Print(text) => self.print_text(text),
+            TerminalOp::Linefeed => self.linefeed(),
+            TerminalOp::CarriageReturn => self.cursor.col = 0,
+            TerminalOp::Backspace => {
+                if self.cursor.col > 0 {
+                    self.cursor.col -= 1;
+                }
+            }
+            TerminalOp::Tab => self.tab(),
+            TerminalOp::Bell => {}
+            TerminalOp::CursorUp(n) => self.cursor_up(*n as usize),
+            TerminalOp::CursorDown(n) => self.cursor_down(*n as usize),
+            TerminalOp::CursorForward(n) => self.cursor_forward(*n as usize),
+            TerminalOp::CursorBack(n) => self.cursor_back(*n as usize),
+            TerminalOp::CursorPosition { row, col } => {
+                let max_rows = self.active_buf().rows;
+                let max_cols = self.active_buf().cols;
+                self.cursor.row = ((*row as usize).max(1) - 1).min(max_rows.saturating_sub(1));
+                self.cursor.col = ((*col as usize).max(1) - 1).min(max_cols.saturating_sub(1));
+            }
+            TerminalOp::CursorHorizontalAbsolute(col) => {
+                let max_cols = self.active_buf().cols;
+                self.cursor.col = ((*col as usize).max(1) - 1).min(max_cols.saturating_sub(1));
+            }
+            TerminalOp::CursorVerticalAbsolute(row) => {
+                let max_rows = self.active_buf().rows;
+                self.cursor.row = ((*row as usize).max(1) - 1).min(max_rows.saturating_sub(1));
+            }
+            TerminalOp::EraseInDisplay(mode) => {
+                let (row, col) = (self.cursor.row, self.cursor.col);
+                self.active_buf_mut().erase_display(row, col, *mode);
+            }
+            TerminalOp::EraseInLine(mode) => {
+                let (row, col) = (self.cursor.row, self.cursor.col);
+                self.active_buf_mut().erase_line(row, col, *mode);
+            }
+            TerminalOp::SetGraphicRendition(params) => {
+                self.attrs.apply_sgr(params);
+            }
+            TerminalOp::SaveCursor => self.cursor.save(),
+            TerminalOp::RestoreCursor => self.cursor.restore(),
+            TerminalOp::ScrollUp(n) => self.scroll_up(*n as usize),
+            TerminalOp::ScrollDown(n) => self.scroll_down(*n as usize),
+            TerminalOp::SetScrollingRegion { top, bottom } => {
+                let max_rows = self.active_buf().rows;
+                let top = if *top == 0 {
+                    0
+                } else {
+                    (*top as usize).max(1) - 1
+                };
+                let bottom = if *bottom == 0 {
+                    max_rows.saturating_sub(1)
+                } else {
+                    (*bottom as usize).max(1).min(max_rows) - 1
+                };
+                if top < bottom {
+                    self.scroll_top = top;
+                    self.scroll_bottom = bottom;
+                }
+            }
+            TerminalOp::DecPrivateModeSet(mode) => {
+                if mode == &1049 {
+                    self.enter_alternate_screen();
+                }
+            }
+            TerminalOp::DecPrivateModeReset(mode) => {
+                if mode == &1049 {
+                    self.leave_alternate_screen();
+                }
+            }
+            TerminalOp::SetWindowTitle(title) => {
+                self.window_title = title.clone();
+            }
+        }
+    }
+
+    /// Take a snapshot of the current visible screen state.
+    pub fn snapshot(&self) -> ScreenSnapshot {
+        let buf = self.active_buf();
+        let mut lines = Vec::with_capacity(buf.rows);
+        for row in 0..buf.rows {
+            lines.push(buf.row_to_string(row));
+        }
+        ScreenSnapshot {
+            lines,
+            cursor_row: self.cursor.row,
+            cursor_col: self.cursor.col,
+            cols: buf.cols,
+            rows: buf.rows,
+            is_alternate: self.active == ActiveBuffer::Alternate,
+            window_title: self.window_title.clone(),
+        }
+    }
+
+    // ─── Internal helpers ───────────────────────────────────────
+
+    fn active_buf(&self) -> &ScreenBuffer {
+        match self.active {
+            ActiveBuffer::Primary => &self.primary,
+            ActiveBuffer::Alternate => &self.alternate,
+        }
+    }
+
+    fn active_buf_mut(&mut self) -> &mut ScreenBuffer {
+        match self.active {
+            ActiveBuffer::Primary => &mut self.primary,
+            ActiveBuffer::Alternate => &mut self.alternate,
+        }
+    }
+
+    fn print_text(&mut self, text: &str) {
+        for c in text.chars() {
+            self.put_char(c);
+        }
+    }
+
+    fn put_char(&mut self, c: char) {
+        let w = char_width(c);
+        if w == 0 {
+            return;
+        }
+
+        // Read current state before borrowing the buffer
+        let (max_cols, max_rows) = {
+            let buf = self.active_buf();
+            (buf.cols, buf.rows)
+        };
+        let scroll_bottom = self.scroll_bottom;
+
+        // Wrap to next line if character doesn't fit
+        if self.cursor.col + w > max_cols {
+            self.cursor.col = 0;
+            if self.cursor.row == scroll_bottom {
+                self.scroll_up(1);
+            } else if self.cursor.row < max_rows - 1 {
+                self.cursor.row += 1;
+            }
+        }
+
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let attrs = self.attrs;
+
+        // Clear any wide-char continuation that would be overwritten
+        if col > 0 {
+            let is_wide_cont = {
+                let buf = self.active_buf();
+                let prev = buf.cell(row, col - 1);
+                prev.wide && prev.char == ' '
+            };
+            if is_wide_cont {
+                let idx = row * max_cols + (col - 1);
+                self.active_buf_mut().cells[idx] = Cell::default();
+            }
+        }
+
+        // Write the character and continuation
+        {
+            let buf = self.active_buf_mut();
+            let idx = row * max_cols + col;
+            buf.cells[idx].char = c;
+            buf.cells[idx].wide = false;
+            buf.cells[idx].attrs = attrs;
+
+            if w == 2 && col + 1 < max_cols {
+                let cont_idx = row * max_cols + col + 1;
+                buf.cells[cont_idx].char = ' ';
+                buf.cells[cont_idx].wide = true;
+                buf.cells[cont_idx].attrs = attrs;
+            }
+        }
+
+        // Advance cursor
+        self.cursor.col += w;
+        if self.cursor.col >= max_cols {
+            self.cursor.col = max_cols.saturating_sub(1);
+        }
+    }
+
+    fn linefeed(&mut self) {
+        if self.cursor.row == self.scroll_bottom {
+            self.scroll_up(1);
+        } else if self.cursor.row < self.active_buf().rows - 1 {
+            self.cursor.row += 1;
+        }
+    }
+
+    fn tab(&mut self) {
+        let next_tab = ((self.cursor.col / 8) + 1) * 8;
+        let max_cols = self.active_buf().cols;
+        self.cursor.col = next_tab.min(max_cols.saturating_sub(1));
+    }
+
+    fn cursor_up(&mut self, n: usize) {
+        self.cursor.row = self.cursor.row.saturating_sub(n);
+    }
+
+    fn cursor_down(&mut self, n: usize) {
+        let max_rows = self.active_buf().rows;
+        self.cursor.row = (self.cursor.row + n).min(max_rows.saturating_sub(1));
+    }
+
+    fn cursor_forward(&mut self, n: usize) {
+        let max_cols = self.active_buf().cols;
+        self.cursor.col = (self.cursor.col + n).min(max_cols.saturating_sub(1));
+    }
+
+    fn cursor_back(&mut self, n: usize) {
+        self.cursor.col = self.cursor.col.saturating_sub(n);
+    }
+
+    fn scroll_up(&mut self, n: usize) {
+        let scroll_top = self.scroll_top;
+        let scroll_bottom = self.scroll_bottom;
+        let is_primary = self.active == ActiveBuffer::Primary;
+
+        // Save scrolled-out line to scrollback (primary buffer only)
+        if is_primary && scroll_top == 0 {
+            let cols = self.active_buf().cols;
+            for _ in 0..n {
+                let mut line = Vec::with_capacity(cols);
+                for col in 0..cols {
+                    let cell = self.active_buf().cell(scroll_top, col).clone();
+                    line.push(cell);
+                }
+                self.scrollback.push(line);
+            }
+        }
+
+        self.active_buf_mut()
+            .scroll_up(n, scroll_top, scroll_bottom);
+    }
+
+    fn scroll_down(&mut self, n: usize) {
+        let scroll_top = self.scroll_top;
+        let scroll_bottom = self.scroll_bottom;
+        self.active_buf_mut()
+            .scroll_down(n, scroll_top, scroll_bottom);
+    }
+
+    fn enter_alternate_screen(&mut self) {
+        if self.active == ActiveBuffer::Alternate {
+            return;
+        }
+        self.alternate.clear();
+        self.cursor = CursorState::new();
+        self.active = ActiveBuffer::Alternate;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.alternate.rows.saturating_sub(1);
+    }
+
+    fn leave_alternate_screen(&mut self) {
+        if self.active == ActiveBuffer::Primary {
+            return;
+        }
+        self.active = ActiveBuffer::Primary;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.primary.rows.saturating_sub(1);
+    }
+}
+
+// ─── Screen Snapshot ───────────────────────────────────────────────
+
+/// Immutable snapshot of the current terminal screen state.
+#[derive(Debug, Clone)]
+pub struct ScreenSnapshot {
+    /// Visible lines (one String per row, trailing spaces stripped).
+    pub lines: Vec<String>,
+    /// Cursor row (0-based).
+    pub cursor_row: usize,
+    /// Cursor column (0-based).
+    pub cursor_col: usize,
+    /// Screen width in columns.
+    pub cols: usize,
+    /// Screen height in rows.
+    pub rows: usize,
+    /// Whether the alternate screen is active.
+    pub is_alternate: bool,
+    /// Current window title.
+    pub window_title: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_screen() -> TerminalScreen {
+        TerminalScreen::new(80, 24)
+    }
+
+    // ─── Cursor movement tests ──────────────────────────────────
+
+    #[test]
+    fn test_cursor_position() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorPosition { row: 5, col: 10 });
+        assert_eq!(s.cursor.row, 4);
+        assert_eq!(s.cursor.col, 9);
+    }
+
+    #[test]
+    fn test_cursor_position_clamp() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorPosition { row: 0, col: 0 });
+        assert_eq!(s.cursor.row, 0);
+        assert_eq!(s.cursor.col, 0);
+        s.process_op(&TerminalOp::CursorPosition { row: 100, col: 100 });
+        assert_eq!(s.cursor.row, 23);
+        assert_eq!(s.cursor.col, 79);
+    }
+
+    #[test]
+    fn test_cursor_relative() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorPosition { row: 10, col: 20 });
+        s.process_op(&TerminalOp::CursorUp(3));
+        assert_eq!(s.cursor.row, 6);
+        s.process_op(&TerminalOp::CursorDown(5));
+        assert_eq!(s.cursor.row, 11);
+        s.process_op(&TerminalOp::CursorForward(7));
+        assert_eq!(s.cursor.col, 26);
+        s.process_op(&TerminalOp::CursorBack(4));
+        assert_eq!(s.cursor.col, 22);
+    }
+
+    #[test]
+    fn test_cursor_relative_clamp() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorBack(100));
+        assert_eq!(s.cursor.col, 0);
+        s.process_op(&TerminalOp::CursorUp(100));
+        assert_eq!(s.cursor.row, 0);
+        s.process_op(&TerminalOp::CursorDown(100));
+        assert_eq!(s.cursor.row, 23);
+        s.process_op(&TerminalOp::CursorForward(100));
+        assert_eq!(s.cursor.col, 79);
+    }
+
+    #[test]
+    fn test_cursor_save_restore() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorPosition { row: 5, col: 10 });
+        s.process_op(&TerminalOp::SaveCursor);
+        s.process_op(&TerminalOp::CursorPosition { row: 1, col: 1 });
+        s.process_op(&TerminalOp::RestoreCursor);
+        assert_eq!(s.cursor.row, 4);
+        assert_eq!(s.cursor.col, 9);
+    }
+
+    #[test]
+    fn test_cha_vpa() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorHorizontalAbsolute(40));
+        assert_eq!(s.cursor.col, 39);
+        s.process_op(&TerminalOp::CursorVerticalAbsolute(12));
+        assert_eq!(s.cursor.row, 11);
+    }
+
+    // ─── Print and wrap tests ───────────────────────────────────
+
+    #[test]
+    fn test_print_basic() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "Hello");
+    }
+
+    #[test]
+    fn test_print_overwrite() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("ABCDE".to_string()));
+        s.process_op(&TerminalOp::CarriageReturn);
+        s.process_op(&TerminalOp::Print("XY".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "XYCDE");
+    }
+
+    #[test]
+    fn test_print_wrap() {
+        let mut s = TerminalScreen::new(5, 3);
+        s.process_op(&TerminalOp::Print("ABCDEFGH".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "ABCDE");
+        // After wrapping, cursor is on row 1 with "FGH"
+        assert_eq!(snap.lines[1], "FGH");
+    }
+
+    #[test]
+    fn test_linefeed_scroll() {
+        let mut s = TerminalScreen::new(10, 3);
+        s.process_op(&TerminalOp::Print("AAA".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("BBB".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("CCC".to_string()));
+        // Cursor is at bottom row; next linefeed scrolls
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("DDD".to_string()));
+        let snap = s.snapshot();
+        // "AAA" scrolled off, "BBB" at top, "CCC" middle, "DDD" bottom
+        assert_eq!(snap.lines[0], "BBB");
+        assert_eq!(snap.lines[1], "CCC");
+        assert_eq!(snap.lines[2], "DDD");
+    }
+
+    #[test]
+    fn test_carriage_return_linefeed() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        s.process_op(&TerminalOp::CarriageReturn);
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("World".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "Hello");
+        assert_eq!(snap.lines[1], "World");
+    }
+
+    // ─── Erase tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_erase_in_display_to_end() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello World".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("Second line".to_string()));
+        // Move cursor to row 0, col 5
+        s.process_op(&TerminalOp::CursorPosition { row: 1, col: 6 });
+        s.process_op(&TerminalOp::EraseInDisplay(EraseMode::ToEnd));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "Hello");
+        assert_eq!(snap.lines[1], "");
+    }
+
+    #[test]
+    fn test_erase_in_display_to_start() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("World".to_string()));
+        s.process_op(&TerminalOp::CursorPosition { row: 2, col: 3 });
+        s.process_op(&TerminalOp::EraseInDisplay(EraseMode::ToStart));
+        let snap = s.snapshot();
+        // Row 0 cleared, row 1 chars 0..=2 cleared
+        assert_eq!(snap.lines[0], "");
+        assert!(snap.lines[1].starts_with("   "));
+    }
+
+    #[test]
+    fn test_erase_in_display_all() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        s.process_op(&TerminalOp::EraseInDisplay(EraseMode::All));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "");
+    }
+
+    #[test]
+    fn test_erase_in_line() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello World".to_string()));
+        s.process_op(&TerminalOp::CursorPosition { row: 1, col: 6 });
+        s.process_op(&TerminalOp::EraseInLine(EraseMode::ToEnd));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "Hello");
+    }
+
+    #[test]
+    fn test_erase_in_line_to_start() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        s.process_op(&TerminalOp::CursorPosition { row: 1, col: 3 });
+        s.process_op(&TerminalOp::EraseInLine(EraseMode::ToStart));
+        let snap = s.snapshot();
+        // chars 0..=2 cleared, chars 3.. remain
+        assert_eq!(&snap.lines[0][3..], "lo");
+    }
+
+    // ─── SGR tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_sgr_bold() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::SetGraphicRendition(vec![1]));
+        s.process_op(&TerminalOp::Print("X".to_string()));
+        let cell = s.active_buf().cell(0, 0);
+        assert!(cell.attrs.bold);
+    }
+
+    #[test]
+    fn test_sgr_reset() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::SetGraphicRendition(vec![1, 31]));
+        s.process_op(&TerminalOp::Print("A".to_string()));
+        s.process_op(&TerminalOp::SetGraphicRendition(vec![0]));
+        s.process_op(&TerminalOp::Print("B".to_string()));
+        let a = s.active_buf().cell(0, 0);
+        assert!(a.attrs.bold);
+        assert_eq!(a.attrs.fg, Color::Index(1));
+        let b = s.active_buf().cell(0, 1);
+        assert!(!b.attrs.bold);
+        assert_eq!(b.attrs.fg, Color::Default);
+    }
+
+    #[test]
+    fn test_sgr_colors() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::SetGraphicRendition(vec![33, 44]));
+        s.process_op(&TerminalOp::Print("C".to_string()));
+        let cell = s.active_buf().cell(0, 0);
+        assert_eq!(cell.attrs.fg, Color::Index(3)); // 33 - 30 = 3
+        assert_eq!(cell.attrs.bg, Color::Index(4)); // 44 - 40 = 4
+    }
+
+    // ─── Alternate screen tests ────────────────────────────────
+
+    #[test]
+    fn test_alternate_screen_switch() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Primary content".to_string()));
+        // Enter alternate screen
+        s.process_op(&TerminalOp::DecPrivateModeSet(1049));
+        assert_eq!(s.active, ActiveBuffer::Alternate);
+        let snap = s.snapshot();
+        assert!(snap.is_alternate);
+        assert_eq!(snap.lines[0], ""); // Alternate is cleared on enter
+                                       // Write in alternate
+        s.process_op(&TerminalOp::Print("Alternate content".to_string()));
+        // Leave alternate
+        s.process_op(&TerminalOp::DecPrivateModeReset(1049));
+        assert_eq!(s.active, ActiveBuffer::Primary);
+        let snap = s.snapshot();
+        assert!(!snap.is_alternate);
+        assert_eq!(snap.lines[0], "Primary content"); // Primary preserved
+    }
+
+    #[test]
+    fn test_alternate_screen_cursor_reset() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorPosition { row: 10, col: 20 });
+        s.process_op(&TerminalOp::DecPrivateModeSet(1049));
+        assert_eq!(s.cursor.row, 0);
+        assert_eq!(s.cursor.col, 0);
+    }
+
+    // ─── Wide character tests ───────────────────────────────────
+
+    #[test]
+    fn test_wide_char_basic() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("你".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "你");
+        // The cell at col 1 should be a wide continuation
+        assert!(s.active_buf().cell(0, 1).wide);
+    }
+
+    #[test]
+    fn test_wide_char_wrap() {
+        let mut s = TerminalScreen::new(5, 2);
+        // "AB你D" — A(1) B(1) 你(2) = 4 cols, then D at col 4
+        s.process_op(&TerminalOp::Print("AB你D".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "AB你D");
+    }
+
+    #[test]
+    fn test_wide_char_wrap_at_boundary() {
+        let mut s = TerminalScreen::new(4, 2);
+        // "AB你" — A(1) B(1) 你(2) = 4 cols, fills exactly
+        s.process_op(&TerminalOp::Print("AB你".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "AB你");
+    }
+
+    #[test]
+    fn test_wide_char_wrap_overflow() {
+        let mut s = TerminalScreen::new(3, 2);
+        // "A你" — A(1) + 你(2) = 3, fills exactly
+        s.process_op(&TerminalOp::Print("A你".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "A你");
+        // Now "你" at col 1 won't fit (need 2 cols, only 2 remaining) — but it does fit
+        // Test wrap: "AB你" — A(1) B(1) = 2, 你(2) won't fit (only 1 col left) — wraps
+        let mut s2 = TerminalScreen::new(3, 2);
+        s2.process_op(&TerminalOp::Print("AB你".to_string()));
+        let snap2 = s2.snapshot();
+        assert_eq!(snap2.lines[0], "AB");
+        assert_eq!(snap2.lines[1], "你");
+    }
+
+    // ─── Scroll tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_scroll_up() {
+        let mut s = TerminalScreen::new(10, 3);
+        s.process_op(&TerminalOp::Print("AAA".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("BBB".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("CCC".to_string()));
+        // At bottom, explicit scroll
+        s.process_op(&TerminalOp::ScrollUp(1));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "BBB");
+        assert_eq!(snap.lines[1], "CCC");
+        assert_eq!(snap.lines[2], "");
+    }
+
+    #[test]
+    fn test_scroll_down() {
+        let mut s = TerminalScreen::new(10, 3);
+        s.process_op(&TerminalOp::Print("AAA".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("BBB".to_string()));
+        s.process_op(&TerminalOp::ScrollDown(1));
+        let snap = s.snapshot();
+        assert_eq!(snap.lines[0], "");
+        assert_eq!(snap.lines[1], "AAA");
+        assert_eq!(snap.lines[2], "BBB");
+    }
+
+    #[test]
+    fn test_scroll_region() {
+        let mut s = TerminalScreen::new(10, 5);
+        // Fill all rows
+        for i in 0..5 {
+            s.process_op(&TerminalOp::Print(format!("Row{}", i)));
+            if i < 4 {
+                s.process_op(&TerminalOp::Linefeed);
+            }
+        }
+        // Set scroll region to rows 1–3 (0-indexed)
+        s.process_op(&TerminalOp::SetScrollingRegion { top: 2, bottom: 4 });
+        // Move cursor to bottom of region and trigger scroll
+        s.process_op(&TerminalOp::CursorPosition { row: 4, col: 1 });
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("New".to_string()));
+        let snap = s.snapshot();
+        // Row 0 should be unchanged
+        assert_eq!(snap.lines[0], "Row0");
+        // Rows 1-3 were scrolled
+        assert_eq!(snap.lines[1], "Row2");
+        assert_eq!(snap.lines[2], "Row3");
+        assert_eq!(snap.lines[3], "New");
+        // Row 4 unchanged
+        assert_eq!(snap.lines[4], "Row4");
+    }
+
+    // ─── Resize test ───────────────────────────────────────────
+
+    #[test]
+    fn test_resize_preserves_content() {
+        let mut s = TerminalScreen::new(10, 5);
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        s.resize(20, 10);
+        let snap = s.snapshot();
+        assert_eq!(snap.cols, 20);
+        assert_eq!(snap.rows, 10);
+        assert_eq!(snap.lines[0], "Hello");
+    }
+
+    #[test]
+    fn test_resize_shrink_clamps_cursor() {
+        let mut s = TerminalScreen::new(80, 24);
+        s.process_op(&TerminalOp::CursorPosition { row: 20, col: 60 });
+        s.resize(40, 10);
+        assert_eq!(s.cursor.row, 9);
+        assert_eq!(s.cursor.col, 39);
+    }
+
+    // ─── Snapshot test ─────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_metadata() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::CursorPosition { row: 5, col: 10 });
+        s.process_op(&TerminalOp::SetWindowTitle("Test".to_string()));
+        let snap = s.snapshot();
+        assert_eq!(snap.cursor_row, 4);
+        assert_eq!(snap.cursor_col, 9);
+        assert_eq!(snap.cols, 80);
+        assert_eq!(snap.rows, 24);
+        assert!(!snap.is_alternate);
+        assert_eq!(snap.window_title, "Test");
+    }
+
+    // ─── Backspace and Tab tests ───────────────────────────────
+
+    #[test]
+    fn test_backspace() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("ABC".to_string()));
+        s.process_op(&TerminalOp::Backspace);
+        assert_eq!(s.cursor.col, 2);
+    }
+
+    #[test]
+    fn test_tab() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Tab);
+        assert_eq!(s.cursor.col, 8);
+        s.process_op(&TerminalOp::Tab);
+        assert_eq!(s.cursor.col, 16);
+    }
+
+    // ─── Scrollback test ───────────────────────────────────────
+
+    #[test]
+    fn test_scrollback_primary() {
+        let mut s = TerminalScreen::new(10, 2);
+        s.process_op(&TerminalOp::Print("AAA".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("BBB".to_string()));
+        // At bottom row; next linefeed scrolls
+        s.process_op(&TerminalOp::Linefeed);
+        assert_eq!(s.scrollback.len(), 1);
+        let first: String = s.scrollback[0].iter().map(|c| c.char).collect();
+        assert_eq!(first, "AAA");
+        s.process_op(&TerminalOp::Print("CCC".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        assert_eq!(s.scrollback.len(), 2);
+    }
+
+    // ─── Window title test ─────────────────────────────────────
+
+    #[test]
+    fn test_window_title() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::SetWindowTitle("My App".to_string()));
+        assert_eq!(s.window_title, "My App");
+        let snap = s.snapshot();
+        assert_eq!(snap.window_title, "My App");
+    }
+
+    // ─── SGR attribute parsing edge cases ──────────────────────
+
+    #[test]
+    fn test_sgr_high_intensity_colors() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::SetGraphicRendition(vec![91]));
+        s.process_op(&TerminalOp::Print("X".to_string()));
+        let cell = s.active_buf().cell(0, 0);
+        assert_eq!(cell.attrs.fg, Color::Index(9));
+    }
+
+    #[test]
+    fn test_sgr_italic_underline_reverse() {
+        let mut attrs = CellAttributes::default();
+        attrs.apply_sgr(&[3, 4, 7]);
+        assert!(attrs.italic);
+        assert!(attrs.underline);
+        assert!(attrs.reverse);
+        attrs.apply_sgr(&[23, 24, 27]);
+        assert!(!attrs.italic);
+        assert!(!attrs.underline);
+        assert!(!attrs.reverse);
+    }
+
+    // ─── Char width test ───────────────────────────────────────
+
+    #[test]
+    fn test_char_width_ascii() {
+        assert_eq!(char_width('A'), 1);
+        assert_eq!(char_width('\n'), 0);
+    }
+
+    #[test]
+    fn test_char_width_cjk() {
+        assert_eq!(char_width('你'), 2);
+        assert_eq!(char_width('世'), 2);
+        assert_eq!(char_width('界'), 2);
+    }
+
+    #[test]
+    fn test_char_width_emoji() {
+        assert_eq!(char_width('\u{1F600}'), 2); // 😀
+    }
+}

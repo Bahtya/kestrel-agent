@@ -543,10 +543,10 @@ fn find_utf8_boundary(input: &[u8]) -> usize {
     }
 }
 
-/// Terminal emulator handle holding the ANSI parser and parsed operations.
+/// Terminal emulator handle holding the ANSI parser, screen model, and parsed operations.
 ///
 /// The parser (#330) consumes raw PTY bytes and produces semantic
-/// [`TerminalOp`] values. The screen model (#331) will consume these ops
+/// [`TerminalOp`] values. The screen model (#331) consumes these ops
 /// to maintain a grid representation of the terminal state.
 pub struct TerminalEmulatorHandle {
     /// Current session dimensions, kept in sync with PTY resizes.
@@ -556,6 +556,8 @@ pub struct TerminalEmulatorHandle {
     parser: AnsiParser,
     /// Accumulated parsed operations (consumed by screen model).
     pending_ops: Vec<TerminalOp>,
+    /// Terminal screen model (grid with primary/alternate buffers).
+    screen: super::screen::TerminalScreen,
 }
 
 impl TerminalEmulatorHandle {
@@ -565,6 +567,7 @@ impl TerminalEmulatorHandle {
             rows,
             parser: AnsiParser::new(),
             pending_ops: Vec::new(),
+            screen: super::screen::TerminalScreen::new(cols as usize, rows as usize),
         }
     }
 
@@ -572,6 +575,7 @@ impl TerminalEmulatorHandle {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
+        self.screen.resize(cols as usize, rows as usize);
     }
 
     #[allow(dead_code)]
@@ -584,9 +588,12 @@ impl TerminalEmulatorHandle {
         self.rows
     }
 
-    /// Feed raw PTY bytes through the ANSI parser.
+    /// Feed raw PTY bytes through the ANSI parser and update the screen model.
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
         let ops = self.parser.parse(bytes);
+        for op in &ops {
+            self.screen.process_op(op);
+        }
         self.pending_ops.extend(ops);
     }
 
@@ -599,7 +606,22 @@ impl TerminalEmulatorHandle {
     /// Flush parser state (call on EOF/session close).
     pub fn flush_parser(&mut self) {
         let ops = self.parser.flush();
+        for op in &ops {
+            self.screen.process_op(op);
+        }
         self.pending_ops.extend(ops);
+    }
+
+    /// Access the terminal screen model.
+    #[allow(dead_code)]
+    pub fn screen(&self) -> &super::screen::TerminalScreen {
+        &self.screen
+    }
+
+    /// Access the terminal screen model mutably.
+    #[allow(dead_code)]
+    pub fn screen_mut(&mut self) -> &mut super::screen::TerminalScreen {
+        &mut self.screen
     }
 }
 

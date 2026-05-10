@@ -106,6 +106,8 @@ pub struct TerminalSession {
     decoded_buffer: Arc<Mutex<String>>,
     /// Terminal emulator handle (placeholder for future parser/screen model).
     emulator: Arc<Mutex<TerminalEmulatorHandle>>,
+    /// Last screen hash observed by capture/wait APIs.
+    last_observed_screen_hash: AtomicU64,
     alive: Arc<AtomicBool>,
     reader_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -208,6 +210,11 @@ impl TerminalSession {
             })
             .context("Failed to spawn PTY reader thread")?;
 
+        let initial_hash = {
+            let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
+            emu.state_hash()
+        };
+
         Ok(Self {
             id,
             shell: shell_cmd,
@@ -222,6 +229,7 @@ impl TerminalSession {
             utf8_decoder,
             decoded_buffer,
             emulator,
+            last_observed_screen_hash: AtomicU64::new(initial_hash),
             alive,
             reader_handle: Some(reader_handle),
         })
@@ -381,7 +389,10 @@ impl TerminalSession {
     /// repeated calls return the current screen each time.
     pub fn capture_screen(&self) -> ScreenSnapshot {
         let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
-        emulator.screen().snapshot()
+        let snapshot = emulator.screen().snapshot();
+        self.last_observed_screen_hash
+            .store(emulator.state_hash(), Ordering::Relaxed);
+        snapshot
     }
 
     /// Capture recent scrollback history.
@@ -406,10 +417,7 @@ impl TerminalSession {
         timeout_ms: u64,
         match_pattern: Option<&str>,
     ) -> Result<ScreenSnapshot> {
-        let baseline_hash = {
-            let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
-            emulator.state_hash()
-        };
+        let baseline_hash = self.last_observed_screen_hash.load(Ordering::Relaxed);
 
         let compiled_regex = match_pattern
             .map(|p| regex::Regex::new(p).context(format!("Invalid regex pattern: {}", p)))
@@ -433,6 +441,8 @@ impl TerminalSession {
                     }
                     continue;
                 }
+                self.last_observed_screen_hash
+                    .store(current_hash, Ordering::Relaxed);
                 emulator.screen().snapshot()
             };
 

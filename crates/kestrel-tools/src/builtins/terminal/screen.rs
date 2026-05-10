@@ -341,7 +341,7 @@ impl ScreenBuffer {
             s.push(cell.char);
             col += 1;
         }
-        s
+        s.trim_end_matches(' ').to_string()
     }
 }
 
@@ -587,9 +587,9 @@ impl TerminalScreen {
     pub fn state_hash(&self) -> u64 {
         use std::hash::Hasher;
         let mut h = FnvHasher::new(0xcbf29ce484222325);
-        let buf = self.active_buf();
-        for cell in &buf.cells {
-            h.write_u8(cell.char as u32 as u8);
+        for line in &self.snapshot().lines {
+            h.write(line.as_bytes());
+            h.write_u8(b'\n');
         }
         h.write_usize(self.cursor.row);
         h.write_usize(self.cursor.col);
@@ -629,7 +629,7 @@ impl TerminalScreen {
                     s.push(cell.char);
                     col += 1;
                 }
-                s
+                s.trim_end_matches(' ').to_string()
             })
             .collect()
     }
@@ -683,16 +683,22 @@ impl TerminalScreen {
         let col = self.cursor.col;
         let attrs = self.attrs;
 
-        // Clear any wide-char continuation that would be overwritten
-        if col > 0 {
-            let is_wide_cont = {
-                let buf = self.active_buf();
-                let prev = buf.cell(row, col - 1);
-                prev.wide && prev.char == ' '
-            };
-            if is_wide_cont {
-                let idx = row * max_cols + (col - 1);
-                self.active_buf_mut().cells[idx] = Cell::default();
+        // Clear any existing wide-character cells overlapped by this write.
+        {
+            let buf = self.active_buf_mut();
+            let idx = row * max_cols + col;
+
+            if buf.cells[idx].wide && col > 0 {
+                let prev_idx = row * max_cols + (col - 1);
+                buf.cells[prev_idx] = Cell::default();
+                buf.cells[idx] = Cell::default();
+            } else if col + 1 < max_cols && buf.cells[idx + 1].wide {
+                buf.cells[idx + 1] = Cell::default();
+            }
+
+            if w == 2 && col + 1 < max_cols && buf.cells[idx + 1].wide {
+                buf.cells[idx] = Cell::default();
+                buf.cells[idx + 1] = Cell::default();
             }
         }
 
@@ -714,9 +720,6 @@ impl TerminalScreen {
 
         // Advance cursor
         self.cursor.col += w;
-        if self.cursor.col >= max_cols {
-            self.cursor.col = max_cols.saturating_sub(1);
-        }
     }
 
     fn linefeed(&mut self) {
@@ -764,6 +767,10 @@ impl TerminalScreen {
                 for col in 0..cols {
                     let cell = self.active_buf().cell(scroll_top, col).clone();
                     line.push(cell);
+                }
+                while matches!(line.last(), Some(cell) if cell.char == ' ' && !cell.wide && cell.attrs == CellAttributes::default())
+                {
+                    line.pop();
                 }
                 self.scrollback.push(line);
             }

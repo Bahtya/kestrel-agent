@@ -227,7 +227,10 @@ impl AnsiParser {
     pub fn parse(&mut self, input: &[u8]) -> Vec<TerminalOp> {
         let mut ops = Vec::new();
         for &byte in input {
-            if let Some(op) = self.process_byte(byte) {
+            self.process_byte(byte, &mut ops);
+        }
+        if matches!(self.state, ParserState::Ground) {
+            if let Some(op) = self.take_print() {
                 ops.push(op);
             }
         }
@@ -249,84 +252,105 @@ impl AnsiParser {
         ops
     }
 
-    fn process_byte(&mut self, byte: u8) -> Option<TerminalOp> {
+    fn process_byte(&mut self, byte: u8, ops: &mut Vec<TerminalOp>) {
         match &self.state {
-            ParserState::Ground => self.on_ground(byte),
-            ParserState::Escape => self.on_escape(byte),
-            ParserState::Csi { .. } => self.on_csi(byte),
-            ParserState::Osc { .. } => self.on_osc(byte),
-            ParserState::Ss3 => self.on_ss3(byte),
+            ParserState::Ground => self.on_ground(byte, ops),
+            ParserState::Escape => self.on_escape(byte, ops),
+            ParserState::Csi { .. } => self.on_csi(byte, ops),
+            ParserState::Osc { .. } => self.on_osc(byte, ops),
+            ParserState::Ss3 => self.on_ss3(byte, ops),
         }
     }
 
-    fn on_ground(&mut self, byte: u8) -> Option<TerminalOp> {
+    fn on_ground(&mut self, byte: u8, ops: &mut Vec<TerminalOp>) {
         match byte {
-            0x07 => Some(TerminalOp::Bell),
-            0x08 => Some(TerminalOp::Backspace),
-            0x09 => Some(TerminalOp::Tab),
-            0x0A => Some(TerminalOp::Linefeed),
-            0x0D => Some(TerminalOp::CarriageReturn),
-            0x1B => {
-                let op = self.take_print();
-                self.state = ParserState::Escape;
-                op
+            0x07 => {
+                if let Some(op) = self.take_print() {
+                    ops.push(op);
+                }
+                ops.push(TerminalOp::Bell);
             }
-            0x00..=0x1F => None,
+            0x08 => {
+                if let Some(op) = self.take_print() {
+                    ops.push(op);
+                }
+                ops.push(TerminalOp::Backspace);
+            }
+            0x09 => {
+                if let Some(op) = self.take_print() {
+                    ops.push(op);
+                }
+                ops.push(TerminalOp::Tab);
+            }
+            0x0A => {
+                if let Some(op) = self.take_print() {
+                    ops.push(op);
+                }
+                ops.push(TerminalOp::Linefeed);
+            }
+            0x0D => {
+                if let Some(op) = self.take_print() {
+                    ops.push(op);
+                }
+                ops.push(TerminalOp::CarriageReturn);
+            }
+            0x1B => {
+                if let Some(op) = self.take_print() {
+                    ops.push(op);
+                }
+                self.state = ParserState::Escape;
+            }
+            0x00..=0x1F => {}
             _ => {
                 self.print_buf.push(byte);
-                None
             }
         }
     }
 
-    fn on_escape(&mut self, byte: u8) -> Option<TerminalOp> {
+    fn on_escape(&mut self, byte: u8, ops: &mut Vec<TerminalOp>) {
         match byte {
             b'[' => {
                 self.state = ParserState::Csi {
                     buf: Vec::with_capacity(16),
                     private: false,
                 };
-                None
             }
             b']' => {
                 self.state = ParserState::Osc {
                     buf: Vec::with_capacity(64),
                 };
-                None
             }
             b'7' => {
                 self.state = ParserState::Ground;
-                Some(TerminalOp::SaveCursor)
+                ops.push(TerminalOp::SaveCursor);
             }
             b'8' => {
                 self.state = ParserState::Ground;
-                Some(TerminalOp::RestoreCursor)
+                ops.push(TerminalOp::RestoreCursor);
             }
             b'O' => {
                 self.state = ParserState::Ss3;
-                None
             }
             b'D' => {
                 self.state = ParserState::Ground;
-                Some(TerminalOp::Linefeed) // IND — Index
+                ops.push(TerminalOp::Linefeed); // IND — Index
             }
             b'M' => {
                 self.state = ParserState::Ground;
-                Some(TerminalOp::ScrollUp(1)) // RI — Reverse Index
+                ops.push(TerminalOp::ScrollUp(1)); // RI — Reverse Index
             }
             b'E' => {
                 self.state = ParserState::Ground;
-                // NEL — Next Line (equivalent to CR + LF)
-                Some(TerminalOp::CarriageReturn)
+                ops.push(TerminalOp::CarriageReturn);
+                ops.push(TerminalOp::Linefeed);
             }
             _ => {
                 self.state = ParserState::Ground;
-                None
             }
         }
     }
 
-    fn on_csi(&mut self, byte: u8) -> Option<TerminalOp> {
+    fn on_csi(&mut self, byte: u8, ops: &mut Vec<TerminalOp>) {
         match byte {
             // Parameter bytes: digits, semicolons, '?'
             0x30..=0x3F => {
@@ -341,10 +365,9 @@ impl AnsiParser {
                         buf.push(byte);
                     }
                 }
-                None
             }
             // Intermediate bytes: 0x20–0x2F — skip
-            0x20..=0x2F => None,
+            0x20..=0x2F => {}
             // Final byte: 0x40–0x7E — dispatch
             0x40..=0x7E => {
                 let op = match &self.state {
@@ -358,16 +381,17 @@ impl AnsiParser {
                     _ => None,
                 };
                 self.state = ParserState::Ground;
-                op
+                if let Some(op) = op {
+                    ops.push(op);
+                }
             }
             _ => {
                 self.state = ParserState::Ground;
-                None
             }
         }
     }
 
-    fn on_osc(&mut self, byte: u8) -> Option<TerminalOp> {
+    fn on_osc(&mut self, byte: u8, ops: &mut Vec<TerminalOp>) {
         match byte {
             // BEL terminates OSC
             0x07 => {
@@ -376,7 +400,9 @@ impl AnsiParser {
                     _ => None,
                 };
                 self.state = ParserState::Ground;
-                op
+                if let Some(op) = op {
+                    ops.push(op);
+                }
             }
             // ESC may start ST (ESC \); terminate OSC and enter escape
             0x1B => {
@@ -385,20 +411,20 @@ impl AnsiParser {
                     _ => None,
                 };
                 self.state = ParserState::Escape;
-                op
+                if let Some(op) = op {
+                    ops.push(op);
+                }
             }
             _ => {
                 if let ParserState::Osc { ref mut buf } = self.state {
                     buf.push(byte);
                 }
-                None
             }
         }
     }
 
-    fn on_ss3(&mut self, _byte: u8) -> Option<TerminalOp> {
+    fn on_ss3(&mut self, _byte: u8, _ops: &mut Vec<TerminalOp>) {
         self.state = ParserState::Ground;
-        None
     }
 
     /// Flush accumulated printable bytes as a `Print` op, keeping any
@@ -1111,12 +1137,12 @@ mod tests {
     fn test_parser_split_text() {
         let mut p = AnsiParser::new();
         let ops1 = p.parse(b"hel");
-        assert!(ops1.is_empty());
+        assert_eq!(ops1, vec![TerminalOp::Print("hel".to_string())]);
         let ops2 = p.parse(b"lo");
-        assert!(ops2.is_empty());
+        assert_eq!(ops2, vec![TerminalOp::Print("lo".to_string())]);
         // Flush should emit the accumulated text
         let flush_ops = p.flush();
-        assert_eq!(flush_ops, vec![TerminalOp::Print("hello".to_string())]);
+        assert!(flush_ops.is_empty());
     }
 
     #[test]
@@ -1156,6 +1182,7 @@ mod tests {
                 TerminalOp::Linefeed,
                 TerminalOp::ScrollUp(1),
                 TerminalOp::CarriageReturn,
+                TerminalOp::Linefeed,
             ]
         );
     }

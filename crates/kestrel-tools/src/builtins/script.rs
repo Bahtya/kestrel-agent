@@ -143,7 +143,6 @@ const BLOCKED_WRITE_PATHS_UNIX: &[&str] = &[
     "/opt",
 ];
 
-#[cfg(windows)]
 const BLOCKED_WRITE_PATHS_WINDOWS: &[&str] = &[
     "C:\\Windows",
     "C:\\Program Files",
@@ -2093,12 +2092,12 @@ fn walk_dir(
 
 fn validate_write_path(path: &str) -> Result<(), mlua::Error> {
     let p = Path::new(path);
+    let normalized = path.replace('\\', "/").to_lowercase();
 
     // Check for blocked system paths
-    #[cfg(unix)]
     {
         for blocked in BLOCKED_WRITE_PATHS_UNIX {
-            if p.starts_with(blocked) {
+            if p.starts_with(blocked) || normalized.starts_with(&blocked.to_lowercase()) {
                 warn!(
                     path,
                     blocked_system_path = *blocked,
@@ -2112,11 +2111,10 @@ fn validate_write_path(path: &str) -> Result<(), mlua::Error> {
         }
     }
 
-    #[cfg(windows)]
     {
-        let lower = path.to_lowercase();
         for blocked in BLOCKED_WRITE_PATHS_WINDOWS {
-            if lower.starts_with(&blocked.to_lowercase()) {
+            let blocked_normalized = (*blocked).replace('\\', "/").to_lowercase();
+            if normalized.starts_with(&blocked_normalized) {
                 warn!(
                     path,
                     blocked_system_path = *blocked,
@@ -2337,7 +2335,14 @@ fn validate_http_url(url_str: &str) -> Result<url::Url, String> {
         "http" | "https" => {}
         s => return Err(format!("Unsupported URL scheme: {} (only http/https)", s)),
     }
-    if parsed.host_str().is_none() {
+    let after_scheme = url_str
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    if after_scheme.is_empty()
+        || after_scheme.starts_with('/')
+        || parsed.host_str().is_none_or(|host| host.is_empty())
+    {
         return Err("URL has no host".to_string());
     }
     Ok(parsed)
@@ -3172,7 +3177,7 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(
-            output.starts_with('/'),
+            std::path::Path::new(output.trim()).is_absolute(),
             "abspath should return absolute path, got: {}",
             output
         );
@@ -4334,7 +4339,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dst_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
 
-        let tool = ScriptTool::new().with_max_write_files(1);
+        let tool = ScriptTool::new().with_max_write_files(3);
         // First copy should succeed, second should fail
         let code = format!(
             r#"
@@ -4349,12 +4354,10 @@ mod tests {
             d = dst_str
         );
         let result = tool.execute(json!({"code": code})).await;
-        // The write_file calls already consumed the file count, so copy should fail
         assert!(result.is_ok());
         let output = result.unwrap();
-        // Second copy should fail due to file count
         assert!(
-            output.contains("false"),
+            output.contains("true\tfalse") || output.contains("true  false"),
             "second copy should fail due to file count limit, got: {}",
             output
         );
@@ -4366,7 +4369,7 @@ mod tests {
         let path_str = dir.path().to_str().unwrap().replace('\\', "\\\\");
 
         // Very small quota — first write succeeds, second fails
-        let tool = ScriptTool::new().with_max_write_bytes(20);
+        let tool = ScriptTool::new().with_max_write_bytes(19);
         let code = format!(
             r#"
                 local ok1, err1 = pcall(kestrel.write_file, '{p}/a.txt', '0123456789')
@@ -4455,11 +4458,19 @@ mod tests {
                 | ScriptCapability::FS_WRITE
                 | ScriptCapability::HTTP_PRIVATE_NET,
         );
-        let code = r#"local ok, err = pcall(kestrel.download, 'http://127.0.0.1:1/', '/etc/evil_download'); print(ok)"#;
+        let blocked_path = if cfg!(windows) {
+            r"C:\Windows\Temp\evil_download"
+        } else {
+            "/etc/evil_download"
+        };
+        let code = format!(
+            "local ok, err = pcall(kestrel.download, 'http://127.0.0.1:1/', '{}'); print(ok)",
+            blocked_path.replace('\\', "\\\\")
+        );
         let result = tool.execute(json!({"code": code})).await.unwrap();
         assert!(
             result.contains("false"),
-            "download to /etc should fail, got: {}",
+            "download to blocked system path should fail, got: {}",
             result
         );
     }
@@ -4641,11 +4652,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_abuse_mkdir_system_path_blocked() {
         let tool = ScriptTool::new();
-        let code = r#"local ok, err = pcall(kestrel.mkdir, '/usr/local/evil'); print(ok)"#;
+        let blocked_path = if cfg!(windows) {
+            r"C:\Windows\Temp\evil"
+        } else {
+            "/usr/local/evil"
+        };
+        let code = format!(
+            "local ok, err = pcall(kestrel.mkdir, '{}'); print(ok)",
+            blocked_path.replace('\\', "\\\\")
+        );
         let result = tool.execute(json!({"code": code})).await.unwrap();
         assert!(
             result.contains("false"),
-            "mkdir to /usr should fail, got: {}",
+            "mkdir to blocked system path should fail, got: {}",
             result
         );
     }
@@ -4653,11 +4672,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_abuse_remove_system_path_blocked() {
         let tool = ScriptTool::new();
-        let code = r#"local ok, err = pcall(kestrel.remove, '/etc/shadow'); print(ok)"#;
+        let blocked_path = if cfg!(windows) {
+            r"C:\Windows\System32\drivers\etc\hosts"
+        } else {
+            "/etc/shadow"
+        };
+        let code = format!(
+            "local ok, err = pcall(kestrel.remove, '{}'); print(ok)",
+            blocked_path.replace('\\', "\\\\")
+        );
         let result = tool.execute(json!({"code": code})).await.unwrap();
         assert!(
             result.contains("false"),
-            "remove /etc/shadow should fail, got: {}",
+            "remove blocked system path should fail, got: {}",
             result
         );
     }

@@ -78,7 +78,7 @@ impl ScriptCapability {
     pub const HTTP: Self = Self(1 << 6);
     /// Allow HTTP to private / loopback networks (requires `HTTP`).
     pub const HTTP_PRIVATE_NET: Self = Self(1 << 7);
-    /// Built-in module system (reserved for future `require()` host modules).
+    /// Built-in module system (`require("kestrel.fs")` etc. — no filesystem loading).
     pub const BUILTIN_MODULES: Self = Self(1 << 8);
     /// Enable all Lua standard libraries (disables sandbox).
     pub const ALL_STD_LIBS: Self = Self(1 << 9);
@@ -1580,7 +1580,111 @@ impl ScriptTool {
             .set("platform", platform_fn)
             .map_err(|e| ToolError::Execution(format!("Failed to set platform: {}", e)))?;
 
-        // Set kestrel global
+        // --- Build module tables BEFORE moving kestrel_table into globals ---
+        // The BUILTIN_MODULES capability gates a controlled require() that only
+        // loads Rust-host pre-registered module tables — no filesystem access.
+        if caps.contains(ScriptCapability::BUILTIN_MODULES) {
+            let registry = lua.create_table().map_err(|e| {
+                ToolError::Execution(format!("Failed to create module registry: {}", e))
+            })?;
+
+            // Helper: build a module table from function names present in kestrel_table.
+            let build_module = |names: &[&str]| -> Result<mlua::Table, ToolError> {
+                let module = lua.create_table().map_err(|e| {
+                    ToolError::Execution(format!("Failed to create module table: {}", e))
+                })?;
+                for &name in names {
+                    if let Ok(f) = kestrel_table.get::<mlua::Function>(name) {
+                        module.set(name, f).map_err(|e| {
+                            ToolError::Execution(format!(
+                                "Failed to set module function {}: {}",
+                                name, e
+                            ))
+                        })?;
+                    }
+                }
+                Ok(module)
+            };
+
+            // kestrel.fs — filesystem operations
+            let fs_mod = build_module(&[
+                "read_file",
+                "write_file",
+                "list_dir",
+                "exists",
+                "stat",
+                "mkdir",
+                "remove",
+                "read_lines",
+                "append_file",
+                "copy",
+                "move",
+                "glob",
+                "walk",
+                "read_json",
+                "write_json",
+                "tempdir",
+                "tempfile",
+            ])?;
+            registry.set("kestrel.fs", fs_mod).map_err(|e| {
+                ToolError::Execution(format!("Failed to register kestrel.fs: {}", e))
+            })?;
+
+            // kestrel.path — path utilities
+            let path_mod = build_module(&["cwd", "abspath", "join_path", "basename", "dirname"])?;
+            registry.set("kestrel.path", path_mod).map_err(|e| {
+                ToolError::Execution(format!("Failed to register kestrel.path: {}", e))
+            })?;
+
+            // kestrel.json — JSON encode/decode and file I/O
+            let json_mod =
+                build_module(&["json_decode", "json_encode", "read_json", "write_json"])?;
+            registry.set("kestrel.json", json_mod).map_err(|e| {
+                ToolError::Execution(format!("Failed to register kestrel.json: {}", e))
+            })?;
+
+            // kestrel.http — HTTP operations
+            let http_mod = build_module(&[
+                "http_get",
+                "http_post",
+                "http_request",
+                "fetch_json",
+                "post_json",
+                "download",
+            ])?;
+            registry.set("kestrel.http", http_mod).map_err(|e| {
+                ToolError::Execution(format!("Failed to register kestrel.http: {}", e))
+            })?;
+
+            // kestrel.env — environment variables
+            let env_mod = build_module(&["env"])?;
+            registry.set("kestrel.env", env_mod).map_err(|e| {
+                ToolError::Execution(format!("Failed to register kestrel.env: {}", e))
+            })?;
+
+            // Custom require() — only whitelisted built-in modules, no filesystem loading.
+            let require_fn = lua
+                .create_function(move |_lua, name: String| {
+                    match registry.get::<mlua::Value>(name.as_str()) {
+                        Ok(mlua::Value::Table(t)) => Ok(mlua::Value::Table(t)),
+                        _ => Err(mlua::Error::external(format!(
+                            "module '{}' not found: \
+                             only built-in kestrel.* modules are available \
+                             (kestrel.fs, kestrel.path, kestrel.json, kestrel.http, kestrel.env)",
+                            name
+                        ))),
+                    }
+                })
+                .map_err(|e| ToolError::Execution(format!("Failed to create require: {}", e)))?;
+
+            lua.globals()
+                .set("require", require_fn)
+                .map_err(|e| ToolError::Execution(format!("Failed to set require: {}", e)))?;
+
+            info!("Built-in module system enabled: kestrel.fs, kestrel.path, kestrel.json, kestrel.http, kestrel.env");
+        }
+
+        // Set kestrel global (after module tables are built from kestrel_table)
         lua.globals()
             .set("kestrel", kestrel_table)
             .map_err(|e| ToolError::Execution(format!("Failed to set kestrel global: {}", e)))?;
@@ -1614,7 +1718,10 @@ impl Tool for ScriptTool {
          kestrel.move, kestrel.glob, kestrel.walk, kestrel.read_json, \
          kestrel.write_json, kestrel.tempdir, kestrel.tempfile, \
          kestrel.http_get, kestrel.http_post, kestrel.http_request, \
-         kestrel.fetch_json, kestrel.post_json, kestrel.download."
+         kestrel.fetch_json, kestrel.post_json, kestrel.download. \
+         Built-in modules (Trusted/Dangerous): require('kestrel.fs'), \
+         require('kestrel.path'), require('kestrel.json'), \
+         require('kestrel.http'), require('kestrel.env')."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -3733,5 +3840,262 @@ mod tests {
         "#;
         let result = tool.execute(json!({"code": code})).await;
         assert!(result.is_ok());
+    }
+
+    // ── Built-in module system tests ─────────────────────────────
+
+    #[test]
+    fn test_builtin_modules_capability_bit() {
+        assert!(ScriptCapability::BUILTIN_MODULES.contains(ScriptCapability::BUILTIN_MODULES));
+        assert!(!ScriptCapability::NONE.contains(ScriptCapability::BUILTIN_MODULES));
+    }
+
+    #[test]
+    fn test_trusted_profile_includes_builtin_modules() {
+        let caps = ScriptProfile::Trusted.capabilities();
+        assert!(
+            caps.contains(ScriptCapability::BUILTIN_MODULES),
+            "Trusted profile should include BUILTIN_MODULES"
+        );
+    }
+
+    #[test]
+    fn test_safe_profile_excludes_builtin_modules() {
+        let caps = ScriptProfile::Safe.capabilities();
+        assert!(
+            !caps.contains(ScriptCapability::BUILTIN_MODULES),
+            "Safe profile should NOT include BUILTIN_MODULES"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_returns_module_table() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local fs = require("kestrel.fs")
+            print(type(fs))
+            print(type(fs.read_file))
+            print(type(fs.write_file))
+            print(type(fs.list_dir))
+            print(type(fs.exists))
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("table"), "module should be a table");
+        assert!(
+            output.contains("function"),
+            "module fields should be functions"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_path_module() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local path = require("kestrel.path")
+            print(type(path))
+            print(type(path.cwd))
+            print(type(path.abspath))
+            print(type(path.join_path))
+            print(type(path.basename))
+            print(type(path.dirname))
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("table"));
+        assert!(output.contains("function"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_json_module() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local json = require("kestrel.json")
+            print(type(json))
+            print(type(json.json_decode))
+            print(type(json.json_encode))
+            local data = json.json_decode('{"a":1}')
+            print(data.a)
+            print(json.json_encode({b = 2}))
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("table"));
+        assert!(output.contains("function"));
+        assert!(output.contains("1"));
+        assert!(output.contains("b"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_http_module() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local http = require("kestrel.http")
+            print(type(http))
+            print(type(http.http_get))
+            print(type(http.http_post))
+            print(type(http.http_request))
+            print(type(http.fetch_json))
+            print(type(http.post_json))
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("table"));
+        assert!(output.contains("function"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_env_module() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local env_mod = require("kestrel.env")
+            print(type(env_mod))
+            print(type(env_mod.env))
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("table"));
+        assert!(output.contains("function"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_rejects_unknown_module() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local ok, err = pcall(require, "foo")
+            print(ok)
+            print(err ~= nil)
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("false"), "require('foo') should fail");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_rejects_relative_path() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local ok, err = pcall(require, "./x")
+            print(ok)
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("false"), "require('./x') should fail");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_rejects_socket() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local ok, err = pcall(require, "socket")
+            print(ok)
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("false"), "require('socket') should fail");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_not_available_without_capability() {
+        let tool = ScriptTool::new(); // Safe profile — no BUILTIN_MODULES
+        let code = r#"
+            print(require == nil)
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(
+            output.contains("true"),
+            "require should be nil without BUILTIN_MODULES"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_require_returns_same_table_on_repeated_calls() {
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = r#"
+            local fs1 = require("kestrel.fs")
+            local fs2 = require("kestrel.fs")
+            print(fs1 == fs2)
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(
+            output.contains("true"),
+            "require should return the same table (caching)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_module_functions_work_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test_module.txt");
+        std::fs::write(&file_path, "hello from module").unwrap();
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = format!(
+            r#"
+            local fs = require("kestrel.fs")
+            local content = fs.read_file('{}')
+            print(content)
+            "#,
+            path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(
+            output.contains("hello from module"),
+            "module function should work the same as flat API"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flat_api_still_works_with_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("flat.txt");
+        std::fs::write(&file_path, "flat api works").unwrap();
+        let path_str = file_path.to_str().unwrap().replace('\\', "\\\\");
+
+        let tool = ScriptTool::new().with_capabilities(ScriptProfile::Trusted.capabilities());
+        let code = format!(
+            r#"
+            local fs = require("kestrel.fs")
+            -- Both module and flat API should work
+            local content1 = fs.read_file('{}')
+            local content2 = kestrel.read_file('{}')
+            print(content1 == content2)
+            print(content1)
+            "#,
+            path_str, path_str
+        );
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(
+            output.contains("true"),
+            "both APIs should return same result"
+        );
+        assert!(output.contains("flat api works"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_module_only_includes_enabled_functions() {
+        // FS_READ only — no write, so write_file should be absent from kestrel.fs
+        let tool = ScriptTool::new().with_capabilities(
+            ScriptCapability::FS_READ | ScriptCapability::JSON | ScriptCapability::BUILTIN_MODULES,
+        );
+        let code = r#"
+            local fs = require("kestrel.fs")
+            print(type(fs.read_file))
+            print(fs.write_file == nil)
+            print(fs.remove == nil)
+            print(fs.mkdir == nil)
+        "#;
+        let result = tool.execute(json!({"code": code})).await;
+        let output = result.unwrap();
+        assert!(output.contains("function"), "read_file should be present");
+        assert!(
+            output.contains("true"),
+            "write_file/remove/mkdir should be nil without write/delete caps"
+        );
     }
 }

@@ -6,6 +6,7 @@
 //! a structured representation of the visible terminal state.
 
 use super::emulator::{EraseMode, TerminalOp};
+use serde::Serialize;
 
 // ─── Cell & Attributes ─────────────────────────────────────────────
 
@@ -501,6 +502,36 @@ impl TerminalScreen {
         }
     }
 
+    /// Number of lines in the scrollback buffer.
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Return the last `max_lines` scrollback lines as plain text strings.
+    ///
+    /// Lines are returned in chronological order (oldest first). If `max_lines`
+    /// exceeds the available scrollback, all lines are returned.
+    pub fn scrollback_lines(&self, max_lines: usize) -> Vec<String> {
+        let skip = self.scrollback.len().saturating_sub(max_lines);
+        self.scrollback[skip..]
+            .iter()
+            .map(|row| {
+                let mut s = String::with_capacity(row.len());
+                let mut col = 0;
+                while col < row.len() {
+                    let cell = &row[col];
+                    if cell.wide {
+                        col += 1;
+                        continue;
+                    }
+                    s.push(cell.char);
+                    col += 1;
+                }
+                s
+            })
+            .collect()
+    }
+
     // ─── Internal helpers ───────────────────────────────────────
 
     fn active_buf(&self) -> &ScreenBuffer {
@@ -671,7 +702,7 @@ impl TerminalScreen {
 // ─── Screen Snapshot ───────────────────────────────────────────────
 
 /// Immutable snapshot of the current terminal screen state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScreenSnapshot {
     /// Visible lines (one String per row, trailing spaces stripped).
     pub lines: Vec<String>,
@@ -1184,5 +1215,59 @@ mod tests {
     #[test]
     fn test_char_width_emoji() {
         assert_eq!(char_width('\u{1F600}'), 2); // 😀
+    }
+
+    // ─── Scrollback accessor tests ─────────────────────────────────
+
+    #[test]
+    fn test_scrollback_len_empty() {
+        let s = new_screen();
+        assert_eq!(s.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn test_scrollback_lines_empty() {
+        let s = new_screen();
+        assert!(s.scrollback_lines(10).is_empty());
+    }
+
+    #[test]
+    fn test_scrollback_lines_basic() {
+        let mut s = TerminalScreen::new(10, 2);
+        s.process_op(&TerminalOp::Print("AAA".to_string()));
+        s.process_op(&TerminalOp::Linefeed);
+        s.process_op(&TerminalOp::Print("BBB".to_string()));
+        // Trigger scroll to push "AAA" into scrollback
+        s.process_op(&TerminalOp::Linefeed);
+        assert_eq!(s.scrollback_len(), 1);
+        let lines = s.scrollback_lines(10);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "AAA");
+    }
+
+    #[test]
+    fn test_scrollback_lines_max() {
+        let mut s = TerminalScreen::new(10, 2);
+        // Fill many lines to generate scrollback
+        for i in 0..10 {
+            s.process_op(&TerminalOp::Print(format!("L{}", i)));
+            s.process_op(&TerminalOp::Linefeed);
+        }
+        assert!(s.scrollback_len() > 1);
+        // Only request last 3
+        let lines = s.scrollback_lines(3);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_snapshot_serializable() {
+        let mut s = new_screen();
+        s.process_op(&TerminalOp::Print("Hello".to_string()));
+        s.process_op(&TerminalOp::CursorPosition { row: 5, col: 10 });
+        let snap = s.snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("Hello"));
+        assert!(json.contains("cursor_row"));
+        assert!(json.contains("is_alternate"));
     }
 }

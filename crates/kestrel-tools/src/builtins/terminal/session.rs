@@ -1,6 +1,7 @@
 //! Single PTY terminal session backed by `portable-pty`.
 
 use super::emulator::{IncrementalUtf8Decoder, TerminalEmulatorHandle};
+use super::screen::ScreenSnapshot;
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -371,6 +372,25 @@ impl TerminalSession {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Capture a snapshot of the current visible terminal screen.
+    ///
+    /// Returns a [`ScreenSnapshot`] containing visible lines, cursor position,
+    /// dimensions, and metadata. This does not consume or drain any state —
+    /// repeated calls return the current screen each time.
+    pub fn capture_screen(&self) -> ScreenSnapshot {
+        let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+        emulator.screen().snapshot()
+    }
+
+    /// Capture recent scrollback history.
+    ///
+    /// Returns up to `max_lines` scrollback lines in chronological order
+    /// (oldest first). Returns an empty vec if there is no scrollback.
+    pub fn capture_scrollback(&self, max_lines: usize) -> Vec<String> {
+        let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+        emulator.screen().scrollback_lines(max_lines)
     }
 }
 

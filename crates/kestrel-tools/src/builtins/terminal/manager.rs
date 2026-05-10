@@ -1,5 +1,6 @@
 //! Terminal session registry and lifecycle manager.
 
+use crate::builtins::terminal::screen::ScreenSnapshot;
 use crate::builtins::terminal::session::{SessionInfo, TerminalSession};
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
@@ -214,6 +215,30 @@ impl TerminalManager {
     pub fn get_session_info(&self, session_id: &str) -> Option<SessionInfo> {
         let sessions = self.sessions.read();
         sessions.get(session_id).map(|s| s.info())
+    }
+
+    /// Capture a snapshot of the current visible screen for a session.
+    pub fn capture_screen(&self, session_id: &str) -> Result<ScreenSnapshot> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        Ok(session.capture_screen())
+    }
+
+    /// Capture recent scrollback lines for a session.
+    pub fn capture_scrollback(&self, session_id: &str, max_lines: usize) -> Result<Vec<String>> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        Ok(session.capture_scrollback(max_lines))
     }
 
     /// Number of active sessions.

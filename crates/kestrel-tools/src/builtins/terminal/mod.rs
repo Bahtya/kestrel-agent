@@ -18,6 +18,7 @@ pub use screen::{Cell, CellAttributes, Color, ScreenSnapshot, TerminalScreen};
 pub use session::{validate_shell, SessionInfo, TerminalSession};
 pub use tools::register_terminal_tools;
 pub use tools::{
-    TerminalCreateSessionTool, TerminalKillSessionTool, TerminalListSessionsTool,
-    TerminalReadOutputTool, TerminalResizeTool, TerminalSendInputTool, TerminalSendKeyTool,
+    TerminalCaptureScreenTool, TerminalCaptureScrollbackTool, TerminalCreateSessionTool,
+    TerminalKillSessionTool, TerminalListSessionsTool, TerminalReadOutputTool, TerminalResizeTool,
+    TerminalSendInputTool, TerminalSendKeyTool,
 };

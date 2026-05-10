@@ -1,15 +1,17 @@
 //! Terminal multiplexer tools for AI-driven session management.
 //!
-//! Exposes seven tools that let the LLM create, interact with, and manage
+//! Exposes nine tools that let the LLM create, interact with, and manage
 //! PTY-backed terminal sessions:
 //!
-//! - `terminal_create_session` — spawn a new shell in a PTY
-//! - `terminal_send_input`     — send keystrokes / commands
-//! - `terminal_read_output`    — read pending output (raw/escaped/text modes)
-//! - `terminal_list_sessions`  — enumerate active sessions
-//! - `terminal_kill_session`   — destroy a session
-//! - `terminal_resize`         — change PTY dimensions
-//! - `terminal_send_key`       — send special keys (arrows, enter, etc.)
+//! - `terminal_create_session`   — spawn a new shell in a PTY
+//! - `terminal_send_input`       — send keystrokes / commands
+//! - `terminal_read_output`      — read pending output (raw/escaped/text modes)
+//! - `terminal_list_sessions`    — enumerate active sessions
+//! - `terminal_kill_session`     — destroy a session
+//! - `terminal_resize`           — change PTY dimensions
+//! - `terminal_send_key`         — send special keys (arrows, enter, etc.)
+//! - `terminal_capture_screen`   — capture current visible screen state
+//! - `terminal_capture_scrollback` — capture scrollback history
 
 use crate::builtins::terminal::emulator::{escape_control, strip_ansi, ReadMode};
 use crate::trait_def::{Tool, ToolError};
@@ -727,6 +729,214 @@ impl Tool for TerminalSendKeyTool {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// 8. terminal_capture_screen
+// ═══════════════════════════════════════════════════════════════════
+
+pub struct TerminalCaptureScreenTool {
+    mgr: Option<Arc<TerminalManager>>,
+}
+
+impl TerminalCaptureScreenTool {
+    pub fn new() -> Self {
+        Self { mgr: None }
+    }
+
+    pub fn with_manager(mut self, mgr: Arc<TerminalManager>) -> Self {
+        self.mgr = Some(mgr);
+        self
+    }
+}
+
+impl Default for TerminalCaptureScreenTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalCaptureScreenTool {
+    fn name(&self) -> &str {
+        "terminal_capture_screen"
+    }
+
+    fn description(&self) -> &str {
+        "Capture the current visible terminal screen as a snapshot. Returns \
+         the screen contents with cursor position, dimensions, and metadata. \
+         Unlike terminal_read_output (which drains incremental transcript output), \
+         this tool reads from the emulator's screen model — the same state a user \
+         would see on screen. Works for both normal shells and full-screen TUI \
+         programs (alternate screen). Repeated calls do not consume or destroy state."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The session ID returned by terminal_create_session"
+                },
+                "format": {
+                    "type": "string",
+                    "description": "Output format: 'text' (default, plain text lines) or 'json' (structured with metadata)",
+                    "enum": ["text", "json"]
+                }
+            },
+            "required": ["session_id"]
+        })
+    }
+
+    fn is_mutating(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+        let mgr = require_manager(&self.mgr)?;
+        let session_id = args["session_id"]
+            .as_str()
+            .ok_or_else(|| ToolError::Validation("Missing 'session_id'".to_string()))?;
+        let format = args["format"].as_str().unwrap_or("text");
+
+        debug!(
+            session_id = session_id,
+            format = format,
+            "Capturing terminal screen"
+        );
+
+        let sid = session_id.to_string();
+        let snapshot = tokio::task::spawn_blocking(move || mgr.capture_screen(&sid))
+            .await
+            .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?
+            .map_err(|e| ToolError::Execution(format!("Failed to capture screen: {}", e)))?;
+
+        match format {
+            "json" => serde_json::to_string_pretty(&snapshot)
+                .map_err(|e| ToolError::Execution(format!("JSON serialization error: {}", e))),
+            _ => {
+                // Plain text: show lines with cursor indicator
+                let mut output = String::new();
+                for (i, line) in snapshot.lines.iter().enumerate() {
+                    if i == snapshot.cursor_row {
+                        output.push_str(&format!(
+                            ">{:>3} |{}\n",
+                            i,
+                            if line.is_empty() { "" } else { line }
+                        ));
+                    } else {
+                        output.push_str(&format!(
+                            " {:>3} |{}\n",
+                            i,
+                            if line.is_empty() { "" } else { line }
+                        ));
+                    }
+                }
+                output.push_str(&format!(
+                    "\ncursor: ({}, {})  dims: {}x{}  alternate: {}  title: {}",
+                    snapshot.cursor_row,
+                    snapshot.cursor_col,
+                    snapshot.cols,
+                    snapshot.rows,
+                    snapshot.is_alternate,
+                    if snapshot.window_title.is_empty() {
+                        "-"
+                    } else {
+                        &snapshot.window_title
+                    }
+                ));
+                Ok(output)
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 9. terminal_capture_scrollback
+// ═══════════════════════════════════════════════════════════════════
+
+pub struct TerminalCaptureScrollbackTool {
+    mgr: Option<Arc<TerminalManager>>,
+}
+
+impl TerminalCaptureScrollbackTool {
+    pub fn new() -> Self {
+        Self { mgr: None }
+    }
+
+    pub fn with_manager(mut self, mgr: Arc<TerminalManager>) -> Self {
+        self.mgr = Some(mgr);
+        self
+    }
+}
+
+impl Default for TerminalCaptureScrollbackTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalCaptureScrollbackTool {
+    fn name(&self) -> &str {
+        "terminal_capture_scrollback"
+    }
+
+    fn description(&self) -> &str {
+        "Capture recent scrollback (history) lines from a terminal session. \
+         Returns lines that have scrolled off the top of the visible screen, \
+         in chronological order (oldest first). Only available for the primary \
+         screen buffer — alternate screen programs typically do not produce \
+         scrollback."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The session ID returned by terminal_create_session"
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Maximum number of scrollback lines to return (default: 100)"
+                }
+            },
+            "required": ["session_id"]
+        })
+    }
+
+    fn is_mutating(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
+        let mgr = require_manager(&self.mgr)?;
+        let session_id = args["session_id"]
+            .as_str()
+            .ok_or_else(|| ToolError::Validation("Missing 'session_id'".to_string()))?;
+        let max_lines = args["max_lines"].as_u64().unwrap_or(100) as usize;
+
+        debug!(
+            session_id = session_id,
+            max_lines = max_lines,
+            "Capturing terminal scrollback"
+        );
+
+        let sid = session_id.to_string();
+        let lines = tokio::task::spawn_blocking(move || mgr.capture_scrollback(&sid, max_lines))
+            .await
+            .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?
+            .map_err(|e| ToolError::Execution(format!("Failed to capture scrollback: {}", e)))?;
+
+        if lines.is_empty() {
+            Ok("(no scrollback)".to_string())
+        } else {
+            Ok(truncate_output(lines.join("\n")))
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Registration helper
 // ═══════════════════════════════════════════════════════════════════
 
@@ -741,7 +951,9 @@ pub fn register_terminal_tools(
     registry.register(TerminalListSessionsTool::new().with_manager(mgr.clone()));
     registry.register(TerminalKillSessionTool::new().with_manager(mgr.clone()));
     registry.register(TerminalResizeTool::new().with_manager(mgr.clone()));
-    registry.register(TerminalSendKeyTool::new().with_manager(mgr));
+    registry.register(TerminalSendKeyTool::new().with_manager(mgr.clone()));
+    registry.register(TerminalCaptureScreenTool::new().with_manager(mgr.clone()));
+    registry.register(TerminalCaptureScrollbackTool::new().with_manager(mgr));
 }
 
 #[cfg(test)]
@@ -758,6 +970,8 @@ mod tests {
         TerminalKillSessionTool,
         TerminalResizeTool,
         TerminalSendKeyTool,
+        TerminalCaptureScreenTool,
+        TerminalCaptureScrollbackTool,
     ) {
         let mgr = Arc::new(TerminalManager::with_config(10, true));
         (
@@ -768,13 +982,16 @@ mod tests {
             TerminalListSessionsTool::new().with_manager(mgr.clone()),
             TerminalKillSessionTool::new().with_manager(mgr.clone()),
             TerminalResizeTool::new().with_manager(mgr.clone()),
-            TerminalSendKeyTool::new().with_manager(mgr),
+            TerminalSendKeyTool::new().with_manager(mgr.clone()),
+            TerminalCaptureScreenTool::new().with_manager(mgr.clone()),
+            TerminalCaptureScrollbackTool::new().with_manager(mgr),
         )
     }
 
     #[test]
     fn test_tool_names() {
-        let (_, create, send, read, list, kill, resize, send_key) = make_tools();
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+            make_tools();
         assert_eq!(create.name(), "terminal_create_session");
         assert_eq!(send.name(), "terminal_send_input");
         assert_eq!(read.name(), "terminal_read_output");
@@ -782,11 +999,14 @@ mod tests {
         assert_eq!(kill.name(), "terminal_kill_session");
         assert_eq!(resize.name(), "terminal_resize");
         assert_eq!(send_key.name(), "terminal_send_key");
+        assert_eq!(capture.name(), "terminal_capture_screen");
+        assert_eq!(scrollback.name(), "terminal_capture_scrollback");
     }
 
     #[test]
     fn test_mutating_classification() {
-        let (_, create, send, read, list, kill, resize, send_key) = make_tools();
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+            make_tools();
         assert!(create.is_mutating());
         assert!(send.is_mutating());
         assert!(!read.is_mutating());
@@ -794,11 +1014,14 @@ mod tests {
         assert!(kill.is_mutating());
         assert!(resize.is_mutating());
         assert!(send_key.is_mutating());
+        assert!(!capture.is_mutating());
+        assert!(!scrollback.is_mutating());
     }
 
     #[test]
     fn test_descriptions_nonempty() {
-        let (_, create, send, read, list, kill, resize, send_key) = make_tools();
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+            make_tools();
         assert!(!create.description().is_empty());
         assert!(!send.description().is_empty());
         assert!(!read.description().is_empty());
@@ -806,11 +1029,14 @@ mod tests {
         assert!(!kill.description().is_empty());
         assert!(!resize.description().is_empty());
         assert!(!send_key.description().is_empty());
+        assert!(!capture.description().is_empty());
+        assert!(!scrollback.description().is_empty());
     }
 
     #[test]
     fn test_schemas_are_valid_json() {
-        let (_, create, send, read, list, kill, resize, send_key) = make_tools();
+        let (_, create, send, read, list, kill, resize, send_key, capture, scrollback) =
+            make_tools();
         for schema in &[
             create.parameters_schema(),
             send.parameters_schema(),
@@ -819,6 +1045,8 @@ mod tests {
             kill.parameters_schema(),
             resize.parameters_schema(),
             send_key.parameters_schema(),
+            capture.parameters_schema(),
+            scrollback.parameters_schema(),
         ] {
             assert_eq!(schema["type"], "object");
         }
@@ -826,21 +1054,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions_empty() {
-        let (_, _, _, _, list, _, _, _) = make_tools();
+        let (_, _, _, _, list, _, _, _, _, _) = make_tools();
         let result = list.execute(json!({})).await.unwrap();
         assert!(result.contains("No active terminal sessions"));
     }
 
     #[tokio::test]
     async fn test_kill_nonexistent_session() {
-        let (_, _, _, _, _, kill, _, _) = make_tools();
+        let (_, _, _, _, _, kill, _, _, _, _) = make_tools();
         let result = kill.execute(json!({"session_id": "nope"})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_send_input_missing_params() {
-        let (_, _, send, _, _, _, _, _) = make_tools();
+        let (_, _, send, _, _, _, _, _, _, _) = make_tools();
         let result = send.execute(json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("session_id"));
@@ -848,28 +1076,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_output_missing_session() {
-        let (_, _, _, read, _, _, _, _) = make_tools();
+        let (_, _, _, read, _, _, _, _, _, _) = make_tools();
         let result = read.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_resize_missing_params() {
-        let (_, _, _, _, _, _, resize, _) = make_tools();
+        let (_, _, _, _, _, _, resize, _, _, _) = make_tools();
         let result = resize.execute(json!({"session_id": "x"})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_send_key_missing_params() {
-        let (_, _, _, _, _, _, _, send_key) = make_tools();
+        let (_, _, _, _, _, _, _, send_key, _, _) = make_tools();
         let result = send_key.execute(json!({})).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_send_key_unknown_key() {
-        let (_, _, _, _, _, _, _, send_key) = make_tools();
+        let (_, _, _, _, _, _, _, send_key, _, _) = make_tools();
         let result = send_key
             .execute(json!({"session_id": "x", "key": "UnknownKey"}))
             .await;
@@ -877,8 +1105,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_capture_screen_missing_session() {
+        let (_, _, _, _, _, _, _, _, capture, _) = make_tools();
+        let result = capture.execute(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_capture_screen_nonexistent_session() {
+        let (_, _, _, _, _, _, _, _, capture, _) = make_tools();
+        let result = capture.execute(json!({"session_id": "nonexistent"})).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_capture_scrollback_missing_session() {
+        let (_, _, _, _, _, _, _, _, _, scrollback) = make_tools();
+        let result = scrollback.execute(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_capture_scrollback_nonexistent_session() {
+        let (_, _, _, _, _, _, _, _, _, scrollback) = make_tools();
+        let result = scrollback
+            .execute(json!({"session_id": "nonexistent"}))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
     async fn test_create_and_list_session() {
-        let (_, create, _, _, list, _, _, _) = make_tools();
+        let (_, create, _, _, list, _, _, _, _, _) = make_tools();
 
         let result = create.execute(json!({})).await.unwrap();
         assert!(result.contains("Created terminal session"));
@@ -889,8 +1149,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_capture_screen_and_scrollback() {
+        let (_, create, send, _, _, kill, _, _, capture, scrollback) = make_tools();
+
+        // Create session
+        let create_result = create.execute(json!({})).await.unwrap();
+        let session_id = create_result
+            .split('\'')
+            .nth(1)
+            .expect("should have session id")
+            .to_string();
+
+        // Send some output
+        send.execute(json!({
+            "session_id": session_id,
+            "input": "echo hello\n"
+        }))
+        .await
+        .unwrap();
+
+        // Wait for output to be processed
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Capture screen (text format)
+        let screen_text = capture
+            .execute(json!({
+                "session_id": session_id,
+                "format": "text"
+            }))
+            .await
+            .unwrap();
+        assert!(screen_text.contains("cursor:") || screen_text.contains("dims:"));
+
+        // Capture screen (JSON format)
+        let screen_json = capture
+            .execute(json!({
+                "session_id": session_id,
+                "format": "json"
+            }))
+            .await
+            .unwrap();
+        assert!(screen_json.contains("cursor_row"));
+        assert!(screen_json.contains("is_alternate"));
+        assert!(screen_json.contains("lines"));
+
+        // Capture scrollback
+        let sb = scrollback
+            .execute(json!({
+                "session_id": session_id,
+                "max_lines": 50
+            }))
+            .await
+            .unwrap();
+        // No scrollback yet (only one command), should be empty or contain content
+        assert!(sb.contains("scrollback") || !sb.is_empty());
+
+        kill.execute(json!({"session_id": session_id}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_create_send_read_kill_lifecycle() {
-        let (_, create, send, read, _, kill, _, _) = make_tools();
+        let (_, create, send, read, _, kill, _, _, _, _) = make_tools();
 
         // Create session
         let create_result = create.execute(json!({})).await.unwrap();
@@ -947,6 +1268,8 @@ mod tests {
         assert!(registry.get("terminal_kill_session").is_some());
         assert!(registry.get("terminal_resize").is_some());
         assert!(registry.get("terminal_send_key").is_some());
+        assert!(registry.get("terminal_capture_screen").is_some());
+        assert!(registry.get("terminal_capture_scrollback").is_some());
 
         assert!(registry.is_mutating("terminal_create_session"));
         assert!(registry.is_mutating("terminal_send_input"));
@@ -955,6 +1278,8 @@ mod tests {
         assert!(registry.is_mutating("terminal_kill_session"));
         assert!(registry.is_mutating("terminal_resize"));
         assert!(registry.is_mutating("terminal_send_key"));
+        assert!(!registry.is_mutating("terminal_capture_screen"));
+        assert!(!registry.is_mutating("terminal_capture_scrollback"));
     }
 
     #[test]

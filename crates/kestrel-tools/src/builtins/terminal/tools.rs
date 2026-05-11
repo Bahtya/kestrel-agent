@@ -1357,6 +1357,7 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_screen_change_detects_output() {
         let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
+        let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
         let create_result = create.execute(json!({})).await.unwrap();
         let session_id = create_result
@@ -1386,7 +1387,7 @@ mod tests {
         let result = wait
             .execute(json!({
                 "session_id": session_id,
-                "timeout_ms": 3000
+                "timeout_ms": timeout_ms
             }))
             .await;
 
@@ -1407,6 +1408,7 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_screen_change_with_pattern() {
         let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
+        let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
         let create_result = create.execute(json!({})).await.unwrap();
         let session_id = create_result
@@ -1436,7 +1438,7 @@ mod tests {
         let result = wait
             .execute(json!({
                 "session_id": session_id,
-                "timeout_ms": 3000,
+                "timeout_ms": timeout_ms,
                 "match": "UNIQUE_PATTERN_42"
             }))
             .await;

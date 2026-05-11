@@ -24,7 +24,7 @@ jobs:
 
       - name: Install protobuf-compiler (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get install -y protobuf-compiler mold clang
 
       - name: Install protobuf compiler (Windows)
         if: runner.os == 'Windows'
@@ -68,7 +68,7 @@ jobs:
 
       - name: Install protobuf-compiler (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get install -y protobuf-compiler mold clang
 
       - name: Install protobuf (macOS)
         if: runner.os == 'macOS'

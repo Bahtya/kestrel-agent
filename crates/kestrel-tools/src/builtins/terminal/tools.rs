@@ -1125,7 +1125,6 @@ mod tests {
 
     async fn wait_for_terminal_ready(
         send: &TerminalSendInputTool,
-        send_key: &TerminalSendKeyTool,
         read: &TerminalReadOutputTool,
         session_id: &str,
     ) {
@@ -1134,17 +1133,10 @@ mod tests {
 
         send.execute(json!({
             "session_id": session_id,
-            "input": format!("echo {marker}")
+            "input": format!("echo {marker}\n")
         }))
         .await
         .unwrap();
-        send_key
-            .execute(json!({
-                "session_id": session_id,
-                "key": "Enter"
-            }))
-            .await
-            .unwrap();
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut output = String::new();
@@ -1409,7 +1401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_screen_change_detects_output() {
-        let (_, create, send, read, _, kill, _, send_key, capture, _, wait) = make_tools();
+        let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
         let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
         let create_result = create.execute(test_session_args()).await.unwrap();
@@ -1422,7 +1414,7 @@ mod tests {
         let _ = read
             .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
             .await;
-        wait_for_terminal_ready(&send, &send_key, &read, &session_id).await;
+        wait_for_terminal_ready(&send, &read, &session_id).await;
 
         capture
             .execute(json!({"session_id": session_id}))
@@ -1432,17 +1424,10 @@ mod tests {
         // Send output that will change the screen
         send.execute(json!({
             "session_id": session_id,
-            "input": "echo test_change_marker"
+            "input": "echo test_change_marker\n"
         }))
         .await
         .unwrap();
-        send_key
-            .execute(json!({
-                "session_id": session_id,
-                "key": "Enter"
-            }))
-            .await
-            .unwrap();
 
         // Wait should detect the screen change quickly
         let result = wait
@@ -1468,7 +1453,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_screen_change_with_pattern() {
-        let (_, create, send, read, _, kill, _, send_key, capture, _, wait) = make_tools();
+        let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
         let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
         let create_result = create.execute(test_session_args()).await.unwrap();
@@ -1481,7 +1466,7 @@ mod tests {
         let _ = read
             .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
             .await;
-        wait_for_terminal_ready(&send, &send_key, &read, &session_id).await;
+        wait_for_terminal_ready(&send, &read, &session_id).await;
 
         capture
             .execute(json!({"session_id": session_id}))
@@ -1491,17 +1476,10 @@ mod tests {
         // Send output with a unique marker
         send.execute(json!({
             "session_id": session_id,
-            "input": "echo UNIQUE_PATTERN_42"
+            "input": "echo UNIQUE_PATTERN_42\n"
         }))
         .await
         .unwrap();
-        send_key
-            .execute(json!({
-                "session_id": session_id,
-                "key": "Enter"
-            }))
-            .await
-            .unwrap();
 
         // Wait for the specific pattern
         let result = wait

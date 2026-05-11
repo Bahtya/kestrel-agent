@@ -267,6 +267,20 @@ impl TerminalManager {
     pub fn is_empty(&self) -> bool {
         self.sessions.read().is_empty()
     }
+
+    /// Feed raw bytes directly into a session's terminal emulator (test only).
+    #[cfg(test)]
+    pub fn inject_emulator_output(&self, session_id: &str, bytes: &[u8]) -> Result<()> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        session.inject_emulator_output(bytes);
+        Ok(())
+    }
 }
 
 impl Default for TerminalManager {

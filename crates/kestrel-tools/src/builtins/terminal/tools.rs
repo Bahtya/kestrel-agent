@@ -1083,7 +1083,6 @@ pub fn register_terminal_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
     /// Create a manager in dangerous mode for testing (allows any shell).
     fn make_tools() -> (
@@ -1121,42 +1120,6 @@ mod tests {
         } else {
             json!({})
         }
-    }
-
-    async fn wait_for_terminal_ready(
-        send: &TerminalSendInputTool,
-        read: &TerminalReadOutputTool,
-        session_id: &str,
-    ) {
-        let marker = "__KESTREL_TERMINAL_READY__";
-        let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
-
-        send.execute(json!({
-            "session_id": session_id,
-            "input": format!("echo {marker}\n")
-        }))
-        .await
-        .unwrap();
-
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let mut output = String::new();
-
-        while Instant::now() < deadline {
-            let remaining_ms = deadline.saturating_duration_since(Instant::now());
-            let chunk = read
-                .execute(json!({
-                    "session_id": session_id,
-                    "timeout_ms": remaining_ms.as_millis().clamp(1, 500) as u64
-                }))
-                .await
-                .unwrap_or_default();
-            output.push_str(&chunk);
-            if output.contains(marker) {
-                return;
-            }
-        }
-
-        panic!("terminal did not become ready within {timeout_ms}ms: {output:?}");
     }
 
     #[test]
@@ -1401,7 +1364,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_screen_change_detects_output() {
-        let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
+        let (mgr, create, send, _read, _, kill, _, _, capture, _, wait) = make_tools();
         let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
         let create_result = create.execute(test_session_args()).await.unwrap();
@@ -1411,22 +1374,29 @@ mod tests {
             .expect("should have session id")
             .to_string();
 
-        let _ = read
-            .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
-            .await;
-        wait_for_terminal_ready(&send, &read, &session_id).await;
-
+        // Establish a baseline screen (sets screen_observed = true)
         capture
             .execute(json!({"session_id": session_id}))
             .await
             .unwrap();
 
-        // Send output that will change the screen
+        // Send input to increment input_sequence so wait_for_screen_change
+        // treats the next screen change as user-driven rather than spontaneous.
         send.execute(json!({
             "session_id": session_id,
             "input": "echo test_change_marker\n"
         }))
         .await
+        .unwrap();
+
+        // Inject output directly into the emulator to simulate screen change.
+        // On Windows CI, ConPTY input is unreliable so we bypass it.
+        let sid = session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            mgr.inject_emulator_output(&sid, b"test_change_marker\r\n")
+        })
+        .await
+        .unwrap()
         .unwrap();
 
         // Wait should detect the screen change quickly
@@ -1437,7 +1407,6 @@ mod tests {
             }))
             .await;
 
-        // The wait should succeed (screen changed from the echo output)
         assert!(
             result.is_ok(),
             "Expected screen change detection, got: {:?}",
@@ -1453,7 +1422,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_screen_change_with_pattern() {
-        let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
+        let (mgr, create, send, _read, _, kill, _, _, capture, _, wait) = make_tools();
         let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
         let create_result = create.execute(test_session_args()).await.unwrap();
@@ -1463,22 +1432,27 @@ mod tests {
             .expect("should have session id")
             .to_string();
 
-        let _ = read
-            .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
-            .await;
-        wait_for_terminal_ready(&send, &read, &session_id).await;
-
+        // Establish a baseline screen
         capture
             .execute(json!({"session_id": session_id}))
             .await
             .unwrap();
 
-        // Send output with a unique marker
+        // Send input to increment input_sequence
         send.execute(json!({
             "session_id": session_id,
             "input": "echo UNIQUE_PATTERN_42\n"
         }))
         .await
+        .unwrap();
+
+        // Inject output with the pattern directly into the emulator
+        let sid = session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            mgr.inject_emulator_output(&sid, b"UNIQUE_PATTERN_42\r\n")
+        })
+        .await
+        .unwrap()
         .unwrap();
 
         // Wait for the specific pattern

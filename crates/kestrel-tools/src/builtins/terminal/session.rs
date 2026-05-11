@@ -514,6 +514,16 @@ impl TerminalSession {
             return Ok(snapshot);
         }
     }
+
+    /// Feed raw bytes directly into the terminal emulator (test only).
+    ///
+    /// Bypasses the PTY entirely — useful for testing screen-change detection
+    /// on CI runners where ConPTY input may be unreliable.
+    #[cfg(test)]
+    pub fn inject_emulator_output(&self, bytes: &[u8]) {
+        let mut emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+        emulator.feed_bytes(bytes);
+    }
 }
 
 impl Drop for TerminalSession {

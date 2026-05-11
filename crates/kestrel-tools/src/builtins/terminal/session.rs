@@ -1,5 +1,7 @@
 //! Single PTY terminal session backed by `portable-pty`.
 
+use super::emulator::{IncrementalUtf8Decoder, TerminalEmulatorHandle};
+use super::screen::ScreenSnapshot;
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -95,22 +97,26 @@ pub struct TerminalSession {
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     writer: Mutex<Box<dyn Write + Send>>,
-    output_buffer: Arc<Mutex<RingBuffer>>,
+    /// Raw PTY byte buffer (for debug/escaped modes).
+    #[allow(dead_code)] // Used by future escaped mode and debug output
+    raw_buffer: Arc<Mutex<RingBuffer>>,
+    /// Incremental UTF-8 decoder state (shared with reader thread).
+    utf8_decoder: Arc<Mutex<IncrementalUtf8Decoder>>,
+    /// Decoded text stream for normal reading.
+    decoded_buffer: Arc<Mutex<String>>,
+    /// Terminal emulator handle (placeholder for future parser/screen model).
+    emulator: Arc<Mutex<TerminalEmulatorHandle>>,
+    /// Last screen hash observed by capture/wait APIs.
+    last_observed_screen_hash: AtomicU64,
+    /// Monotonic count of user inputs sent to this session.
+    input_sequence: AtomicU64,
+    /// Input sequence associated with the last observed screen state.
+    observed_input_sequence: AtomicU64,
+    /// Whether any screen baseline has been established yet.
+    screen_observed: AtomicBool,
     alive: Arc<AtomicBool>,
     reader_handle: Option<std::thread::JoinHandle<()>>,
 }
-
-// Safety: TerminalSession implements Sync because all interior mutability
-// is protected by Mutex or atomic operations:
-// - id, shell, cwd: String, inherently Send+Sync
-// - cols, rows, last_activity: AtomicU16/AtomicU64 — atomics provide Sync
-// - master: Mutex<Option<Box<dyn MasterPty + Send>>> — Mutex provides Sync
-// - child: Mutex<Option<Box<dyn Child + Send + Sync>>> — Mutex provides Sync
-// - writer: Mutex<Box<dyn Write + Send>> — Mutex provides Sync
-// - output_buffer: Arc<Mutex<RingBuffer>> — Arc+Mutex provides Sync
-// - alive: Arc<AtomicBool> — Arc+Atomic provides Sync
-// - reader_handle: Option<JoinHandle<()>> — JoinHandle is Send+Sync (Rust 1.72+)
-unsafe impl Sync for TerminalSession {}
 
 fn epoch_secs() -> u64 {
     std::time::SystemTime::now()
@@ -168,18 +174,37 @@ impl TerminalSession {
             .context("Failed to clone PTY reader")?;
         let writer = master.take_writer().context("Failed to take PTY writer")?;
 
-        let output_buffer = Arc::new(Mutex::new(RingBuffer::new(MAX_BUFFER_SIZE)));
+        let raw_buffer = Arc::new(Mutex::new(RingBuffer::new(MAX_BUFFER_SIZE)));
+        let decoded_buffer = Arc::new(Mutex::new(String::new()));
+        let utf8_decoder = Arc::new(Mutex::new(IncrementalUtf8Decoder::new()));
+        let emulator = Arc::new(Mutex::new(TerminalEmulatorHandle::new(cols, rows)));
         let alive = Arc::new(AtomicBool::new(true));
 
-        let buf_clone = output_buffer.clone();
+        let raw_clone = raw_buffer.clone();
+        let decoder_clone = utf8_decoder.clone();
+        let decoded_clone = decoded_buffer.clone();
+        let emulator_clone = emulator.clone();
         let alive_clone = alive.clone();
         let session_id = id.clone();
         let reader_handle = std::thread::Builder::new()
             .name(format!("pty-reader-{id}"))
             .spawn(move || {
-                pump_output(reader, &buf_clone, &alive_clone, &session_id);
+                pump_output(
+                    reader,
+                    &raw_clone,
+                    &decoder_clone,
+                    &decoded_clone,
+                    &emulator_clone,
+                    &alive_clone,
+                    &session_id,
+                );
             })
             .context("Failed to spawn PTY reader thread")?;
+
+        let initial_hash = {
+            let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
+            emu.state_hash()
+        };
 
         Ok(Self {
             id,
@@ -191,7 +216,14 @@ impl TerminalSession {
             master: Mutex::new(Some(master)),
             child: Mutex::new(Some(child)),
             writer: Mutex::new(writer),
-            output_buffer,
+            raw_buffer,
+            utf8_decoder,
+            decoded_buffer,
+            emulator,
+            last_observed_screen_hash: AtomicU64::new(initial_hash),
+            input_sequence: AtomicU64::new(0),
+            observed_input_sequence: AtomicU64::new(0),
+            screen_observed: AtomicBool::new(false),
             alive,
             reader_handle: Some(reader_handle),
         })
@@ -199,8 +231,16 @@ impl TerminalSession {
 
     /// Write input bytes to the PTY (typed by the "user").
     pub fn send_input(&self, input: &str) -> Result<()> {
+        const MAX_INPUT_SIZE: usize = 64 * 1024;
         if !self.alive.load(Ordering::Relaxed) {
             anyhow::bail!("Session '{}' is not alive", self.id);
+        }
+        if input.len() > MAX_INPUT_SIZE {
+            anyhow::bail!(
+                "Input too large: {} bytes (max {})",
+                input.len(),
+                MAX_INPUT_SIZE
+            );
         }
         debug!(session_id = %self.id, input_len = input.len(), "Writing input to PTY");
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
@@ -208,20 +248,24 @@ impl TerminalSession {
             .write_all(input.as_bytes())
             .context("Failed to write to PTY")?;
         writer.flush().context("Failed to flush PTY writer")?;
+        self.input_sequence.fetch_add(1, Ordering::Relaxed);
         self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         Ok(())
     }
 
-    /// Drain and return all pending output since the last read.
+    /// Drain and return all pending decoded output since the last read.
     ///
     /// If `timeout_ms` is `Some`, waits up to that many milliseconds for
     /// new output before returning.
     pub fn read_output(&self, timeout_ms: Option<u64>) -> Result<String> {
         self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         {
-            let mut buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-            if !buf.is_empty() {
-                let output = buf.drain_to_string();
+            let mut decoded = self
+                .decoded_buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !decoded.is_empty() {
+                let output = std::mem::take(&mut *decoded);
                 debug!(session_id = %self.id, output_len = output.len(), "Returning buffered output");
                 return Ok(output);
             }
@@ -235,12 +279,21 @@ impl TerminalSession {
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 if !self.alive.load(Ordering::Relaxed) {
                     debug!(session_id = %self.id, "Session killed while waiting for output");
-                    let mut buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-                    return Ok(buf.drain_to_string());
+                    let mut decoded = self
+                        .decoded_buffer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let mut decoder = self.utf8_decoder.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut output = std::mem::take(&mut *decoded);
+                    output.push_str(&decoder.flush_lossy());
+                    return Ok(output);
                 }
-                let mut buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-                if !buf.is_empty() || std::time::Instant::now() >= deadline {
-                    let output = buf.drain_to_string();
+                let mut decoded = self
+                    .decoded_buffer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if !decoded.is_empty() || std::time::Instant::now() >= deadline {
+                    let output = std::mem::take(&mut *decoded);
                     debug!(session_id = %self.id, output_len = output.len(), "Returning waited output");
                     return Ok(output);
                 }
@@ -250,27 +303,34 @@ impl TerminalSession {
         Ok(String::new())
     }
 
-    /// Read all accumulated output without draining.
+    /// Read all accumulated decoded output without draining.
     pub fn peek_output(&self) -> String {
-        let buf = self.output_buffer.lock().unwrap_or_else(|e| e.into_inner());
-        buf.peek_string()
+        let decoded = self
+            .decoded_buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        decoded.clone()
     }
 
-    /// Resize the PTY.
+    /// Resize the PTY and synchronize internal dimensions.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         debug!(session_id = %self.id, cols = cols, rows = rows, "Resizing PTY");
         let master = self.master.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref m) = *master {
-            m.resize(PtySize {
+            let size = PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
-            })
-            .context("Failed to resize PTY")?;
+            };
+            m.resize(size).context("Failed to resize PTY")?;
         }
         self.cols.store(cols, Ordering::Relaxed);
         self.rows.store(rows, Ordering::Relaxed);
+        self.emulator
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resize(cols, rows);
         self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         Ok(())
     }
@@ -324,6 +384,140 @@ impl TerminalSession {
     pub fn id(&self) -> &str {
         &self.id
     }
+
+    /// Capture a snapshot of the current visible terminal screen.
+    ///
+    /// Returns a [`ScreenSnapshot`] containing visible lines, cursor position,
+    /// dimensions, and metadata. This does not consume or drain any state —
+    /// repeated calls return the current screen each time.
+    pub fn capture_screen(&self) -> ScreenSnapshot {
+        let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = emulator.screen();
+        let snapshot = screen.snapshot();
+        self.last_observed_screen_hash
+            .store(screen.state_hash(), Ordering::Relaxed);
+        self.observed_input_sequence.store(
+            self.input_sequence.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.screen_observed.store(true, Ordering::Relaxed);
+        snapshot
+    }
+
+    /// Capture recent scrollback history.
+    ///
+    /// Returns up to `max_lines` scrollback lines in chronological order
+    /// (oldest first). Returns an empty vec if there is no scrollback.
+    pub fn capture_scrollback(&self, max_lines: usize) -> Vec<String> {
+        let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+        emulator.screen().scrollback_lines(max_lines)
+    }
+
+    /// Wait for the screen state to change, with optional pattern matching.
+    ///
+    /// Takes a baseline snapshot and polls until either:
+    /// - The screen state hash differs from the baseline, AND
+    /// - (if `match_pattern` is provided) the screen text matches the pattern
+    /// - The timeout elapses
+    ///
+    /// Returns the final snapshot on success, or an error on timeout.
+    pub fn wait_for_screen_change(
+        &self,
+        timeout_ms: u64,
+        match_pattern: Option<&str>,
+    ) -> Result<ScreenSnapshot> {
+        let current_input_seq = self.input_sequence.load(Ordering::Relaxed);
+        let observed_input_seq = self.observed_input_sequence.load(Ordering::Relaxed);
+        let mut baseline_hash = {
+            let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+            let current_hash = emulator.state_hash();
+            let should_reset_baseline = (!self.screen_observed.load(Ordering::Relaxed)
+                && current_input_seq == 0)
+                || current_input_seq == observed_input_seq;
+            if should_reset_baseline {
+                self.last_observed_screen_hash
+                    .store(current_hash, Ordering::Relaxed);
+                self.observed_input_sequence
+                    .store(current_input_seq, Ordering::Relaxed);
+                self.screen_observed.store(true, Ordering::Relaxed);
+                current_hash
+            } else {
+                self.last_observed_screen_hash.load(Ordering::Relaxed)
+            }
+        };
+
+        let compiled_regex = match_pattern
+            .map(|p| regex::Regex::new(p).context(format!("Invalid regex pattern: {}", p)))
+            .transpose()?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let poll_interval = std::time::Duration::from_millis(50);
+
+        loop {
+            std::thread::sleep(poll_interval);
+
+            let snapshot = {
+                let emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+                let current_hash = emulator.state_hash();
+                if current_hash == baseline_hash {
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "Timeout waiting for screen change ({}ms elapsed)",
+                            timeout_ms
+                        );
+                    }
+                    continue;
+                }
+                if current_input_seq == 0 {
+                    baseline_hash = current_hash;
+                    self.last_observed_screen_hash
+                        .store(current_hash, Ordering::Relaxed);
+                    self.observed_input_sequence.store(0, Ordering::Relaxed);
+                    self.screen_observed.store(true, Ordering::Relaxed);
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "Timeout waiting for screen change ({}ms elapsed)",
+                            timeout_ms
+                        );
+                    }
+                    continue;
+                }
+                self.last_observed_screen_hash
+                    .store(current_hash, Ordering::Relaxed);
+                self.observed_input_sequence
+                    .store(current_input_seq, Ordering::Relaxed);
+                self.screen_observed.store(true, Ordering::Relaxed);
+                emulator.screen().snapshot()
+            };
+
+            // Screen changed — check optional pattern match
+            if let Some(ref re) = compiled_regex {
+                let screen_text = snapshot.lines.join("\n");
+                if !re.is_match(&screen_text) {
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "Screen changed but pattern '{}' not found within timeout ({}ms)",
+                            match_pattern.unwrap_or(""),
+                            timeout_ms
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            return Ok(snapshot);
+        }
+    }
+
+    /// Feed raw bytes directly into the terminal emulator (test only).
+    ///
+    /// Bypasses the PTY entirely — useful for testing screen-change detection
+    /// on CI runners where ConPTY input may be unreliable.
+    #[cfg(test)]
+    pub fn inject_emulator_output(&self, bytes: &[u8]) {
+        let mut emulator = self.emulator.lock().unwrap_or_else(|e| e.into_inner());
+        emulator.feed_bytes(bytes);
+    }
 }
 
 impl Drop for TerminalSession {
@@ -343,10 +537,14 @@ impl Drop for TerminalSession {
     }
 }
 
-/// Background output pump: reads from PTY into the ring buffer.
+/// Background output pump: reads from PTY, stores raw bytes, feeds the ANSI
+/// parser, and incrementally decodes UTF-8 into the decoded text buffer.
 fn pump_output(
     mut reader: Box<dyn Read + Send>,
-    buffer: &Arc<Mutex<RingBuffer>>,
+    raw_buffer: &Arc<Mutex<RingBuffer>>,
+    utf8_decoder: &Arc<Mutex<IncrementalUtf8Decoder>>,
+    decoded_buffer: &Arc<Mutex<String>>,
+    emulator: &Arc<Mutex<TerminalEmulatorHandle>>,
     alive: &AtomicBool,
     session_id: &str,
 ) {
@@ -358,12 +556,43 @@ fn pump_output(
         match reader.read(&mut tmp) {
             Ok(0) => {
                 debug!("PTY reader for session '{}' got EOF", session_id);
+                // Flush any remaining incomplete UTF-8 bytes.
+                if let Ok(mut decoder) = utf8_decoder.lock() {
+                    let tail = decoder.flush_lossy();
+                    if !tail.is_empty() {
+                        if let Ok(mut decoded) = decoded_buffer.lock() {
+                            decoded.push_str(&tail);
+                        }
+                    }
+                }
+                // Flush ANSI parser state.
+                if let Ok(mut emu) = emulator.lock() {
+                    emu.flush_parser();
+                }
                 alive.store(false, Ordering::Relaxed);
                 break;
             }
             Ok(n) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.write(&tmp[..n]);
+                let chunk = &tmp[..n];
+
+                // Store raw bytes.
+                if let Ok(mut raw) = raw_buffer.lock() {
+                    raw.write(chunk);
+                }
+
+                // Feed bytes through ANSI parser.
+                if let Ok(mut emu) = emulator.lock() {
+                    emu.feed_bytes(chunk);
+                }
+
+                // Incrementally decode UTF-8 and append to decoded buffer.
+                if let Ok(mut decoder) = utf8_decoder.lock() {
+                    let decoded_text = decoder.decode(chunk);
+                    if !decoded_text.is_empty() {
+                        if let Ok(mut decoded) = decoded_buffer.lock() {
+                            decoded.push_str(&decoded_text);
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -372,6 +601,18 @@ fn pump_output(
                     continue;
                 }
                 warn!("PTY reader error for session '{}': {}", session_id, e);
+                // Flush incomplete UTF-8 before dying.
+                if let Ok(mut emu) = emulator.lock() {
+                    emu.flush_parser();
+                }
+                if let Ok(mut decoder) = utf8_decoder.lock() {
+                    let tail = decoder.flush_lossy();
+                    if !tail.is_empty() {
+                        if let Ok(mut decoded) = decoded_buffer.lock() {
+                            decoded.push_str(&tail);
+                        }
+                    }
+                }
                 alive.store(false, Ordering::Relaxed);
                 break;
             }
@@ -432,10 +673,12 @@ impl RingBuffer {
         }
     }
 
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.pending_len == 0
     }
 
+    #[allow(dead_code)]
     fn drain_to_string(&mut self) -> String {
         if self.pending_len == 0 {
             return String::new();
@@ -450,6 +693,7 @@ impl RingBuffer {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    #[allow(dead_code)]
     fn peek_string(&self) -> String {
         if self.pending_len == 0 {
             return String::new();
@@ -567,5 +811,90 @@ mod tests {
         assert_eq!(info.id, "test-1");
         assert_eq!(info.cols, 80);
         assert_eq!(info.rows, 24);
+    }
+
+    /// Windows: verify session can spawn and kill without I/O (no ConPTY flakiness).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_session_spawn_and_kill() {
+        let session = TerminalSession::spawn(
+            "test-spawn".to_string(),
+            Some("cmd.exe".to_string()),
+            None,
+            80,
+            24,
+            false,
+        )
+        .expect("Failed to spawn cmd.exe session");
+
+        assert!(session.is_alive());
+        assert_eq!(session.info().cols, 80);
+        assert_eq!(session.info().rows, 24);
+
+        session.resize(120, 40).expect("Failed to resize");
+        assert_eq!(session.info().cols, 120);
+        assert_eq!(session.info().rows, 40);
+
+        session.kill();
+        assert!(!session.is_alive());
+    }
+
+    /// Windows ConPTY end-to-end test: spawn cmd.exe, send a command, verify output.
+    ///
+    /// Marked `#[ignore]` because ConPTY I/O is unreliable on CI runners
+    /// (see tools.rs comments about ConPTY input bypass). Run locally with
+    /// `cargo test -- --ignored` to verify.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn test_windows_conpty_e2e() {
+        let session = TerminalSession::spawn(
+            "test-conpty".to_string(),
+            Some("cmd.exe".to_string()),
+            None,
+            80,
+            24,
+            false,
+        )
+        .expect("Failed to spawn cmd.exe session");
+
+        // Give the PTY a moment to initialize and show the Windows banner
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Read whatever banner output Windows produces
+        let _banner = session.read_output(None).unwrap_or_default();
+
+        // Send a simple command that produces predictable output
+        session
+            .send_input("echo conpty_test_ok\r\n")
+            .expect("Failed to send input");
+
+        // Wait for the output to appear
+        let mut output = String::new();
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            output = session.read_output(None).unwrap_or_default();
+            if output.contains("conpty_test_ok") {
+                break;
+            }
+        }
+
+        assert!(
+            output.contains("conpty_test_ok"),
+            "Expected 'conpty_test_ok' in output, got: {:?}",
+            output
+        );
+
+        // Verify session is still alive
+        assert!(session.is_alive());
+
+        // Test resize
+        session.resize(120, 40).expect("Failed to resize");
+        assert_eq!(session.info().cols, 120);
+        assert_eq!(session.info().rows, 40);
+
+        // Kill and verify
+        session.kill();
+        assert!(!session.is_alive());
     }
 }

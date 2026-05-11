@@ -1,5 +1,6 @@
 //! Terminal session registry and lifecycle manager.
 
+use crate::builtins::terminal::screen::ScreenSnapshot;
 use crate::builtins::terminal::session::{SessionInfo, TerminalSession};
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
@@ -216,6 +217,47 @@ impl TerminalManager {
         sessions.get(session_id).map(|s| s.info())
     }
 
+    /// Capture a snapshot of the current visible screen for a session.
+    pub fn capture_screen(&self, session_id: &str) -> Result<ScreenSnapshot> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        Ok(session.capture_screen())
+    }
+
+    /// Capture recent scrollback lines for a session.
+    pub fn capture_scrollback(&self, session_id: &str, max_lines: usize) -> Result<Vec<String>> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        Ok(session.capture_scrollback(max_lines))
+    }
+
+    /// Wait for the screen state of a session to change.
+    pub fn wait_for_screen_change(
+        &self,
+        session_id: &str,
+        timeout_ms: u64,
+        match_pattern: Option<&str>,
+    ) -> Result<ScreenSnapshot> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        session.wait_for_screen_change(timeout_ms, match_pattern)
+    }
+
     /// Number of active sessions.
     pub fn len(&self) -> usize {
         self.sessions.read().len()
@@ -224,6 +266,20 @@ impl TerminalManager {
     /// Whether there are no sessions.
     pub fn is_empty(&self) -> bool {
         self.sessions.read().is_empty()
+    }
+
+    /// Feed raw bytes directly into a session's terminal emulator (test only).
+    #[cfg(test)]
+    pub fn inject_emulator_output(&self, session_id: &str, bytes: &[u8]) -> Result<()> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .cloned()
+                .context(format!("Session '{}' not found", session_id))?
+        };
+        session.inject_emulator_output(bytes);
+        Ok(())
     }
 }
 

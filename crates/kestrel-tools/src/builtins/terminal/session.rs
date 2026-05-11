@@ -166,6 +166,9 @@ impl TerminalSession {
             cmd.cwd(dir);
         }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("COLUMNS", cols.to_string());
+        cmd.env("LINES", rows.to_string());
 
         let child = pair.slave.spawn_command(cmd)?;
 

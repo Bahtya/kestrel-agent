@@ -443,6 +443,7 @@ pub struct TerminalScreen {
     alternate: ScreenBuffer,
     active: ActiveBuffer,
     cursor: CursorState,
+    cursor_visible: bool,
     scroll_top: usize,
     scroll_bottom: usize,
     attrs: CellAttributes,
@@ -462,6 +463,7 @@ impl TerminalScreen {
             alternate: ScreenBuffer::new(cols, rows),
             active: ActiveBuffer::Primary,
             cursor: CursorState::new(),
+            cursor_visible: true,
             scroll_top: 0,
             scroll_bottom,
             attrs: CellAttributes::default(),
@@ -574,6 +576,9 @@ impl TerminalScreen {
             TerminalOp::DecPrivateModeSet(mode) => {
                 match *mode {
                     1049 => self.enter_alternate_screen(),
+                    25 => {
+                        self.cursor_visible = false;
+                    }
                     // 2004 = Bracketed Paste — acknowledged but not enforced at screen level.
                     // Input handling in send_input wraps pasted content with \x1b[200~ / \x1b[201~.
                     2004 => {
@@ -593,8 +598,12 @@ impl TerminalScreen {
                 }
             }
             TerminalOp::DecPrivateModeReset(mode) => {
-                if *mode == 1049 {
-                    self.leave_alternate_screen();
+                match *mode {
+                    1049 => self.leave_alternate_screen(),
+                    25 => {
+                        self.cursor_visible = true;
+                    }
+                    _ => {}
                 }
             }
             TerminalOp::SetWindowTitle(title) => {

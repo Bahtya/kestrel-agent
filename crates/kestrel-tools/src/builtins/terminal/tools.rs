@@ -1083,6 +1083,7 @@ pub fn register_terminal_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     /// Create a manager in dangerous mode for testing (allows any shell).
     fn make_tools() -> (
@@ -1112,6 +1113,42 @@ mod tests {
             TerminalCaptureScrollbackTool::new().with_manager(mgr.clone()),
             TerminalWaitForScreenChangeTool::new().with_manager(mgr),
         )
+    }
+
+    async fn wait_for_terminal_ready(
+        send: &TerminalSendInputTool,
+        read: &TerminalReadOutputTool,
+        session_id: &str,
+    ) {
+        let marker = "__KESTREL_TERMINAL_READY__";
+        let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
+
+        send.execute(json!({
+            "session_id": session_id,
+            "input": format!("echo {marker}\n")
+        }))
+        .await
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut output = String::new();
+
+        while Instant::now() < deadline {
+            let remaining_ms = deadline.saturating_duration_since(Instant::now());
+            let chunk = read
+                .execute(json!({
+                    "session_id": session_id,
+                    "timeout_ms": remaining_ms.as_millis().clamp(1, 500) as u64
+                }))
+                .await
+                .unwrap_or_default();
+            output.push_str(&chunk);
+            if output.contains(marker) {
+                return;
+            }
+        }
+
+        panic!("terminal did not become ready within {timeout_ms}ms: {output:?}");
     }
 
     #[test]
@@ -1369,6 +1406,7 @@ mod tests {
         let _ = read
             .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
             .await;
+        wait_for_terminal_ready(&send, &read, &session_id).await;
 
         capture
             .execute(json!({"session_id": session_id}))
@@ -1420,6 +1458,7 @@ mod tests {
         let _ = read
             .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
             .await;
+        wait_for_terminal_ready(&send, &read, &session_id).await;
 
         capture
             .execute(json!({"session_id": session_id}))

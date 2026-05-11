@@ -166,6 +166,9 @@ impl TerminalSession {
             cmd.cwd(dir);
         }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("COLUMNS", cols.to_string());
+        cmd.env("LINES", rows.to_string());
 
         let child = pair.slave.spawn_command(cmd)?;
 
@@ -332,6 +335,12 @@ impl TerminalSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .resize(cols, rows);
+        // Note: COLUMNS/LINES env vars set at spawn are snapshots and cannot be
+        // updated in the child process after creation. The PTY kernel driver
+        // propagates the new size via TIOCSWINSZ (done by m.resize above), and
+        // well-behaved shells/tui apps read the terminal size from the PTY
+        // ioctl or SIGWINCH — not from env vars. The initial env var values
+        // primarily help tools that check env vars at startup (e.g. Ink/chalk).
         self.last_activity.store(epoch_secs(), Ordering::Relaxed);
         Ok(())
     }

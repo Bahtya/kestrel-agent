@@ -58,6 +58,10 @@ pub enum TerminalOp {
     CursorHorizontalAbsolute(u16),
     /// VPA — Vertical Position Absolute.
     CursorVerticalAbsolute(u16),
+    /// CNL — Cursor Next Line (CSI Ps E).
+    CursorNextLine(u16),
+    /// CPL — Cursor Previous Line (CSI Ps F).
+    CursorPreviousLine(u16),
     /// ED — Erase in Display.
     EraseInDisplay(EraseMode),
     /// EL — Erase in Line.
@@ -287,6 +291,8 @@ impl vte::Perform for VtePerformer<'_> {
             'd' => self
                 .ops
                 .push(TerminalOp::CursorVerticalAbsolute(param1(0, 1))),
+            'E' => self.ops.push(TerminalOp::CursorNextLine(param1(0, 1))),
+            'F' => self.ops.push(TerminalOp::CursorPreviousLine(param1(0, 1))),
 
             // Erase
             'J' => self
@@ -1058,5 +1064,43 @@ mod tests {
         emu.flush_parser();
         let ops = emu.take_ops();
         assert_eq!(ops, vec![TerminalOp::Print("pending text".to_string())]);
+    }
+
+    // ─── CNL / CPL tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_parser_cnl() {
+        let ops = parse_bytes(b"\x1b[3E");
+        assert_eq!(ops, vec![TerminalOp::CursorNextLine(3)]);
+    }
+
+    #[test]
+    fn test_parser_cnl_default() {
+        let ops = parse_bytes(b"\x1b[E");
+        assert_eq!(ops, vec![TerminalOp::CursorNextLine(1)]);
+    }
+
+    #[test]
+    fn test_parser_cpl() {
+        let ops = parse_bytes(b"\x1b[5F");
+        assert_eq!(ops, vec![TerminalOp::CursorPreviousLine(5)]);
+    }
+
+    #[test]
+    fn test_parser_cpl_default() {
+        let ops = parse_bytes(b"\x1b[F");
+        assert_eq!(ops, vec![TerminalOp::CursorPreviousLine(1)]);
+    }
+
+    #[test]
+    fn test_parser_dectcem() {
+        let ops = parse_bytes(b"\x1b[?25l\x1b[?25h");
+        assert_eq!(
+            ops,
+            vec![
+                TerminalOp::DecPrivateModeReset(25), // ?25l = DECTCEM reset (hide cursor)
+                TerminalOp::DecPrivateModeSet(25),   // ?25h = DECTCEM set (show cursor)
+            ]
+        );
     }
 }

@@ -529,6 +529,16 @@ impl TerminalScreen {
                 let max_rows = self.active_buf().rows;
                 self.cursor.row = ((*row as usize).max(1) - 1).min(max_rows.saturating_sub(1));
             }
+            TerminalOp::CursorNextLine(n) => {
+                let max_rows = self.active_buf().rows;
+                self.cursor.row = (self.cursor.row + *n as usize)
+                    .min(max_rows.saturating_sub(1));
+                self.cursor.col = 0;
+            }
+            TerminalOp::CursorPreviousLine(n) => {
+                self.cursor.row = self.cursor.row.saturating_sub(*n as usize);
+                self.cursor.col = 0;
+            }
             TerminalOp::EraseInDisplay(mode) => {
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 self.active_buf_mut().erase_display(row, col, *mode);

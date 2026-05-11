@@ -58,6 +58,10 @@ pub enum TerminalOp {
     CursorHorizontalAbsolute(u16),
     /// VPA — Vertical Position Absolute.
     CursorVerticalAbsolute(u16),
+    /// CNL — Cursor Next Line (CSI Ps E).
+    CursorNextLine(u16),
+    /// CPL — Cursor Previous Line (CSI Ps F).
+    CursorPreviousLine(u16),
     /// ED — Erase in Display.
     EraseInDisplay(EraseMode),
     /// EL — Erase in Line.
@@ -287,6 +291,12 @@ impl vte::Perform for VtePerformer<'_> {
             'd' => self
                 .ops
                 .push(TerminalOp::CursorVerticalAbsolute(param1(0, 1))),
+            'E' => self
+                .ops
+                .push(TerminalOp::CursorNextLine(param1(0, 1))),
+            'F' => self
+                .ops
+                .push(TerminalOp::CursorPreviousLine(param1(0, 1))),
 
             // Erase
             'J' => self

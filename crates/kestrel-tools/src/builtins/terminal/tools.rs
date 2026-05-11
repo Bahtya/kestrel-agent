@@ -1356,7 +1356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_screen_change_detects_output() {
-        let (_, create, send, _, _, kill, _, _, capture, _, wait) = make_tools();
+        let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
 
         let create_result = create.execute(json!({})).await.unwrap();
         let session_id = create_result
@@ -1364,6 +1364,10 @@ mod tests {
             .nth(1)
             .expect("should have session id")
             .to_string();
+
+        let _ = read
+            .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
+            .await;
 
         capture
             .execute(json!({"session_id": session_id}))
@@ -1402,7 +1406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_screen_change_with_pattern() {
-        let (_, create, send, _, _, kill, _, _, capture, _, wait) = make_tools();
+        let (_, create, send, read, _, kill, _, _, capture, _, wait) = make_tools();
 
         let create_result = create.execute(json!({})).await.unwrap();
         let session_id = create_result
@@ -1410,6 +1414,10 @@ mod tests {
             .nth(1)
             .expect("should have session id")
             .to_string();
+
+        let _ = read
+            .execute(json!({"session_id": session_id, "timeout_ms": 3000}))
+            .await;
 
         capture
             .execute(json!({"session_id": session_id}))

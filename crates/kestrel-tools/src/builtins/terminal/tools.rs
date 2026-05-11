@@ -1115,6 +1115,14 @@ mod tests {
         )
     }
 
+    fn test_session_args() -> Value {
+        if cfg!(windows) {
+            json!({ "shell": "cmd.exe" })
+        } else {
+            json!({})
+        }
+    }
+
     async fn wait_for_terminal_ready(
         send: &TerminalSendInputTool,
         send_key: &TerminalSendKeyTool,
@@ -1343,7 +1351,7 @@ mod tests {
         let (_, create, send, _, _, kill, _, _, capture, scrollback, _) = make_tools();
 
         // Create session
-        let create_result = create.execute(json!({})).await.unwrap();
+        let create_result = create.execute(test_session_args()).await.unwrap();
         let session_id = create_result
             .split('\'')
             .nth(1)
@@ -1404,7 +1412,7 @@ mod tests {
         let (_, create, send, read, _, kill, _, send_key, capture, _, wait) = make_tools();
         let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
-        let create_result = create.execute(json!({})).await.unwrap();
+        let create_result = create.execute(test_session_args()).await.unwrap();
         let session_id = create_result
             .split('\'')
             .nth(1)
@@ -1463,7 +1471,7 @@ mod tests {
         let (_, create, send, read, _, kill, _, send_key, capture, _, wait) = make_tools();
         let timeout_ms = if cfg!(windows) { 15_000 } else { 3_000 };
 
-        let create_result = create.execute(json!({})).await.unwrap();
+        let create_result = create.execute(test_session_args()).await.unwrap();
         let session_id = create_result
             .split('\'')
             .nth(1)

@@ -181,13 +181,6 @@ impl TerminalSession {
             cmd.cwd(dir);
         }
 
-        // Windows: set UTF-8 codepage (65001) for consistent output encoding.
-        #[cfg(target_os = "windows")]
-        {
-            cmd.env("CHCP", "65001");
-            debug!(session_id = %id, "Set UTF-8 codepage for Windows PTY");
-        }
-
         let child = pair.slave.spawn_command(cmd)?;
 
         let master = pair.master;
@@ -327,9 +320,6 @@ impl TerminalSession {
     }
 
     /// Resize the PTY and synchronize internal dimensions.
-    ///
-    /// On Windows ConPTY, resize can sometimes be silently ignored. We retry
-    /// up to 3 times with a short delay to work around this known quirk.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         debug!(session_id = %self.id, cols = cols, rows = rows, "Resizing PTY");
         let master = self.master.lock().unwrap_or_else(|e| e.into_inner());
@@ -340,24 +330,7 @@ impl TerminalSession {
                 pixel_width: 0,
                 pixel_height: 0,
             };
-            let mut attempt = 0;
-            loop {
-                match m.resize(size) {
-                    Ok(()) => break,
-                    Err(e) => {
-                        attempt += 1;
-                        if attempt >= 3 {
-                            return Err(e).context("Failed to resize PTY after 3 attempts");
-                        }
-                        debug!(
-                            session_id = %self.id,
-                            attempt,
-                            "PTY resize failed, retrying"
-                        );
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                }
-            }
+            m.resize(size).context("Failed to resize PTY")?;
         }
         self.cols.store(cols, Ordering::Relaxed);
         self.rows.store(rows, Ordering::Relaxed);

@@ -1725,24 +1725,20 @@ mod tests {
 
     #[test]
     fn test_fixture_partial_utf8_across_feeds() {
-        let mut screen = TerminalScreen::new(20, 5);
-        // Simulate feeding the 3-byte UTF-8 你 (0xE4 0xBD 0xA0) in two chunks
+        // Use TerminalEmulatorHandle to preserve vte parser state across feeds
+        use crate::builtins::terminal::emulator::TerminalEmulatorHandle;
+        let mut emu = TerminalEmulatorHandle::new(20, 5);
 
         // First feed: only 2 bytes of 你 — vte parser buffers internally
-        let ops1 = parse_bytes(&[0xE4, 0xBD]);
-        for op in &ops1 {
-            screen.process_op(op);
-        }
+        emu.feed_bytes(&[0xE4, 0xBD]);
         // No complete chars yet — screen should be empty
-        let snap = screen.snapshot();
+        let snap = emu.screen().snapshot();
         assert_eq!(snap.lines[0], "");
 
-        // Second feed: the last byte
-        let ops2 = parse_bytes(&[0xA0]);
-        for op in &ops2 {
-            screen.process_op(op);
-        }
-        let snap = screen.snapshot();
+        // Second feed: the last byte completes 你
+        emu.feed_bytes(&[0xA0]);
+        emu.flush_parser();
+        let snap = emu.screen().snapshot();
         assert_eq!(snap.lines[0], "你");
     }
 

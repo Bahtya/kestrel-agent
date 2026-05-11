@@ -2134,7 +2134,12 @@ fn validate_write_path(path: &str) -> Result<(), mlua::Error> {
     };
 
     let canonical_str = canonical.to_string_lossy();
-    let normalized = canonical_str.replace('\\', "/").to_lowercase();
+    let mut normalized = canonical_str.replace('\\', "/").to_lowercase();
+
+    // Strip Windows UNC prefix (\\?\) left by std::fs::canonicalize
+    if normalized.starts_with("//?/") {
+        normalized = normalized[4..].to_string();
+    }
 
     // Check for blocked system paths against the resolved canonical path
     {

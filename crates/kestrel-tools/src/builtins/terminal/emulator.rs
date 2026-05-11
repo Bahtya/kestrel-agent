@@ -467,6 +467,7 @@ impl TerminalEmulatorHandle {
         {
             let mut performer = VtePerformer::new(&mut ops);
             self.parser.advance(&mut performer, bytes);
+            performer.flush_print();
         }
         for op in &ops {
             self.screen.process_op(op);

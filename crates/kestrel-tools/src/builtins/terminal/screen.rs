@@ -7,6 +7,7 @@
 
 use super::emulator::{EraseMode, TerminalOp};
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::hash::Hasher;
 use tracing::{debug, warn};
 
@@ -445,7 +446,7 @@ pub struct TerminalScreen {
     scroll_top: usize,
     scroll_bottom: usize,
     attrs: CellAttributes,
-    scrollback: Vec<Vec<Cell>>,
+    scrollback: VecDeque<Vec<Cell>>,
     max_scrollback: usize,
     window_title: String,
 }
@@ -464,7 +465,7 @@ impl TerminalScreen {
             scroll_top: 0,
             scroll_bottom,
             attrs: CellAttributes::default(),
-            scrollback: Vec::new(),
+            scrollback: VecDeque::new(),
             max_scrollback: DEFAULT_MAX_SCROLLBACK,
             window_title: String::new(),
         }
@@ -483,7 +484,7 @@ impl TerminalScreen {
     pub fn set_max_scrollback(&mut self, max: usize) {
         self.max_scrollback = max;
         while self.scrollback.len() > self.max_scrollback {
-            self.scrollback.remove(0);
+            self.scrollback.pop_front();
         }
     }
 
@@ -741,8 +742,9 @@ impl TerminalScreen {
     /// exceeds the available scrollback, all lines are returned.
     pub fn scrollback_lines(&self, max_lines: usize) -> Vec<String> {
         let skip = self.scrollback.len().saturating_sub(max_lines);
-        self.scrollback[skip..]
+        self.scrollback
             .iter()
+            .skip(skip)
             .map(|row| {
                 let mut s = String::with_capacity(row.len());
                 let mut col = 0;
@@ -822,8 +824,9 @@ impl TerminalScreen {
                 buf.cells[idx + 1] = Cell::default();
             }
 
-            if w == 2 && col + 1 < max_cols && buf.cells[idx + 1].wide {
-                buf.cells[idx] = Cell::default();
+            // For wide chars (CJK), also clear the continuation cell if it
+            // was the leading half of another wide char.
+            if w == 2 && col + 1 < max_cols {
                 buf.cells[idx + 1] = Cell::default();
             }
         }
@@ -849,7 +852,6 @@ impl TerminalScreen {
     }
 
     fn linefeed(&mut self) {
-        self.cursor.col = 0;
         if self.cursor.row == self.scroll_bottom {
             self.scroll_up(1);
         } else if self.cursor.row < self.active_buf().rows - 1 {
@@ -899,7 +901,7 @@ impl TerminalScreen {
                 {
                     line.pop();
                 }
-                self.scrollback.push(line);
+                self.scrollback.push_back(line);
                 // Enforce scrollback limit
                 while self.scrollback.len() > self.max_scrollback {
                     self.scrollback.remove(0);
@@ -1746,8 +1748,6 @@ mod tests {
 
     #[test]
     fn test_fixture_partial_ansi_across_feeds() {
-        let mut screen = TerminalScreen::new(20, 5);
-
         // Use TerminalEmulatorHandle to test cross-read state persistence
         use crate::builtins::terminal::emulator::TerminalEmulatorHandle;
         let mut emu = TerminalEmulatorHandle::new(20, 5);

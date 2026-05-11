@@ -40,7 +40,12 @@ fn require_manager(mgr: &Option<Arc<TerminalManager>>) -> Result<Arc<TerminalMan
 fn truncate_output(output: String) -> String {
     if output.len() > MAX_TOOL_OUTPUT_LENGTH {
         let mut truncated = output;
-        truncated.truncate(MAX_TOOL_OUTPUT_LENGTH);
+        let pos = truncated
+            .char_indices()
+            .nth(MAX_TOOL_OUTPUT_LENGTH)
+            .map(|(i, _)| i)
+            .unwrap_or(truncated.len());
+        truncated.truncate(pos);
         truncated.push_str("\n... (output truncated)");
         truncated
     } else {

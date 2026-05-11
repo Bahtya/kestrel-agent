@@ -118,21 +118,6 @@ pub struct TerminalSession {
     reader_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-// Safety: TerminalSession implements Sync because all interior mutability
-// is protected by Mutex or atomic operations:
-// - id, shell, cwd: String, inherently Send+Sync
-// - cols, rows, last_activity: AtomicU16/AtomicU64 — atomics provide Sync
-// - master: Mutex<Option<Box<dyn MasterPty + Send>>> — Mutex provides Sync
-// - child: Mutex<Option<Box<dyn Child + Send + Sync>>> — Mutex provides Sync
-// - writer: Mutex<Box<dyn Write + Send>> — Mutex provides Sync
-// - raw_buffer: Arc<Mutex<RingBuffer>> — Arc+Mutex provides Sync
-// - utf8_decoder: Arc<Mutex<IncrementalUtf8Decoder>> — Arc+Mutex provides Sync
-// - decoded_buffer: Arc<Mutex<String>> — Arc+Mutex provides Sync
-// - emulator: Arc<Mutex<TerminalEmulatorHandle>> — Arc+Mutex provides Sync
-// - alive: Arc<AtomicBool> — Arc+Atomic provides Sync
-// - reader_handle: Option<JoinHandle<()>> — JoinHandle is Send+Sync (Rust 1.72+)
-unsafe impl Sync for TerminalSession {}
-
 fn epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -246,8 +231,16 @@ impl TerminalSession {
 
     /// Write input bytes to the PTY (typed by the "user").
     pub fn send_input(&self, input: &str) -> Result<()> {
+        const MAX_INPUT_SIZE: usize = 64 * 1024;
         if !self.alive.load(Ordering::Relaxed) {
             anyhow::bail!("Session '{}' is not alive", self.id);
+        }
+        if input.len() > MAX_INPUT_SIZE {
+            anyhow::bail!(
+                "Input too large: {} bytes (max {})",
+                input.len(),
+                MAX_INPUT_SIZE
+            );
         }
         debug!(session_id = %self.id, input_len = input.len(), "Writing input to PTY");
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());

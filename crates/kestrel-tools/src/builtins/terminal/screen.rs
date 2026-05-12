@@ -1464,13 +1464,19 @@ mod tests {
         s.process_op(&TerminalOp::Print("A你".to_string()));
         let snap = s.snapshot();
         assert_eq!(snap.lines[0], "A你");
-        // Now "你" at col 1 won't fit (need 2 cols, only 2 remaining) — but it does fit
         // Test wrap: "AB你" — A(1) B(1) = 2, 你(2) won't fit (only 1 col left) — wraps
         let mut s2 = TerminalScreen::new(3, 2);
-        s2.process_op(&TerminalOp::Print("AB你".to_string()));
+        // Print one char at a time to verify each step
+        s2.process_op(&TerminalOp::Print("A".to_string()));
+        assert_eq!(s2.cursor.col, 1, "After A, col should be 1");
+        s2.process_op(&TerminalOp::Print("B".to_string()));
+        assert_eq!(s2.cursor.col, 2, "After B, col should be 2");
+        let snap_after_b = s2.snapshot();
+        assert_eq!(snap_after_b.lines[0], "AB", "After AB, line 0 should be 'AB'");
+        s2.process_op(&TerminalOp::Print("你".to_string()));
         let snap2 = s2.snapshot();
-        assert_eq!(snap2.lines[0], "AB");
-        assert_eq!(snap2.lines[1], "你");
+        assert_eq!(snap2.lines[0], "AB", "Final line 0 should be 'AB'");
+        assert_eq!(snap2.lines[1], "你", "Final line 1 should be '你'");
     }
 
     // ─── Scroll tests ──────────────────────────────────────────

@@ -392,8 +392,6 @@ pub fn require_admin() -> Result<()> {
 /// If the service is not yet registered with the SCM, it will be
 /// auto-installed before starting.
 pub fn service_start(service_name: &str, display_name: &str) -> Result<()> {
-    require_admin()?;
-
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -452,6 +450,7 @@ pub fn service_stop(service_name: &str) -> Result<()> {
 
 /// Restart the kestrel Windows service.
 pub fn service_restart(service_name: &str, display_name: &str) -> Result<()> {
+    require_admin()?;
     // Try to stop first — ignore error if not running
     let _ = service_stop(service_name);
     service_start(service_name, display_name)

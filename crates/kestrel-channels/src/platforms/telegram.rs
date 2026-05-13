@@ -1942,7 +1942,7 @@ impl BaseChannel for TelegramChannel {
         let (text, parse_mode) = Self::prepare_outbound_text(content);
         if text.len() <= 4096 {
             return self
-                .send_single_message(chat_id, &text, parse_mode, reply_to)
+                .send_single_message(chat_id, &text, &parse_mode, reply_to)
                 .await;
         }
 
@@ -1959,7 +1959,7 @@ impl BaseChannel for TelegramChannel {
             };
             // Chunk is already in MarkdownV2; reuse the same parse_mode.
             let result = self
-                .send_single_message(chat_id, chunk, parse_mode, reply)
+                .send_single_message(chat_id, chunk, &parse_mode, reply)
                 .await?;
             if !result.success {
                 return Ok(result);
@@ -2198,7 +2198,7 @@ impl TelegramChannel {
         &self,
         chat_id: &str,
         text: &str,
-        parse_mode: Option<String>,
+        parse_mode: &Option<String>,
         reply_to: Option<&str>,
     ) -> Result<SendResult> {
         let chat_id_num: i64 = match chat_id.parse() {
@@ -2217,7 +2217,7 @@ impl TelegramChannel {
         let body = SendMessageBody {
             chat_id: chat_id_num,
             text: text.to_string(),
-            parse_mode,
+            parse_mode: parse_mode.clone(),
             reply_to_message_id: reply_to_id,
             reply_markup: None,
         };

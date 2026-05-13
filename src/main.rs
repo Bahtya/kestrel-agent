@@ -242,7 +242,8 @@ fn main() -> Result<()> {
             };
             match action {
                 commands::daemon::DaemonAction::Start => {
-                    let _handles = commands::daemon::handle_daemon_command(action, config.clone())?;
+                    let handles =
+                        commands::daemon::handle_daemon_command(action, config.clone())?;
 
                     // Unix: fork happened inside handle_daemon_command; we are the
                     // daemon process and must launch the gateway.
@@ -250,8 +251,8 @@ fn main() -> Result<()> {
                     // handle_daemon_command returns None — nothing to do here.
                     #[cfg(target_family = "unix")]
                     {
-                        let _handles =
-                            handles.expect("Start always returns Some(DaemonHandles) on Unix");
+                        let _handles = handles
+                            .expect("Start always returns Some(DaemonHandles) on Unix");
 
                         kestrel_daemon::signal::install_early_sighup_handler();
 
@@ -267,6 +268,8 @@ fn main() -> Result<()> {
 
                         result?;
                     }
+                    #[cfg(target_family = "windows")]
+                    let _ = handles;
                 }
                 commands::daemon::DaemonAction::Run => {
                     // Internal entry point — on Windows, called by SCM.

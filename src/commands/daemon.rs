@@ -68,6 +68,9 @@ mod unix_impl {
             DaemonAction::Stop => do_stop(&config).map(|()| None),
             DaemonAction::Restart => do_restart(&config).map(|()| None),
             DaemonAction::Status => do_status(&config).map(|()| None),
+            DaemonAction::Run => {
+                bail!("daemon run is handled internally and should not be called directly")
+            }
         }
     }
 
@@ -274,6 +277,7 @@ mod windows_impl {
 // ── Public re-exports (platform-selected) ──────────────────────────────
 
 #[cfg(target_family = "unix")]
+#[allow(unused_imports)]
 pub use unix_impl::{handle_daemon_command, DaemonHandles};
 
 #[cfg(target_family = "windows")]

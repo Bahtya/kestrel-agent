@@ -48,10 +48,7 @@ enum Commands {
         channels: Vec<String>,
     },
 
-    /// Start the heartbeat service (periodic task checking).
-    Heartbeat,
-
-    /// Show health check status from the heartbeat service.
+    /// Show health check status.
     Health,
 
     /// Cron job management commands.
@@ -200,10 +197,6 @@ fn main() -> Result<()> {
         Commands::Gateway { channels } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::gateway::run(config, channels, cli.dangerous))?;
-        }
-        Commands::Heartbeat => {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::heartbeat::run(config, cli.dangerous))?;
         }
         Commands::Health => {
             commands::health::check(&config)?;

@@ -8,7 +8,6 @@ pub mod doctor;
 pub mod feishu_onboarding;
 pub mod gateway;
 pub mod health;
-pub mod heartbeat;
 pub mod setup;
 #[allow(dead_code)]
 pub mod setup_weixin;

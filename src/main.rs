@@ -85,17 +85,10 @@ enum Commands {
     /// Run comprehensive system diagnostics.
     Doctor,
 
-    /// Daemon management commands (Unix only).
+    /// Daemon management commands.
     Daemon {
         #[command(subcommand)]
         subcommand: DaemonSubcommand,
-    },
-
-    /// Windows Service management commands (Windows only).
-    #[cfg(windows)]
-    Service {
-        #[command(subcommand)]
-        action: ServiceAction,
     },
 }
 
@@ -157,7 +150,7 @@ enum SetupSubcommand {
 
 #[derive(Subcommand)]
 enum DaemonSubcommand {
-    /// Start the daemon (daemonize then run gateway).
+    /// Start the daemon.
     Start,
 
     /// Stop the running daemon.
@@ -168,19 +161,9 @@ enum DaemonSubcommand {
 
     /// Check daemon status.
     Status,
-}
 
-/// Windows Service management actions (Windows only).
-#[cfg(windows)]
-#[derive(Subcommand)]
-enum ServiceAction {
-    /// Install kestrel as a Windows Service.
-    Install,
-
-    /// Uninstall the Windows Service.
-    Uninstall,
-
-    /// Run as a Windows Service (called by SCM internally).
+    /// Run as daemon/service (internal, called by the system).
+    #[command(hide = true)]
     Run,
 }
 
@@ -273,50 +256,40 @@ fn main() -> Result<()> {
                 DaemonSubcommand::Stop => commands::daemon::DaemonAction::Stop,
                 DaemonSubcommand::Restart => commands::daemon::DaemonAction::Restart,
                 DaemonSubcommand::Status => commands::daemon::DaemonAction::Status,
+                DaemonSubcommand::Run => commands::daemon::DaemonAction::Run,
             };
             match action {
                 commands::daemon::DaemonAction::Start => {
-                    // Fork happens HERE — before any tokio runtime exists.
-                    let _handles = commands::daemon::handle_daemon_command(action, config.clone())?
-                        .expect("Start always returns Some(DaemonHandles)");
+                    let _handles = commands::daemon::handle_daemon_command(action, config.clone())?;
 
-                    // Install SIGHUP ignore handler before tokio runtime — closes the
-                    // window where default SIGHUP would kill the daemon during startup
-                    #[cfg(target_family = "unix")]
-                    kestrel_daemon::signal::install_early_sighup_handler();
-
-                    // Now start tokio runtime in the daemon process
-                    let rt = tokio::runtime::Runtime::new()?;
-                    let result = rt.block_on(commands::gateway::run(config, vec![], cli.dangerous));
-
-                    // Drop log_guard first to flush remaining log lines,
-                    // then pid_file releases the flock and cleans up.
+                    // Unix: fork happened inside handle_daemon_command; we are the
+                    // daemon process and must launch the gateway.
+                    // Windows: service was started via SCM in a separate process;
+                    // handle_daemon_command returns None — nothing to do here.
                     #[cfg(target_family = "unix")]
                     {
+                        let _handles =
+                            handles.expect("Start always returns Some(DaemonHandles) on Unix");
+
+                        kestrel_daemon::signal::install_early_sighup_handler();
+
+                        let rt = tokio::runtime::Runtime::new()?;
+                        let result =
+                            rt.block_on(commands::gateway::run(config, vec![], cli.dangerous));
+
                         drop(_handles.comm_log_guard);
                         drop(_handles.log_guard);
                         if let Err(e) = _handles.pid_file.clean() {
                             eprintln!("Failed to clean PID file: {e}");
                         }
-                    }
 
-                    result?;
+                        result?;
+                    }
                 }
-                _ => {
-                    commands::daemon::handle_daemon_command(action, config)?;
-                }
-            }
-        }
-        #[cfg(windows)]
-        Commands::Service { action } => {
-            match action {
-                ServiceAction::Install => {
-                    kestrel_daemon::windows_service::install_service("kestrel", "Kestrel Agent")?;
-                }
-                ServiceAction::Uninstall => {
-                    kestrel_daemon::windows_service::uninstall_service("kestrel")?;
-                }
-                ServiceAction::Run => {
+                commands::daemon::DaemonAction::Run => {
+                    // Internal entry point — on Windows, called by SCM.
+                    // On Unix this should never be reached.
+                    #[cfg(windows)]
                     kestrel_daemon::windows_service::run_as_service(move |ctx| {
                         ctx.report_running()?;
 
@@ -324,15 +297,16 @@ fn main() -> Result<()> {
                         let gateway =
                             rt.spawn(commands::gateway::run(config, vec![], cli.dangerous));
 
-                        // Block until SCM sends Stop/Shutdown
                         let _ = ctx.wait_for_shutdown();
 
-                        // Cancel gateway and allow graceful shutdown
                         gateway.abort();
                         rt.shutdown_timeout(std::time::Duration::from_secs(10));
 
                         Ok(())
                     })?;
+                }
+                _ => {
+                    commands::daemon::handle_daemon_command(action, config)?;
                 }
             }
         }

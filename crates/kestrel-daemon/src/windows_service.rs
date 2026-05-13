@@ -358,6 +358,129 @@ impl ServiceContext {
 }
 
 // ---------------------------------------------------------------------------
+// Admin elevation check
+// ---------------------------------------------------------------------------
+
+const ADMIN_MESSAGE: &str = "\
+需要管理员权限。
+
+请以管理员身份运行终端后重试：
+  1. 右键点击终端（PowerShell 或 CMD）
+  2. 选择「以管理员身份运行」
+  3. 重新执行 kestrel daemon 命令";
+
+/// Check if the current process is running with Administrator privileges.
+///
+/// Attempts to open the Service Control Manager with `CREATE_SERVICE` access,
+/// which requires elevation. If the check fails, returns an error with a
+/// helpful Chinese message explaining how to run as Administrator.
+pub fn require_admin() -> Result<()> {
+    ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .with_context(|| ADMIN_MESSAGE)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// High-level daemon management (start / stop / restart / status)
+// ---------------------------------------------------------------------------
+
+/// Start the kestrel Windows service.
+///
+/// If the service is not yet registered with the SCM, it will be
+/// auto-installed before starting.
+pub fn service_start(service_name: &str, display_name: &str) -> Result<()> {
+    require_admin()?;
+
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .with_context(|| ADMIN_MESSAGE)?;
+
+    let service = match manager.open_service(service_name, ServiceAccess::START) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("Service not registered. Installing...");
+            let executable_path = std::env::current_exe().context("get current executable path")?;
+            let service_info = ServiceInfo {
+                name: OsString::from(service_name),
+                display_name: OsString::from(display_name),
+                service_type: SERVICE_TYPE,
+                start_type: ServiceStartType::AutoStart,
+                error_control: ServiceErrorControl::Normal,
+                executable_path,
+                launch_arguments: vec![OsString::from("daemon"), OsString::from("run")],
+                dependencies: vec![],
+                account_name: None,
+                account_password: None,
+            };
+            manager
+                .create_service(&service_info, ServiceAccess::START)
+                .context("create service")?;
+            println!("Service installed.");
+            // Re-open after create — the returned handle from create_service may
+            // not have the right access level on all Windows versions.
+            let mgr = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+            mgr.open_service(service_name, ServiceAccess::START)
+                .context("open service after install")?
+        }
+    };
+
+    service.start::<&str>(&[])?;
+    println!("Service '{service_name}' started.");
+    Ok(())
+}
+
+/// Stop the kestrel Windows service.
+pub fn service_stop(service_name: &str) -> Result<()> {
+    require_admin()?;
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .with_context(|| ADMIN_MESSAGE)?;
+
+    let service = manager
+        .open_service(service_name, ServiceAccess::STOP)
+        .with_context(|| format!("Service '{service_name}' is not registered"))?;
+
+    service.stop()?;
+    println!("Service '{service_name}' stopped.");
+    Ok(())
+}
+
+/// Restart the kestrel Windows service.
+pub fn service_restart(service_name: &str, display_name: &str) -> Result<()> {
+    // Try to stop first — ignore error if not running
+    let _ = service_stop(service_name);
+    service_start(service_name, display_name)
+}
+
+/// Query and print the status of the kestrel Windows service.
+pub fn service_status(service_name: &str) -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("connect to Service Control Manager")?;
+
+    let service = manager
+        .open_service(service_name, ServiceAccess::QUERY_STATUS)
+        .with_context(|| format!("Service '{service_name}' is not registered"))?;
+
+    let status = service.query_status()?;
+    let state = match status.current_state {
+        ServiceState::Running => "running",
+        ServiceState::Stopped => "stopped",
+        ServiceState::StartPending => "starting",
+        ServiceState::StopPending => "stopping",
+        ServiceState::PausePending => "pausing",
+        ServiceState::Paused => "paused",
+        ServiceState::ContinuePending => "resuming",
+    };
+    println!("Service '{service_name}' is {state}.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Service installation / uninstallation
 // ---------------------------------------------------------------------------
 
@@ -378,11 +501,13 @@ impl ServiceContext {
 /// - A service with the same name already exists.
 /// - The current executable path cannot be determined.
 pub fn install_service(service_name: &str, display_name: &str) -> Result<()> {
+    require_admin()?;
+
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )
-    .context("connect to Service Control Manager (are you running as Administrator?)")?;
+    .with_context(|| ADMIN_MESSAGE)?;
 
     let executable_path = std::env::current_exe().context("get current executable path")?;
 
@@ -393,7 +518,7 @@ pub fn install_service(service_name: &str, display_name: &str) -> Result<()> {
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
         executable_path,
-        launch_arguments: vec![OsString::from("service"), OsString::from("run")],
+        launch_arguments: vec![OsString::from("daemon"), OsString::from("run")],
         dependencies: vec![],
         account_name: None, // Run as LocalSystem by default
         account_password: None,
@@ -404,7 +529,7 @@ pub fn install_service(service_name: &str, display_name: &str) -> Result<()> {
         .context("create service")?;
 
     println!("Service '{service_name}' installed successfully.");
-    println!("Start it with: sc start {service_name}");
+    println!("Start it with: kestrel daemon start");
 
     Ok(())
 }
@@ -421,8 +546,10 @@ pub fn install_service(service_name: &str, display_name: &str) -> Result<()> {
 ///
 /// Returns an error if the SCM cannot be reached or the service doesn't exist.
 pub fn uninstall_service(service_name: &str) -> Result<()> {
+    require_admin()?;
+
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .context("connect to Service Control Manager (are you running as Administrator?)")?;
+        .with_context(|| ADMIN_MESSAGE)?;
 
     let service = manager
         .open_service(service_name, ServiceAccess::DELETE | ServiceAccess::STOP)

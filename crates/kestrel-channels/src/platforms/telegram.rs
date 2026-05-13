@@ -1935,8 +1935,10 @@ impl BaseChannel for TelegramChannel {
     ) -> Result<SendResult> {
         debug!("Sending Telegram message to chat {}", chat_id);
 
-        // Defensive split: if content exceeds 4096 chars after markdown
-        // conversion, split on newline boundaries and send multiple messages.
+        // Convert to MarkdownV2 first, then split the converted text.
+        // Previously we split first then converted each chunk, which caused
+        // the MarkdownV2 escaping to inflate chunk sizes beyond the 4096-char
+        // Telegram limit, silently dropping the tail of long messages.
         let (text, parse_mode) = Self::prepare_outbound_text(content);
         if text.len() <= 4096 {
             return self
@@ -1944,8 +1946,8 @@ impl BaseChannel for TelegramChannel {
                 .await;
         }
 
-        // Split original content (pre-conversion) and send each chunk.
-        let chunks = crate::split_message(content, 4096);
+        // Split the already-converted text so each chunk stays within limit.
+        let chunks = crate::split_message(&text, 4096);
         let mut last_result: Option<SendResult> = None;
         let mut first = true;
         for chunk in &chunks {
@@ -1955,9 +1957,9 @@ impl BaseChannel for TelegramChannel {
             } else {
                 None
             };
-            let (chunk_text, chunk_parse_mode) = Self::prepare_outbound_text(chunk);
+            // Chunk is already in MarkdownV2; reuse the same parse_mode.
             let result = self
-                .send_single_message(chat_id, &chunk_text, chunk_parse_mode, reply)
+                .send_single_message(chat_id, chunk, parse_mode, reply)
                 .await?;
             if !result.success {
                 return Ok(result);

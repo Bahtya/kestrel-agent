@@ -1351,6 +1351,7 @@ log_format: text
             base_url: None,
             model: None,
             no_proxy: None,
+            model_timeouts: Default::default(),
         };
         assert!(entry.api_key.is_none());
         assert!(entry.base_url.is_none());

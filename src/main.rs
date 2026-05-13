@@ -48,13 +48,6 @@ enum Commands {
         channels: Vec<String>,
     },
 
-    /// Start the OpenAI-compatible API server.
-    Serve {
-        /// Port to listen on. Overrides config.api.port.
-        #[arg(short, long)]
-        port: Option<u16>,
-    },
-
     /// Start the heartbeat service (periodic task checking).
     Heartbeat,
 
@@ -207,10 +200,6 @@ fn main() -> Result<()> {
         Commands::Gateway { channels } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::gateway::run(config, channels, cli.dangerous))?;
-        }
-        Commands::Serve { port } => {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::serve::run(config, port, cli.dangerous))?;
         }
         Commands::Heartbeat => {
             let rt = tokio::runtime::Runtime::new()?;

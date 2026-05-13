@@ -1,23 +1,25 @@
 //! Daemon subcommand — manage the kestrel background daemon.
 //!
-//! Provides `start`, `stop`, `restart`, and `status` actions for controlling
-//! the daemonized kestrel process.
+//! Provides `start`, `stop`, `restart`, `status`, and `run` actions for
+//! controlling the daemonized kestrel process.
 //!
 //! On Unix, this uses double-fork daemonization, PID files with `flock`, and
-//! signal-based process management. On non-Unix platforms, daemon commands
-//! return an error directing users to platform-native service management.
+//! signal-based process management. On Windows, this uses the Windows Service
+//! Control Manager (SCM) for service lifecycle management.
 
 /// Actions for the `daemon` subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonAction {
-    /// Daemonize the process and run the gateway.
+    /// Start the daemon (Unix: fork+daemonize; Windows: start service via SCM).
     Start,
-    /// Send SIGTERM to the running daemon and wait for exit.
+    /// Stop the daemon (Unix: SIGTERM; Windows: stop service via SCM).
     Stop,
     /// Stop then start the daemon.
     Restart,
     /// Check if the daemon is running.
     Status,
+    /// Run as a daemon/service internally (called by the system, not the user).
+    Run,
 }
 
 // ── Unix implementation ────────────────────────────────────────────────
@@ -66,6 +68,9 @@ mod unix_impl {
             DaemonAction::Stop => do_stop(&config).map(|()| None),
             DaemonAction::Restart => do_restart(&config).map(|()| None),
             DaemonAction::Status => do_status(&config).map(|()| None),
+            DaemonAction::Run => {
+                bail!("daemon run is handled internally and should not be called directly")
+            }
         }
     }
 
@@ -224,25 +229,48 @@ mod unix_impl {
     }
 }
 
-// ── Non-Unix fallback ──────────────────────────────────────────────────
+// ── Windows implementation ─────────────────────────────────────────────
 
-#[cfg(not(target_family = "unix"))]
-mod fallback_impl {
+#[cfg(target_family = "windows")]
+mod windows_impl {
     use anyhow::{bail, Result};
     use kestrel_config::Config;
 
     use super::DaemonAction;
 
+    const SERVICE_NAME: &str = "kestrel";
+    const SERVICE_DISPLAY_NAME: &str = "Kestrel Agent";
+
     pub struct DaemonHandles;
 
     pub fn handle_daemon_command(
-        _action: DaemonAction,
+        action: DaemonAction,
         _config: Config,
     ) -> Result<Option<DaemonHandles>> {
-        bail!(
-            "Daemon commands are not supported on this platform. \
-             Use `kestrel service` commands instead."
-        )
+        match action {
+            DaemonAction::Start => {
+                kestrel_daemon::windows_service::service_start(SERVICE_NAME, SERVICE_DISPLAY_NAME)?;
+                Ok(None)
+            }
+            DaemonAction::Stop => {
+                kestrel_daemon::windows_service::service_stop(SERVICE_NAME)?;
+                Ok(None)
+            }
+            DaemonAction::Restart => {
+                kestrel_daemon::windows_service::service_restart(
+                    SERVICE_NAME,
+                    SERVICE_DISPLAY_NAME,
+                )?;
+                Ok(None)
+            }
+            DaemonAction::Status => {
+                kestrel_daemon::windows_service::service_status(SERVICE_NAME)?;
+                Ok(None)
+            }
+            DaemonAction::Run => {
+                bail!("daemon run is handled internally and should not be called directly")
+            }
+        }
     }
 }
 
@@ -252,5 +280,5 @@ mod fallback_impl {
 #[allow(unused_imports)]
 pub use unix_impl::{handle_daemon_command, DaemonHandles};
 
-#[cfg(not(target_family = "unix"))]
-pub use fallback_impl::handle_daemon_command;
+#[cfg(target_family = "windows")]
+pub use windows_impl::handle_daemon_command;

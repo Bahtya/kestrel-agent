@@ -393,7 +393,7 @@ pub fn install_service(service_name: &str, display_name: &str) -> Result<()> {
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
         executable_path,
-        launch_arguments: vec![OsString::from("service")],
+        launch_arguments: vec![OsString::from("service"), OsString::from("run")],
         dependencies: vec![],
         account_name: None, // Run as LocalSystem by default
         account_password: None,

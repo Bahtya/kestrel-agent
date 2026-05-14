@@ -160,9 +160,9 @@ impl StreamProgressTracker {
                         is_warning: false,
                     });
                 }
+                let after_first = phase_elapsed.saturating_sub(self.thinking_first_indicator_after);
                 let expected_updates = 1
-                    + ((phase_elapsed.as_secs() - self.thinking_first_indicator_after.as_secs())
-                        / self.thinking_update_interval.as_secs()) as u32;
+                    + (after_first.as_millis() / self.thinking_update_interval.as_millis()) as u32;
                 if self.thinking_updates_sent > 0 && self.thinking_updates_sent < expected_updates {
                     self.thinking_updates_sent = expected_updates;
                     return Some(ProgressMessage {

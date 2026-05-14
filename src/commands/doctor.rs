@@ -1,6 +1,7 @@
 //! Doctor command — comprehensive system diagnostics.
 
 use anyhow::Result;
+use kestrel_config::documented;
 use kestrel_config::paths::get_config_path;
 use kestrel_config::schema::Config;
 use kestrel_config::validate;
@@ -10,7 +11,7 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 /// Run all diagnostic checks.
-pub async fn run(config: &Config) -> Result<()> {
+pub async fn run(config: &Config, fix: bool) -> Result<()> {
     println!("=== Kestrel Doctor ===\n");
 
     let mut errors = 0usize;
@@ -20,6 +21,7 @@ pub async fn run(config: &Config) -> Result<()> {
     check_websocket(config, &mut errors, &mut warnings);
     check_providers(config, &mut errors, &mut warnings).await;
     check_telegram(config, &mut errors, &mut warnings).await;
+    check_config_completeness(fix, &mut warnings)?;
 
     println!("\n--- Summary ---");
     if errors == 0 && warnings == 0 {
@@ -45,7 +47,7 @@ pub async fn run(config: &Config) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn check_config_file(config: &Config, errors: &mut usize, warnings: &mut usize) {
-    println!("[1/4] Config file validation");
+    println!("[1/5] Config file validation");
 
     // Check that config file exists
     match get_config_path() {
@@ -111,7 +113,7 @@ fn check_config_file(config: &Config, errors: &mut usize, warnings: &mut usize) 
 // ---------------------------------------------------------------------------
 
 fn check_websocket(config: &Config, errors: &mut usize, warnings: &mut usize) {
-    println!("[2/4] WebSocket port health");
+    println!("[2/5] WebSocket port health");
 
     match &config.channels.websocket {
         Some(ws) if ws.enabled => {
@@ -164,7 +166,7 @@ fn check_websocket(config: &Config, errors: &mut usize, warnings: &mut usize) {
 // ---------------------------------------------------------------------------
 
 async fn check_providers(config: &Config, errors: &mut usize, warnings: &mut usize) {
-    println!("[3/4] Provider model availability");
+    println!("[3/5] Provider model availability");
 
     let registry = match ProviderRegistry::from_config(config) {
         Ok(r) => r,
@@ -252,7 +254,7 @@ async fn check_providers(config: &Config, errors: &mut usize, warnings: &mut usi
 // ---------------------------------------------------------------------------
 
 async fn check_telegram(config: &Config, errors: &mut usize, _warnings: &mut usize) {
-    println!("[4/4] Telegram API health");
+    println!("[4/5] Telegram API health");
 
     let tg = match &config.channels.telegram {
         Some(tg) if tg.enabled && !tg.token.is_empty() => tg,
@@ -347,4 +349,69 @@ fn build_telegram_http_client(proxy: Option<&str>) -> Result<reqwest::Client> {
     }
 
     Ok(builder.build()?)
+}
+
+// ---------------------------------------------------------------------------
+// 5. Config completeness (missing fields)
+// ---------------------------------------------------------------------------
+
+fn check_config_completeness(fix: bool, warnings: &mut usize) -> Result<()> {
+    println!("[5/5] Config completeness");
+
+    let config_path = match get_config_path() {
+        Ok(p) => p,
+        Err(e) => {
+            println!("  SKIP — cannot determine config path: {}", e);
+            println!();
+            return Ok(());
+        }
+    };
+
+    if !config_path.exists() {
+        println!("  SKIP — no config file found");
+        println!();
+        return Ok(());
+    }
+
+    let raw = match std::fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("  FAIL — cannot read config: {}", e);
+            println!();
+            return Ok(());
+        }
+    };
+
+    let (missing, updated) = match documented::apply_fix(&raw) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("  FAIL — cannot parse TOML: {}", e);
+            println!();
+            return Ok(());
+        }
+    };
+
+    if missing.is_empty() {
+        println!("  All known fields present.");
+    } else {
+        *warnings += missing.len();
+        println!("  {} missing field(s):", missing.len());
+        for field in &missing {
+            println!("    - {}", field);
+        }
+
+        if fix {
+            std::fs::write(&config_path, updated)
+                .map_err(|e| anyhow::anyhow!("failed to write config: {}", e))?;
+            println!("  Fixed: {} field(s) added with comments.", missing.len());
+            println!("  Updated: {}", config_path.display());
+        } else {
+            println!(
+                "  Run `kestrel doctor --fix` to add missing fields with documented defaults."
+            );
+        }
+    }
+
+    println!();
+    Ok(())
 }

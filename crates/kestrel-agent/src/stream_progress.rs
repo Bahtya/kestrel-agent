@@ -15,6 +15,8 @@ pub enum StreamPhase {
     Connecting,
     /// Connection established, waiting for the first SSE chunk.
     WaitingFirstByte,
+    /// Reasoning model is sending thinking/reasoning tokens (no user-visible content yet).
+    Thinking,
     /// Content is being streamed to the user.
     Streaming,
     /// Interaction complete.
@@ -37,10 +39,13 @@ pub struct StreamProgressTracker {
     phase: StreamPhase,
     phase_entered_at: Instant,
     stream_started_at: Instant,
+    thinking_started_at: Option<Instant>,
 
     // Thresholds
     first_byte_warning_after: Duration,
     first_byte_slow_after: Duration,
+    thinking_first_indicator_after: Duration,
+    thinking_update_interval: Duration,
     message_timeout_warning_ratio: f64,
     message_timeout: Duration,
 
@@ -49,6 +54,7 @@ pub struct StreamProgressTracker {
     sent_first_byte_slow: bool,
     sent_timeout_warning: bool,
     sent_reconnecting: bool,
+    thinking_updates_sent: u32,
 }
 
 impl StreamProgressTracker {
@@ -57,19 +63,26 @@ impl StreamProgressTracker {
             phase: StreamPhase::Connecting,
             phase_entered_at: Instant::now(),
             stream_started_at: Instant::now(),
+            thinking_started_at: None,
             first_byte_warning_after: Duration::from_secs(10),
             first_byte_slow_after: Duration::from_secs(30),
+            thinking_first_indicator_after: Duration::from_secs(15),
+            thinking_update_interval: Duration::from_secs(30),
             message_timeout_warning_ratio: 0.8,
             message_timeout,
             sent_first_byte_warning: false,
             sent_first_byte_slow: false,
             sent_timeout_warning: false,
             sent_reconnecting: false,
+            thinking_updates_sent: 0,
         }
     }
 
     /// Transition to a new phase.
     pub fn transition(&mut self, new_phase: StreamPhase) {
+        if new_phase == StreamPhase::Thinking && self.thinking_started_at.is_none() {
+            self.thinking_started_at = Some(Instant::now());
+        }
         self.phase = new_phase;
         self.phase_entered_at = Instant::now();
         // Reset per-phase dedup flags
@@ -131,6 +144,35 @@ impl StreamProgressTracker {
                     ),
                     is_warning: true,
                 });
+            }
+            StreamPhase::Thinking => {
+                let thinking_elapsed = self
+                    .thinking_started_at
+                    .map_or(Duration::ZERO, |t| t.elapsed());
+                if self.thinking_updates_sent == 0
+                    && phase_elapsed >= self.thinking_first_indicator_after
+                {
+                    self.thinking_updates_sent = 1;
+                    return Some(ProgressMessage {
+                        content:
+                            "\u{1f914} \u{6a21}\u{578b}\u{6b63}\u{5728}\u{6df1}\u{5ea6}\u{601d}\u{8003}\u{4e2d}..."
+                                .to_string(),
+                        is_warning: false,
+                    });
+                }
+                let expected_updates = 1
+                    + ((phase_elapsed.as_secs() - self.thinking_first_indicator_after.as_secs())
+                        / self.thinking_update_interval.as_secs()) as u32;
+                if self.thinking_updates_sent > 0 && self.thinking_updates_sent < expected_updates {
+                    self.thinking_updates_sent = expected_updates;
+                    return Some(ProgressMessage {
+                        content: format!(
+                            "\u{1f4ad} \u{4ecd}\u{5728}\u{601d}\u{8003}\u{4e2d}... \u{ff08}\u{5df2}\u{601d}\u{8003} {}s\u{ff09}",
+                            thinking_elapsed.as_secs()
+                        ),
+                        is_warning: false,
+                    });
+                }
             }
             StreamPhase::Streaming => {}
             _ => {}
@@ -236,5 +278,56 @@ mod tests {
         let mut t = StreamProgressTracker::new(Duration::from_secs(300));
         t.transition(StreamPhase::Done);
         assert!(t.poll().is_none());
+    }
+
+    #[test]
+    fn thinking_first_indicator() {
+        let mut t = StreamProgressTracker::new(Duration::from_secs(300));
+        t.thinking_first_indicator_after = Duration::from_millis(50);
+        t.transition(StreamPhase::Thinking);
+        std::thread::sleep(Duration::from_millis(60));
+        let msg = t.poll();
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert!(!msg.is_warning);
+        assert!(msg.content.contains("\u{6df1}\u{5ea6}")); // 深度
+    }
+
+    #[test]
+    fn thinking_periodic_updates() {
+        let mut t = StreamProgressTracker::new(Duration::from_secs(300));
+        t.thinking_first_indicator_after = Duration::from_millis(20);
+        t.thinking_update_interval = Duration::from_millis(50);
+        t.transition(StreamPhase::Thinking);
+        // First indicator
+        std::thread::sleep(Duration::from_millis(30));
+        let first = t.poll();
+        assert!(first.is_some());
+        assert!(first.unwrap().content.contains("\u{6df1}\u{5ea6}")); // 深度
+                                                                      // No update yet
+        assert!(t.poll().is_none());
+        // Wait for update interval
+        std::thread::sleep(Duration::from_millis(60));
+        let update = t.poll();
+        assert!(update.is_some());
+        assert!(update.unwrap().content.contains("\u{4ecd}\u{5728}")); // 仍在
+    }
+
+    #[test]
+    fn thinking_tracks_start_time() {
+        let mut t = StreamProgressTracker::new(Duration::from_secs(300));
+        assert!(t.thinking_started_at.is_none());
+        t.transition(StreamPhase::Thinking);
+        assert!(t.thinking_started_at.is_some());
+    }
+
+    #[test]
+    fn thinking_to_streaming_keeps_start_time() {
+        let mut t = StreamProgressTracker::new(Duration::from_secs(300));
+        t.transition(StreamPhase::Thinking);
+        let thinking_start = t.thinking_started_at;
+        t.transition(StreamPhase::Streaming);
+        // thinking_started_at is preserved across phase transitions
+        assert_eq!(t.thinking_started_at, thinking_start);
     }
 }

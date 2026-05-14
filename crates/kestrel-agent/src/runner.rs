@@ -583,6 +583,16 @@ impl AgentRunner {
                         "SSE first-byte received"
                     );
                     first_byte_logged = true;
+                    // Transition based on whether the first chunk is reasoning or content
+                    if chunk.reasoning_content.is_some() && chunk.delta.is_none() {
+                        progress.transition(crate::stream_progress::StreamPhase::Thinking);
+                    } else {
+                        progress.transition(crate::stream_progress::StreamPhase::Streaming);
+                    }
+                } else if *progress.phase() == crate::stream_progress::StreamPhase::Thinking
+                    && chunk.delta.is_some()
+                {
+                    // Reasoning finished, real content starting
                     progress.transition(crate::stream_progress::StreamPhase::Streaming);
                 }
                 last_chunk_at = std::time::Instant::now();

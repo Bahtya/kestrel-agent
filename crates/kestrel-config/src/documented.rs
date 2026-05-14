@@ -31,13 +31,6 @@ fn all_documented_fields() -> FieldMap {
         (value_str("gpt-4o"), "默认模型名称".into()),
     );
     m.insert(
-        "agent.provider".into(),
-        (
-            value_str(""),
-            "指定 provider 名称（如 \"openai\"），留空则使用第一个已注册的 provider".into(),
-        ),
-    );
-    m.insert(
         "agent.temperature".into(),
         (value_float(0.7), "生成温度 (0.0~2.0)，越高越随机".into()),
     );
@@ -201,20 +194,12 @@ pub fn insert_missing_fields(doc: &mut DocumentMut) -> Vec<String> {
     inserted
 }
 
-/// Check a raw TOML string for missing fields and optionally fix it.
-///
-/// Returns `(missing_fields, was_fixed)`.
-pub fn check_and_fix(raw_toml: &str, fix: bool) -> Result<(Vec<String>, bool), String> {
+/// Check a raw TOML string for missing fields (read-only, no serialization).
+pub fn check_missing(raw_toml: &str) -> Result<Vec<String>, String> {
     let mut doc: DocumentMut = raw_toml
         .parse()
         .map_err(|e: toml_edit::TomlError| e.to_string())?;
-    let missing = insert_missing_fields(&mut doc);
-
-    if missing.is_empty() || !fix {
-        return Ok((missing, false));
-    }
-
-    Ok((missing.clone(), true))
+    Ok(insert_missing_fields(&mut doc))
 }
 
 /// Parse a TOML string, insert missing fields, and return the updated string.

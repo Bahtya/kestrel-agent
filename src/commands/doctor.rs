@@ -382,13 +382,25 @@ fn check_config_completeness(fix: bool, warnings: &mut usize) -> Result<()> {
         }
     };
 
-    let (missing, updated) = match documented::apply_fix(&raw) {
-        Ok(r) => r,
-        Err(e) => {
-            println!("  FAIL — cannot parse TOML: {}", e);
-            println!();
-            return Ok(());
+    let (missing, updated) = if fix {
+        match documented::apply_fix(&raw) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("  FAIL — cannot parse TOML: {}", e);
+                println!();
+                return Ok(());
+            }
         }
+    } else {
+        let missing = match documented::check_missing(&raw) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("  FAIL — cannot parse TOML: {}", e);
+                println!();
+                return Ok(());
+            }
+        };
+        (missing, String::new())
     };
 
     if missing.is_empty() {
@@ -401,6 +413,12 @@ fn check_config_completeness(fix: bool, warnings: &mut usize) -> Result<()> {
         }
 
         if fix {
+            // Backup original config
+            let backup_path = config_path.with_extension("toml.bak");
+            std::fs::write(&backup_path, &raw)
+                .map_err(|e| anyhow::anyhow!("failed to backup config: {}", e))?;
+            println!("  Backup: {}", backup_path.display());
+
             std::fs::write(&config_path, updated)
                 .map_err(|e| anyhow::anyhow!("failed to write config: {}", e))?;
             println!("  Fixed: {} field(s) added with comments.", missing.len());

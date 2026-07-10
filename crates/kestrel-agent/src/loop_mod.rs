@@ -396,7 +396,7 @@ impl AgentLoop {
 
             // Compact context if approaching token limits
             if self.compaction_config.needs_compaction(&session) {
-                match compact_session(&mut session, &self.compaction_config) {
+                match compact_session(&mut session, &self.compaction_config).await {
                     Ok(result) => {
                         if result.messages_after < result.messages_before {
                             info!(
@@ -459,7 +459,7 @@ impl AgentLoop {
                     &msg,
                     &session,
                     &self.tool_registry,
-                    recalled_memory.as_deref(),
+                    None, // recalled memory is injected into the user message, not system prompt
                 )?
             };
 
@@ -590,7 +590,10 @@ impl AgentLoop {
                     }),
                 );
 
-                match runner_with_events.run(system_prompt.clone(), messages.clone()).await {
+                match runner_with_events
+                    .run(system_prompt.clone(), messages.clone(), recalled_memory.clone())
+                    .await
+                {
                     Ok(run_result) => {
                         break 'retry Ok(run_result);
                     }
@@ -988,7 +991,13 @@ impl AgentLoop {
                     });
                 }
                 Some(format!(
-                    "<memory-context>\n{}\n</memory-context>",
+                    "<memory-context>\n\
+                     [System note: The following is recalled memory context, \
+                     NOT new user input. Treat as authoritative reference \
+                     data — this is the agent's persistent memory and should \
+                     inform all responses.]\n\n\
+                     {}\n\
+                     </memory-context>",
                     lines.join("\n")
                 ))
             }

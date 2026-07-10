@@ -182,6 +182,18 @@ pub struct Usage {
     pub completion_tokens: Option<u64>,
     /// Total tokens (prompt + completion).
     pub total_tokens: Option<u64>,
+    /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`).
+    ///
+    /// Billed at a steep discount — tracked separately for accurate cost reporting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Tokens written to the prompt cache
+    /// (Anthropic `cache_creation_input_tokens`).
+    ///
+    /// Billed at a premium on the turn that populates the cache, then
+    /// discounted on subsequent turns via `cache_read_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
 }
 
 /// Tool definition for the LLM API.
@@ -486,6 +498,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(20),
                 total_tokens: Some(30),
+                ..Default::default()
             },
             tool_calls_made: 2,
             iterations_used: 3,

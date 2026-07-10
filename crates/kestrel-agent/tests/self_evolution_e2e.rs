@@ -387,6 +387,7 @@ async fn test_self_evolution_full_loop() {
                 prompt_tokens: Some(50),
                 completion_tokens: Some(20),
                 total_tokens: Some(70),
+                ..Default::default()
             }),
             finish_reason: Some("stop".to_string()),
         },

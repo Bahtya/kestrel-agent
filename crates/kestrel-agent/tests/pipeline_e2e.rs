@@ -161,6 +161,7 @@ async fn test_pipeline_simple_response() {
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
             total_tokens: Some(15),
+            ..Default::default()
         }),
         finish_reason: Some("stop".to_string()),
     }]);
@@ -232,6 +233,7 @@ async fn test_pipeline_with_tool_call() {
                 prompt_tokens: Some(30),
                 completion_tokens: Some(10),
                 total_tokens: Some(40),
+                ..Default::default()
             }),
             finish_reason: Some("stop".to_string()),
         },

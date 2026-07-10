@@ -208,10 +208,14 @@ impl<'a> ContextBuilder<'a> {
     }
 
     /// Build the runtime metadata content (time, platform, chat ID).
+    ///
+    /// Uses date-only precision for the timestamp to keep the system prompt
+    /// byte-stable within a day, preserving the prompt-cache prefix across
+    /// turns (mirrors the hermes-agent cache-stability invariant).
     fn build_runtime_content(&self, msg: &InboundMessage) -> String {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+        let now = chrono::Local::now().format("%Y-%m-%d");
         format!(
-            "- Current time: {}\n- Platform: {}\n- Chat ID: {}",
+            "- Current date: {}\n- Platform: {}\n- Chat ID: {}",
             now, msg.channel, msg.chat_id,
         )
     }
@@ -421,7 +425,7 @@ mod tests {
         let runtime = builder.build_runtime_content(&msg);
         assert!(runtime.contains("telegram"));
         assert!(runtime.contains("chat1"));
-        assert!(runtime.contains("Current time"));
+        assert!(runtime.contains("Current date"));
     }
 
     #[test]

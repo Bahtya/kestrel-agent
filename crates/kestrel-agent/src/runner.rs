@@ -186,7 +186,12 @@ impl AgentRunner {
 
     /// Run the agent loop with a system prompt and message history.
     /// Uses streaming if a stream_tx is configured.
-    pub async fn run(&self, system_prompt: String, messages: Vec<Message>) -> Result<RunResult> {
+    pub async fn run(
+        &self,
+        system_prompt: String,
+        messages: Vec<Message>,
+        memory_context: Option<String>,
+    ) -> Result<RunResult> {
         let model = &self.config.agent.model;
         let provider_name = self.config.agent.provider.as_deref().unwrap_or("");
         let max_iterations = self.config.agent.max_iterations;
@@ -209,6 +214,23 @@ impl AgentRunner {
             llm_provider = %provider.name(),
             "Starting agent run"
         );
+
+        // Inject recalled memory context into the last user message (a copy —
+        // the persisted session is never mutated). This mirrors the hermes-agent
+        // invariant: external recall is injected at API-call time so the
+        // stable system-prompt cache prefix remains byte-stable across turns.
+        let mut messages = messages;
+        if let Some(ctx) = memory_context.as_ref() {
+            if !ctx.is_empty() {
+                if let Some(last_user) = messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == MessageRole::User)
+                {
+                    last_user.content = format!("{}\n\n{}", last_user.content, ctx);
+                }
+            }
+        }
 
         // Build initial messages with system prompt
         let mut conversation = vec![Message {
@@ -285,12 +307,26 @@ impl AgentRunner {
                 resp
             };
 
-            // Track usage
+            // Track usage — accumulate across iterations (not .or() which
+            // only keeps the first value). Each LLM call reports its own token
+            // usage, and the agent loop may make several calls per turn.
             if let Some(usage) = &response.usage {
-                total_usage.prompt_tokens = total_usage.prompt_tokens.or(usage.prompt_tokens);
-                total_usage.completion_tokens =
-                    total_usage.completion_tokens.or(usage.completion_tokens);
-                total_usage.total_tokens = total_usage.total_tokens.or(usage.total_tokens);
+                total_usage.prompt_tokens =
+                    Some(total_usage.prompt_tokens.unwrap_or(0) + usage.prompt_tokens.unwrap_or(0));
+                total_usage.completion_tokens = Some(
+                    total_usage.completion_tokens.unwrap_or(0)
+                        + usage.completion_tokens.unwrap_or(0),
+                );
+                total_usage.total_tokens =
+                    Some(total_usage.total_tokens.unwrap_or(0) + usage.total_tokens.unwrap_or(0));
+                total_usage.cache_read_tokens = Some(
+                    total_usage.cache_read_tokens.unwrap_or(0)
+                        + usage.cache_read_tokens.unwrap_or(0),
+                );
+                total_usage.cache_write_tokens = Some(
+                    total_usage.cache_write_tokens.unwrap_or(0)
+                        + usage.cache_write_tokens.unwrap_or(0),
+                );
             }
 
             // If no tool calls, we're done

@@ -316,6 +316,7 @@ impl OpenAiCompatProvider {
                         prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()),
                         completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()),
                         total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()),
+                        ..Default::default()
                     });
 
                     if delta_text.is_some()
@@ -523,6 +524,7 @@ impl LlmProvider for OpenAiCompatProvider {
                         prompt_tokens: u.prompt_tokens,
                         completion_tokens: u.completion_tokens,
                         total_tokens: u.total_tokens,
+                        ..Default::default()
                     }),
                     finish_reason: choice.finish_reason,
                 })

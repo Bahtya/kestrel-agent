@@ -91,6 +91,9 @@ tantivy = "0.26"
 tantivy-jieba = "0.19"
 jieba-rs = "0.9"
 
+# Embedded database (SQLite + FTS5 for session history search)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # ─── Main binary package ────────────────────────────────────
 
 [package]

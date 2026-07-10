@@ -174,6 +174,7 @@ mod tests {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(5),
                 total_tokens: Some(15),
+                ..Default::default()
             }),
             finish_reason: Some("stop".to_string()),
         };

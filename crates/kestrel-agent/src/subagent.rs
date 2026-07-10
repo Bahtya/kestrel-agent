@@ -527,7 +527,7 @@ impl SubAgentManager {
         let mgr = Arc::clone(self);
         let task_id = id.clone();
         let handle = tokio::spawn(async move {
-            let run_future = runner.run(system_prompt, messages);
+            let run_future = runner.run(system_prompt, messages, None);
 
             let result = match timeout {
                 Some(dur) => match tokio::time::timeout(dur, run_future).await {
@@ -987,40 +987,40 @@ async fn run_single_task(
     });
 
     // Execute with timeout
-    let run_result = match tokio::time::timeout(timeout, runner.run(system_prompt, messages)).await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => {
-            let duration = start.elapsed().as_secs_f64();
-            return (
-                task_id,
-                Ok(SubAgentResult {
-                    id: task.id,
-                    output: format!("Agent error: {}", e),
-                    success: false,
-                    duration_secs: duration,
-                    tokens_used: 0,
-                    tool_calls_made: 0,
-                    iterations_used: 0,
-                }),
-            );
-        }
-        Err(_) => {
-            let duration = start.elapsed().as_secs_f64();
-            return (
-                task_id,
-                Ok(SubAgentResult {
-                    id: task.id,
-                    output: format!("Timeout after {:.0}s", timeout.as_secs()),
-                    success: false,
-                    duration_secs: duration,
-                    tokens_used: 0,
-                    tool_calls_made: 0,
-                    iterations_used: 0,
-                }),
-            );
-        }
-    };
+    let run_result =
+        match tokio::time::timeout(timeout, runner.run(system_prompt, messages, None)).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                let duration = start.elapsed().as_secs_f64();
+                return (
+                    task_id,
+                    Ok(SubAgentResult {
+                        id: task.id,
+                        output: format!("Agent error: {}", e),
+                        success: false,
+                        duration_secs: duration,
+                        tokens_used: 0,
+                        tool_calls_made: 0,
+                        iterations_used: 0,
+                    }),
+                );
+            }
+            Err(_) => {
+                let duration = start.elapsed().as_secs_f64();
+                return (
+                    task_id,
+                    Ok(SubAgentResult {
+                        id: task.id,
+                        output: format!("Timeout after {:.0}s", timeout.as_secs()),
+                        success: false,
+                        duration_secs: duration,
+                        tokens_used: 0,
+                        tool_calls_made: 0,
+                        iterations_used: 0,
+                    }),
+                );
+            }
+        };
 
     let duration = start.elapsed().as_secs_f64();
     let tokens_used = run_result.usage.total_tokens.unwrap_or(0);
@@ -1416,6 +1416,7 @@ mod tests {
                             prompt_tokens: Some(10),
                             completion_tokens: Some(5),
                             total_tokens: Some(15),
+                            ..Default::default()
                         }),
                         finish_reason: Some("stop".to_string()),
                     })

@@ -56,6 +56,7 @@ async fn test_agent_simple_response() {
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
             total_tokens: Some(15),
+            ..Default::default()
         }),
         finish_reason: Some("stop".to_string()),
     }]);
@@ -72,7 +73,7 @@ async fn test_agent_simple_response() {
     }];
 
     let result = runner
-        .run("You are a helpful assistant.".to_string(), messages)
+        .run("You are a helpful assistant.".to_string(), messages, None)
         .await
         .unwrap();
 
@@ -108,6 +109,7 @@ async fn test_agent_tool_call_then_response() {
                 prompt_tokens: Some(20),
                 completion_tokens: Some(10),
                 total_tokens: Some(30),
+                ..Default::default()
             }),
             finish_reason: Some("stop".to_string()),
         },
@@ -125,7 +127,7 @@ async fn test_agent_tool_call_then_response() {
     }];
 
     let result = runner
-        .run("You are a helpful assistant.".to_string(), messages)
+        .run("You are a helpful assistant.".to_string(), messages, None)
         .await
         .unwrap();
 
@@ -171,7 +173,7 @@ async fn test_agent_max_iterations() {
     }];
 
     let result = runner
-        .run("You are a helpful assistant.".to_string(), messages)
+        .run("You are a helpful assistant.".to_string(), messages, None)
         .await
         .unwrap();
 
@@ -210,6 +212,7 @@ async fn test_agent_tool_call_malformed_args_returns_error() {
                 prompt_tokens: Some(20),
                 completion_tokens: Some(10),
                 total_tokens: Some(30),
+                ..Default::default()
             }),
             finish_reason: Some("stop".to_string()),
         },
@@ -227,7 +230,7 @@ async fn test_agent_tool_call_malformed_args_returns_error() {
     }];
 
     let result = runner
-        .run("You are a helpful assistant.".to_string(), messages)
+        .run("You are a helpful assistant.".to_string(), messages, None)
         .await
         .unwrap();
 
@@ -367,7 +370,7 @@ async fn test_agent_tool_arg_error_includes_details() {
     }];
 
     let result = runner
-        .run("You are a helpful assistant.".to_string(), messages)
+        .run("You are a helpful assistant.".to_string(), messages, None)
         .await
         .unwrap();
 

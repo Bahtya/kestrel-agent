@@ -933,21 +933,29 @@ impl AgentLoop {
     /// Recall relevant memories from the memory store for the given query text.
     ///
     /// Returns a formatted string section wrapped in `<memory-context>` XML tags
-    /// for injection into the system prompt, or `None` if no memory store is
-    /// configured or no memories were found. Output is bounded by the char budget
-    /// from [`MemoryConfig`] (or [`DEFAULT_MEMORY_CHAR_BUDGET`] as fallback) —
-    /// entries that would exceed the budget are skipped entirely.
+    /// for injection into the user message (not system prompt), or `None` if no
+    /// memory store is configured or no memories were found.
+    ///
+    /// **Hermes-aligned recall strategy**: inject ALL memories within the char
+    /// budget (frozen snapshot approach), not just BM25 keyword matches. This
+    /// ensures the LLM sees all stored facts regardless of query wording —
+    /// asking "what's my name?" matches "Bahtyar" even though the words don't
+    /// overlap. Falls back to BM25 search only when entries exceed the budget.
     async fn recall_memories(&self, query_text: &str, trace_id: &str) -> Option<String> {
         let store = self.memory_store.as_ref()?;
 
-        let query = MemoryQuery::new()
-            .with_text(query_text)
-            .with_limit(5)
-            .with_min_confidence(0.3);
+        let budget = self
+            .memory_config
+            .as_ref()
+            .map(|c| c.memory_char_budget)
+            .unwrap_or(DEFAULT_MEMORY_CHAR_BUDGET);
 
-        match store.search(&query).await {
+        // Fetch all memories (no text filter) — the LLM decides relevance,
+        // not the BM25 ranker. This mirrors hermes-agent's frozen snapshot.
+        let all_query = MemoryQuery::new().with_limit(100);
+
+        match store.search(&all_query).await {
             Ok(results) if results.is_empty() => {
-                // Emit MemoryAccessed (miss)
                 if let Some(ref bus) = self.learning_bus {
                     bus.publish(LearningEvent::MemoryAccessed {
                         query: query_text.to_string(),
@@ -961,21 +969,13 @@ impl AgentLoop {
             }
             Ok(results) => {
                 let count = results.len();
-                let budget = self
-                    .memory_config
-                    .as_ref()
-                    .map(|c| c.memory_char_budget)
-                    .unwrap_or(DEFAULT_MEMORY_CHAR_BUDGET);
                 let mut lines = Vec::new();
                 let mut budget_remaining = budget;
 
                 for scored in &results {
                     let escaped = xml_escape(&scored.entry.content);
                     let escaped_category = xml_escape(&scored.entry.category.to_string());
-                    let line = format!(
-                        "- {} [{}] (confidence: {:.2})",
-                        escaped, escaped_category, scored.entry.confidence
-                    );
+                    let line = format!("- {} [{}]", escaped, escaped_category);
                     if line.len() <= budget_remaining {
                         budget_remaining -= line.len();
                         lines.push(line);
@@ -983,7 +983,24 @@ impl AgentLoop {
                     // Entries that don't fit within budget are silently dropped
                 }
 
-                // Emit MemoryAccessed (hit)
+                if lines.is_empty() {
+                    // Budget too small for even one entry — fall back to top-5 BM25
+                    let fallback = MemoryQuery::new()
+                        .with_text(query_text)
+                        .with_limit(5)
+                        .with_min_confidence(0.0);
+                    if let Ok(fallback_results) = store.search(&fallback).await {
+                        for scored in &fallback_results {
+                            let escaped = xml_escape(&scored.entry.content);
+                            let line = format!("- {}", escaped);
+                            if line.len() <= budget {
+                                lines.push(line);
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 if let Some(ref bus) = self.learning_bus {
                     bus.publish(LearningEvent::MemoryAccessed {
                         query: query_text.to_string(),
@@ -1937,7 +1954,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recall_memories_no_match() {
+    async fn test_recall_memories_returns_all_entries() {
+        // Hermes-aligned: recall injects ALL memories (frozen snapshot),
+        // not just BM25 keyword matches. Even non-matching queries return entries.
         let mock = Arc::new(MockMemoryStore::new());
         mock.store(MemoryEntry::new("Python scripting", MemoryCategory::Fact).with_confidence(0.9))
             .await
@@ -1945,8 +1964,9 @@ mod tests {
 
         let al = make_agent_loop().with_memory_store(mock.clone());
         let result = al.recall_memories("rust programming", "-").await;
-        // "rust programming" does not match "Python scripting"
-        assert!(result.is_none());
+        // All entries are injected regardless of query text
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Python scripting"));
     }
 
     #[test]
@@ -2149,18 +2169,17 @@ mod tests {
             .unwrap();
 
         // With budget=50, the long entry (~230 chars formatted) won't fit and
-        // the short entry (~30 chars formatted) should be the only one included.
+        // the short entry should be the only one included.
         assert!(
             !inner.contains(&"a".repeat(100)),
             "long entry should have been skipped entirely, not truncated"
         );
-        // Verify no partial lines — every line should end cleanly
+        // Verify no partial lines — every memory line ends with [category]
         for line in inner.lines() {
             if line.starts_with("- ") {
-                // A properly formed line ends with the confidence number like "0.80)"
                 assert!(
-                    line.ends_with(')'),
-                    "entry line should end with confidence, not mid-content: '{line}'"
+                    line.ends_with(']'),
+                    "entry line should end with [category], not mid-content: '{line}'"
                 );
             }
         }
@@ -2171,7 +2190,7 @@ mod tests {
         let mock = Arc::new(MockMemoryStore::new());
 
         let mut mem_config = kestrel_memory::MemoryConfig::default();
-        mem_config.memory_char_budget = 50;
+        mem_config.memory_char_budget = 20;
 
         mock.store(MemoryEntry::new("alpha", MemoryCategory::Fact).with_confidence(0.9))
             .await
@@ -2188,7 +2207,7 @@ mod tests {
             .with_memory_config(mem_config);
         let result = al.recall_memories("a", "-").await.unwrap();
 
-        // With budget=50, each entry line is ~34 chars ("- ENTRY [fact] (confidence: 0.XX)"),
+        // With budget=20, each entry line is ~15 chars ("- alpha [fact]"),
         // so only 1 entry should fit.
         let inner = result
             .strip_prefix("<memory-context>\n")
@@ -2198,7 +2217,7 @@ mod tests {
         let entry_count = inner.lines().filter(|l| l.starts_with("- ")).count();
         assert_eq!(
             entry_count, 1,
-            "budget=50 should fit exactly 1 entry: got {entry_count}"
+            "budget=20 should fit exactly 1 entry: got {entry_count}"
         );
     }
 

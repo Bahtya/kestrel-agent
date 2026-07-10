@@ -1,0 +1,14 @@
+{
+  "id": "session-1778514589789",
+  "startedAt": "2026-05-11T15:49:49.789Z",
+  "cwd": "/home/bahtyar/Documents/kestrel-agent",
+  "context": {},
+  "metrics": {
+    "edits": 0,
+    "commands": 0,
+    "tasks": 0,
+    "errors": 0
+  },
+  "endedAt": "2026-05-11T16:09:18.695Z",
+  "duration": 1168906
+}

@@ -163,14 +163,12 @@ impl<'a> ContextBuilder<'a> {
             sections.push(PromptSection::ToolGuidance { content: guidance });
         }
 
-        // Memory fence — structured recall triggers based on known categories
-        let memory_fence_content =
-            PromptAssembler::build_memory_fence(&Self::default_memory_fences());
-        if !memory_fence_content.is_empty() {
-            sections.push(PromptSection::MemoryFence {
-                content: memory_fence_content,
-            });
-        }
+        // Memory governance — guides what the agent should and should NOT
+        // save to long-term memory. Mirrors the hermes-agent MEMORY_GUIDANCE.
+        sections.push(PromptSection::Custom {
+            label: "Memory Guidance".to_string(),
+            content: Self::memory_guidance().to_string(),
+        });
 
         // Skill index — list of all available skills with metadata
         if let Some(ref entries) = self.skill_index_entries {
@@ -226,34 +224,30 @@ impl<'a> ContextBuilder<'a> {
             .to_string()
     }
 
-    /// Return the default memory fence entries for structured recall triggers.
+    /// Memory governance instructions appended to the system prompt.
     ///
-    /// These fences guide the agent on when to consider recalling specific
-    /// categories of memories from the store.
-    fn default_memory_fences() -> Vec<kestrel_learning::prompt::MemoryFenceEntry> {
-        vec![
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "user_profile".to_string(),
-                hint: "When personalizing responses or addressing the user".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "environment".to_string(),
-                hint: "When discussing project setup, tools, or infrastructure".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "preference".to_string(),
-                hint: "When choosing between approaches or making style decisions".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "error_lesson".to_string(),
-                hint: "When encountering errors or debugging issues".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "project_convention".to_string(),
-                hint: "When writing code, configuring tools, or making architecture decisions"
-                    .to_string(),
-            },
-        ]
+    /// Mirrors the hermes-agent `MEMORY_GUIDANCE` (prompt_builder.py:151-172).
+    /// Controls what the agent saves to long-term memory vs. what belongs in
+    /// session_search instead.
+    fn memory_guidance() -> &'static str {
+        "You have persistent memory across sessions. Save durable facts using the \
+         store_memory tool: user preferences, environment details, tool quirks, and \
+         stable conventions. Memory is injected into every turn, so keep it compact \
+         and focused on facts that will still matter later.\n\
+         Prioritize what reduces future user steering — the most valuable memory is \
+         one that prevents the user from having to correct or remind you again. \
+         User preferences and recurring corrections matter more than procedural task \
+         details.\n\
+         Do NOT save task progress, session outcomes, completed-work logs, or \
+         temporary TODO state to memory; use session_search to recall those from \
+         past transcripts. Specifically: do not record what was discussed in the \
+         current conversation, 'user asked X', task summaries, or any artifact that \
+         will be stale in 7 days. If a fact will be stale in a week, it does not \
+         belong in memory.\n\
+         Write memories as declarative facts, not instructions to yourself. \
+         'User prefers concise responses' is correct. 'Always respond concisely' is \
+         wrong. Imperative phrasing gets re-read as a directive in later sessions \
+         and can override the user's current request."
     }
 }
 
@@ -300,12 +294,12 @@ mod tests {
         // Should contain runtime section with platform
         assert!(prompt.contains("telegram"));
         assert!(prompt.contains("chat1"));
-        // Empty session → no memory section (but Memory Fence is present)
+        // Empty session → no memory section (but Memory Guidance is present)
         assert!(!prompt.contains("## Memory\n"));
         // No tools → no tool guidance section
         assert!(!prompt.contains("## Tool Guidance"));
         // Memory fence is always present (from default fences)
-        assert!(prompt.contains("## Memory Fence"));
+        assert!(prompt.contains("## Memory Guidance"));
     }
 
     #[test]
@@ -472,7 +466,7 @@ mod tests {
         assert!(prompt.contains("## Memory"));
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### my_tool"));
-        assert!(prompt.contains("## Memory Fence"));
+        assert!(prompt.contains("## Memory Guidance"));
         assert!(prompt.contains("## Additional Instructions"));
     }
 
@@ -553,7 +547,7 @@ mod tests {
         let prompt = builder
             .build_system_prompt(&msg, &session, &tools, Some(""))
             .unwrap();
-        // Empty recalled memory should not add a Memory section (but Memory Fence is present)
+        // Empty recalled memory should not add a Memory section (but Memory Guidance is present)
         assert!(!prompt.contains("## Memory\n"));
     }
 
@@ -682,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_fence_includes_categories() {
+    fn test_memory_guidance_in_prompt() {
         let config = Config::default();
         let builder = ContextBuilder::new(&config);
         let msg = make_inbound();
@@ -692,12 +686,9 @@ mod tests {
         let prompt = builder
             .build_system_prompt(&msg, &session, &tools, None)
             .unwrap();
-        assert!(prompt.contains("## Memory Fence"));
-        assert!(prompt.contains("**user_profile**:"));
-        assert!(prompt.contains("**environment**:"));
-        assert!(prompt.contains("**preference**:"));
-        assert!(prompt.contains("**error_lesson**:"));
-        assert!(prompt.contains("**project_convention**:"));
+        assert!(prompt.contains("## Memory Guidance"));
+        assert!(prompt.contains("Do NOT save task progress"));
+        assert!(prompt.contains("declarative facts"));
     }
 
     #[test]
@@ -806,12 +797,12 @@ mod tests {
             .build_system_prompt(&msg, &session, &tools, None)
             .unwrap();
 
-        // Verify section ordering: System → Runtime → Memory → Notes → Skills → Tool Guidance → Memory Fence → Skill Index → Additional Instructions
+        // Verify section ordering: System → Runtime → Memory → Notes → Skills → Tool Guidance → Memory Guidance → Skill Index → Additional Instructions
         let system_pos = prompt.find("## System").unwrap();
         let runtime_pos = prompt.find("## Runtime").unwrap();
         let memory_pos = prompt.find("## Memory").unwrap();
         let tool_guidance_pos = prompt.find("## Tool Guidance").unwrap();
-        let fence_pos = prompt.find("## Memory Fence").unwrap();
+        let fence_pos = prompt.find("## Memory Guidance").unwrap();
         let skill_index_pos = prompt.find("## Skill Index").unwrap();
         let instructions_pos = prompt.find("## Additional Instructions").unwrap();
 

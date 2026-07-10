@@ -217,8 +217,11 @@ impl AgentRunner {
 
         // Inject recalled memory context into the last user message (a copy —
         // the persisted session is never mutated). This mirrors the hermes-agent
-        // invariant: external recall is injected at API-call time so the
-        // stable system-prompt cache prefix remains byte-stable across turns.
+        // Inject recalled memory context BEFORE the user's question.
+        // Putting it first (rather than after the question) helps the LLM
+        // read the reference data before processing the query, improving
+        // extraction accuracy. The user's actual question comes last so
+        // it's the most recent token the LLM sees before generating.
         let mut messages = messages;
         if let Some(ctx) = memory_context.as_ref() {
             if !ctx.is_empty() {
@@ -227,7 +230,7 @@ impl AgentRunner {
                     .rev()
                     .find(|m| m.role == MessageRole::User)
                 {
-                    last_user.content = format!("{}\n\n{}", last_user.content, ctx);
+                    last_user.content = format!("{}\n\n{}", ctx, last_user.content);
                 }
             }
         }

@@ -47,7 +47,7 @@ fn default_tantivy_store_path() -> PathBuf {
 }
 
 fn default_memory_char_budget() -> usize {
-    2200
+    4000
 }
 
 fn default_memory_char_budget_overflow() -> usize {
@@ -95,7 +95,7 @@ mod tests {
     fn test_default_config() {
         let config = MemoryConfig::default();
         assert_eq!(config.max_entries, 1000);
-        assert_eq!(config.memory_char_budget, 2200);
+        assert_eq!(config.memory_char_budget, 4000);
         assert_eq!(config.memory_char_budget_overflow, 1375);
         assert!(config
             .tantivy_store_path
@@ -133,7 +133,7 @@ mod tests {
         let config = MemoryConfig::from_toml(toml_str).unwrap();
         assert_eq!(config.max_entries, 42);
         // Other fields get defaults
-        assert_eq!(config.memory_char_budget, 2200);
+        assert_eq!(config.memory_char_budget, 4000);
         assert_eq!(config.memory_char_budget_overflow, 1375);
     }
 

@@ -180,8 +180,14 @@ impl SessionSearchTool {
     }
 
     /// Read mode: dump a session (head + tail).
+    ///
+    /// Returns the first `head_limit` messages and the last `tail_limit`
+    /// messages. If the session is short enough, all messages are returned
+    /// without duplication.
     async fn read_session(&self, session_id: &str, limit: usize) -> Result<String, ToolError> {
         let limit = limit.clamp(1, 50);
+
+        // Fetch up to `limit` messages from the head.
         let messages = self
             .db
             .get_session_messages(session_id, limit, 0)
@@ -198,7 +204,42 @@ impl SessionSearchTool {
             .to_string());
         }
 
-        let results: Vec<Value> = messages
+        // If we got exactly `limit` messages, there may be more — also
+        // fetch the tail (last few messages) to give the LLM both ends.
+        let head_count = messages.len();
+        let mut all_messages = messages.clone();
+
+        if head_count == limit {
+            // Fetch a larger batch to get the tail.
+            let big_batch = self
+                .db
+                .get_session_messages(session_id, limit * 3, 0)
+                .map_err(|e| ToolError::Execution(format!("session read tail failed: {e}")))?;
+
+            let tail_limit = (limit / 2).max(3);
+            if big_batch.len() > limit + tail_limit {
+                // Replace with head + tail (skip middle).
+                let tail_start = big_batch.len() - tail_limit;
+                let head_part: Vec<_> = big_batch[..head_count].to_vec();
+                let tail_part: Vec<_> = big_batch[tail_start..].to_vec();
+                let omitted = tail_start - head_count;
+                all_messages = head_part;
+                // Insert a synthetic gap marker.
+                all_messages.push(kestrel_session::MessageRow {
+                    id: -1,
+                    session_id: session_id.to_string(),
+                    role: "system".to_string(),
+                    content: format!("... {} earlier messages omitted ...", omitted),
+                    timestamp: 0.0,
+                    active: true,
+                });
+                all_messages.extend(tail_part);
+            } else {
+                all_messages = big_batch;
+            }
+        }
+
+        let results: Vec<Value> = all_messages
             .iter()
             .map(|m| {
                 json!({

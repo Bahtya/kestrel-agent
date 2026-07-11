@@ -87,7 +87,6 @@ impl<'a> ContextBuilder<'a> {
         msg: &InboundMessage,
         session: &Session,
         tool_registry: &ToolRegistry,
-        recalled_memory: Option<&str>,
     ) -> Result<String> {
         let mut sections: Vec<PromptSection> = Vec::new();
 
@@ -102,19 +101,9 @@ impl<'a> ContextBuilder<'a> {
             content: self.build_runtime_content(msg),
         });
 
-        // Recalled memories from the memory store (takes precedence)
-        if let Some(memory_ctx) = recalled_memory {
-            if !memory_ctx.is_empty() {
-                sections.push(PromptSection::Memory {
-                    content: memory_ctx.to_string(),
-                });
-            }
-        } else if !session.messages.is_empty() {
-            // Fallback: generic memory hint for continuing conversations
-            sections.push(PromptSection::Memory {
-                content: self.build_memory_hint_content(),
-            });
-        }
+        // Note: recalled memory is now injected into the user message (not
+        // the system prompt) to keep the prompt-cache prefix stable.
+        // See runner.rs memory_context parameter.
 
         // Structured notes (prefer structured format with categories)
         if let Some(notes_ctx) = NotesManager::format_structured_context(session) {
@@ -218,12 +207,6 @@ impl<'a> ContextBuilder<'a> {
         )
     }
 
-    /// Build the memory hint content for continuing conversations.
-    fn build_memory_hint_content(&self) -> String {
-        "This is a continuing conversation. Use the message history to maintain context."
-            .to_string()
-    }
-
     /// Memory governance instructions appended to the system prompt.
     ///
     /// Mirrors the hermes-agent `MEMORY_GUIDANCE` (prompt_builder.py:151-172).
@@ -285,9 +268,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
 
         // Should contain identity section
         assert!(prompt.contains("Kestrel"));
@@ -304,6 +285,8 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_with_session_history() {
+        // Memory is no longer in the system prompt — verify it's absent
+        // but the prompt still builds correctly with session history.
         let config = Config::default();
         let builder = ContextBuilder::new(&config);
         let msg = make_inbound();
@@ -311,11 +294,10 @@ mod tests {
         session.add_user_message("previous message".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
-        assert!(prompt.contains("## Memory"));
-        assert!(prompt.contains("continuing conversation"));
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
+        assert!(!prompt.contains("continuing conversation"));
+        // Memory Guidance should still be present
+        assert!(prompt.contains("## Memory Guidance"));
     }
 
     #[test]
@@ -348,9 +330,7 @@ mod tests {
         }
         tools.register(DummyTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### dummy_tool"));
         assert!(prompt.contains("A test tool"));
@@ -367,9 +347,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("CustomBot"));
     }
 
@@ -384,9 +362,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Additional Instructions"));
         assert!(prompt.contains("Always respond in French"));
     }
@@ -458,9 +434,7 @@ mod tests {
         }
         tools.register(AnotherTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("TestBot"));
         assert!(prompt.contains("## Runtime"));
         assert!(prompt.contains("## Memory"));
@@ -479,9 +453,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Skills"));
         assert!(prompt.contains("deploy-k8s"));
         assert!(prompt.contains("Apply manifests"));
@@ -496,9 +468,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Empty skill section should not appear
         assert!(!prompt.contains("## Skills"));
     }
@@ -511,28 +481,25 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // No skill section injected
         assert!(!prompt.contains("## Skills"));
     }
 
     #[test]
-    fn test_build_system_prompt_with_recalled_memory() {
+    fn test_build_system_prompt_no_memory_section() {
+        // Recalled memory is now injected into the user message, not the
+        // system prompt. The system prompt should NOT contain a Memory section.
         let config = Config::default();
         let builder = ContextBuilder::new(&config);
         let msg = make_inbound();
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let recalled = "- User prefers Rust\n- Project uses Tokio";
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, Some(recalled))
-            .unwrap();
-        assert!(prompt.contains("## Memory"));
-        assert!(prompt.contains("User prefers Rust"));
-        // Should NOT contain the generic memory hint since recalled memory is present
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
+        // Should NOT contain recalled memory in system prompt
+        assert!(!prompt.contains("## Memory\n- User prefers"));
+        // Should NOT contain the old "continuing conversation" hint
         assert!(!prompt.contains("continuing conversation"));
     }
 
@@ -544,9 +511,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, Some(""))
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Empty recalled memory should not add a Memory section (but Memory Guidance is present)
         assert!(!prompt.contains("## Memory\n"));
     }
@@ -562,9 +527,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Custom separator should be used between sections
         assert!(prompt.contains("\n---\n"));
     }
@@ -578,9 +541,7 @@ mod tests {
         session.add_user_message("history".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // PromptAssembler adds ## headers for each section
         assert!(prompt.contains("## System"));
         assert!(prompt.contains("## Runtime"));
@@ -598,9 +559,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Sections should appear in order: System, Runtime, ..., Additional Instructions
         let system_pos = prompt.find("## System").unwrap();
         let runtime_pos = prompt.find("## Runtime").unwrap();
@@ -619,9 +578,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Default assembler uses double newline separator
         assert!(prompt.contains("\n\n"));
         assert!(prompt.contains("## System"));
@@ -666,9 +623,7 @@ mod tests {
         }
         tools.register(RichTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### search"));
         assert!(prompt.contains("Search the codebase for patterns"));
@@ -683,9 +638,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Memory Guidance"));
         assert!(prompt.contains("Do NOT save task progress"));
         assert!(prompt.contains("declarative facts"));
@@ -713,9 +666,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Skill Index"));
         assert!(prompt.contains("skill_view(name)"));
         assert!(prompt.contains("- deploy-k8s: Deploy to Kubernetes [category: devops]"));
@@ -730,9 +681,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(!prompt.contains("## Skill Index"));
     }
 
@@ -744,9 +693,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(!prompt.contains("## Skill Index"));
     }
 
@@ -793,22 +740,18 @@ mod tests {
         let mut session = Session::new("test:key".to_string());
         session.add_user_message("history".to_string());
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
 
-        // Verify section ordering: System → Runtime → Memory → Notes → Skills → Tool Guidance → Memory Guidance → Skill Index → Additional Instructions
+        // Verify section ordering: System → Runtime → Tool Guidance → Memory Guidance → Skill Index → Additional Instructions
         let system_pos = prompt.find("## System").unwrap();
         let runtime_pos = prompt.find("## Runtime").unwrap();
-        let memory_pos = prompt.find("## Memory").unwrap();
         let tool_guidance_pos = prompt.find("## Tool Guidance").unwrap();
         let fence_pos = prompt.find("## Memory Guidance").unwrap();
         let skill_index_pos = prompt.find("## Skill Index").unwrap();
         let instructions_pos = prompt.find("## Additional Instructions").unwrap();
 
         assert!(system_pos < runtime_pos);
-        assert!(runtime_pos < memory_pos);
-        assert!(memory_pos < tool_guidance_pos);
+        assert!(runtime_pos < tool_guidance_pos);
         assert!(tool_guidance_pos < fence_pos);
         assert!(fence_pos < skill_index_pos);
         assert!(skill_index_pos < instructions_pos);
@@ -863,9 +806,7 @@ mod tests {
         tools.register(ToolA);
         tools.register(ToolB);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("### tool_a"));
         assert!(prompt.contains("First tool"));
         assert!(prompt.contains("### tool_b"));
@@ -911,9 +852,7 @@ mod tests {
 
         tools.register(VerboseTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### verbose_tool"));
         assert!(prompt.contains("Parameters:"));

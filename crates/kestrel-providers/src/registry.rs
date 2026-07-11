@@ -66,7 +66,7 @@ impl ProviderRegistry {
                         .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
                     api_version: None,
                     base_url: entry.base_url.clone(),
-                    enable_cache_control: true,
+                    enable_cache_control: entry.enable_cache_control,
                 })?;
                 registry.register("anthropic", provider);
                 info!("Registered Anthropic provider");

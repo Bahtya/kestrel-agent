@@ -483,7 +483,6 @@ impl AgentLoop {
                     &msg,
                     &session,
                     &self.tool_registry,
-                    None, // recalled memory is injected into the user message, not system prompt
                 )?
             };
 
@@ -2359,7 +2358,7 @@ mod tests {
 
         let prompt = ContextBuilder::new(&config)
             .with_skill_index(entries)
-            .build_system_prompt(&msg, &session, &tools, None)
+            .build_system_prompt(&msg, &session, &tools)
             .unwrap();
 
         assert!(prompt.contains("## Skill Index"));

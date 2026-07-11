@@ -1942,7 +1942,7 @@ impl BaseChannel for TelegramChannel {
         let (text, parse_mode) = Self::prepare_outbound_text(content);
         if text.len() <= 4096 {
             return self
-                .send_single_message(chat_id, &text, &parse_mode, reply_to)
+                .send_single_message(chat_id, &text, content, &parse_mode, reply_to)
                 .await;
         }
 
@@ -1958,8 +1958,11 @@ impl BaseChannel for TelegramChannel {
                 None
             };
             // Chunk is already in MarkdownV2; reuse the same parse_mode.
+            // For fallback, pass the chunk as raw_markdown (best effort —
+            // chunk boundaries may not align with markdown constructs, but
+            // this is strictly better than feeding MarkdownV2-escaped text).
             let result = self
-                .send_single_message(chat_id, chunk, &parse_mode, reply)
+                .send_single_message(chat_id, chunk, chunk, &parse_mode, reply)
                 .await?;
             if !result.success {
                 return Ok(result);
@@ -2194,10 +2197,15 @@ impl BaseChannel for TelegramChannel {
 
 impl TelegramChannel {
     /// Send a single Telegram message (no splitting).
+    ///
+    /// `text` is the MarkdownV2-escaped text sent to Telegram.
+    /// `raw_markdown` is the original un-escaped content used for HTML/plain
+    /// text fallback when MarkdownV2 is rejected.
     async fn send_single_message(
         &self,
         chat_id: &str,
         text: &str,
+        raw_markdown: &str,
         parse_mode: &Option<String>,
         reply_to: Option<&str>,
     ) -> Result<SendResult> {
@@ -2265,7 +2273,7 @@ impl TelegramChannel {
                 && (err_desc.contains("can't parse entities") || err_desc.contains("Bad Request"))
             {
                 // Attempt 1: retry as HTML.
-                let html_text = markdown_to_html(text);
+                let html_text = markdown_to_html(raw_markdown);
                 warn!(
                     "Telegram MarkdownV2 parse failed, retrying as HTML: {}",
                     err_desc
@@ -2296,7 +2304,7 @@ impl TelegramChannel {
                             "Telegram HTML parse also failed, falling back to plain text: {}",
                             err2
                         );
-                        let plain = strip_markdown(text);
+                        let plain = strip_markdown(raw_markdown);
                         let body3 = SendMessageBody {
                             chat_id: chat_id_num,
                             text: plain,

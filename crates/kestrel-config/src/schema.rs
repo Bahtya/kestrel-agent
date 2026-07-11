@@ -208,6 +208,12 @@ pub struct ProviderEntry {
     /// Set to true for domestic Chinese APIs (e.g. ZAI, Qwen) that don't need a proxy.
     #[serde(default)]
     pub no_proxy: Option<bool>,
+    /// Enable Anthropic prompt caching (cache_control breakpoints).
+    /// Only affects the Anthropic provider. Set to false for non-Anthropic
+    /// relays behind base_url that reject cache_control.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub enable_cache_control: bool,
     /// Per-model timeout overrides.  Key is a model name or glob pattern
     /// (e.g. `"claude-opus*"`).
     #[serde(default)]

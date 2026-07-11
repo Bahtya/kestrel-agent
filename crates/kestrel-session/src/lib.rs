@@ -11,5 +11,5 @@ pub mod types;
 
 pub use manager::SessionManager;
 pub use note_store::NoteStore;
-pub use session_db::SessionDb;
+pub use session_db::{MessageRow, SearchHit, SessionDb, SessionSummary};
 pub use types::*;

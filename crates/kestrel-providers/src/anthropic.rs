@@ -393,6 +393,35 @@ impl AnthropicProvider {
                                 }))
                                 .await;
                         }
+                        "message_stop" => {
+                            // Native Anthropic terminal event — emit done:true
+                            // so consumers don't rely solely on channel-close.
+                            let tool_call_deltas = build_anthropic_tool_call_deltas(&tc_acc);
+                            tc_acc.clear();
+                            let _ = tx
+                                .send(Ok(CompletionChunk {
+                                    delta: None,
+                                    reasoning_content: None,
+                                    tool_call_deltas,
+                                    usage: None,
+                                    done: true,
+                                }))
+                                .await;
+                            return;
+                        }
+                        "error" => {
+                            // Surface mid-stream errors (rate limits, policy violations)
+                            // instead of silently swallowing them.
+                            let err_msg = event
+                                .get("error")
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown stream error");
+                            let _ = tx
+                                .send(Err(anyhow::anyhow!("Anthropic stream error: {}", err_msg)))
+                                .await;
+                            return;
+                        }
                         _ => {}
                     }
                 }

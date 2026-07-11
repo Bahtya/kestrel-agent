@@ -12,3 +12,8 @@ kestrel-*.tar.gz
 .omc/
 .pr-body.txt
 rust_files.txt
+
+# IDE / runtime artifacts
+.claude-flow/
+.zcode/
+.claude/

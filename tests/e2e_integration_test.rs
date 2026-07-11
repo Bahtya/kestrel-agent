@@ -42,6 +42,7 @@ impl MockProvider {
                     prompt_tokens: Some(10),
                     completion_tokens: Some(5),
                     total_tokens: Some(15),
+                    ..Default::default()
                 }),
                 finish_reason: Some("stop".to_string()),
             }],
@@ -296,6 +297,7 @@ async fn test_e2e_tool_call_flow() {
                 prompt_tokens: Some(20),
                 completion_tokens: Some(10),
                 total_tokens: Some(30),
+                ..Default::default()
             }),
             finish_reason: Some("tool_calls".to_string()),
         },
@@ -308,6 +310,7 @@ async fn test_e2e_tool_call_flow() {
                 prompt_tokens: Some(40),
                 completion_tokens: Some(15),
                 total_tokens: Some(55),
+                ..Default::default()
             }),
             finish_reason: Some("stop".to_string()),
         },

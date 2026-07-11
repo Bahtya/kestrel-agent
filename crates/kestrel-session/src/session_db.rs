@@ -238,6 +238,17 @@ impl SessionDb {
 
         for entry in entries {
             let role = role_str(&entry.role);
+
+            // Skip Tool-result messages from FTS indexing — they often contain
+            // sensitive data (file contents, API keys, command output) that
+            // should not be globally searchable. The row is still stored
+            // (for read/scroll modes) but with empty content in the FTS index.
+            let fts_content = if entry.role == kestrel_core::MessageRole::Tool {
+                String::new() // Don't index tool results for search
+            } else {
+                entry.content.clone()
+            };
+
             let tool_calls_json = entry
                 .tool_calls
                 .as_ref()
@@ -246,7 +257,7 @@ impl SessionDb {
                 .timestamp
                 .map(|t| t.timestamp_millis() as f64 / 1000.0)
                 .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as f64 / 1000.0);
-            let token_count = (entry.content.len() / 4) as i64;
+            let token_count = (entry.content.chars().count() / 4) as i64;
             let tool_name = entry
                 .tool_calls
                 .as_ref()
@@ -261,7 +272,7 @@ impl SessionDb {
                 rusqlite::params![
                     session_key,
                     role,
-                    entry.content,
+                    fts_content,
                     entry.tool_call_id,
                     tool_calls_json,
                     tool_name,
@@ -523,18 +534,19 @@ fn decompose_source(
 
 /// Sanitize a raw query string into an FTS5-safe query.
 ///
-/// The trigram tokenizer matches by 3-character substrings. For multi-word
-/// queries, we pass the raw query directly — the trigram tokenizer handles
-/// it naturally. We only guard against FTS5 special prefix syntax characters
-/// that could cause parse errors.
+/// FTS5 query syntax treats `"`, `*`, `(`, `)`, `:`, and `NEAR` as special.
+/// The trigram tokenizer matches by 3-character substrings. We wrap the
+/// entire query in double quotes to treat it as a phrase query, escaping
+/// any embedded double quotes. This prevents FTS5 syntax errors from
+/// user-provided search terms.
 fn sanitize_fts_query(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    // For trigram tokenizer, pass the query as-is. The tokenizer will
-    // extract trigrams from the query string and match them.
-    trimmed.to_string()
+    // Escape embedded double quotes by doubling them (FTS5 convention).
+    let escaped = trimmed.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 /// Map a [`MessageRole`] to its lowercase string form for storage.
@@ -639,7 +651,9 @@ mod tests {
         session2.add_user_message("What is the weather today".to_string());
         db.persist_session(&session2).unwrap();
 
-        let hits = db.search_messages("database port", 10).unwrap();
+        // Search for a substring that exists in the stored content.
+        // sanitize_fts_query wraps in quotes for phrase matching.
+        let hits = db.search_messages("database", 10).unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].session_id, "telegram:456");
     }

@@ -144,10 +144,11 @@ fn extract_rescue_candidates(messages: &[SessionEntry]) -> Vec<(String, MemoryCa
         {
             // Decisions → facts
             candidates.push((truncate_for_memory(content), MemoryCategory::Fact));
-        } else if msg.role == MessageRole::User && content.len() >= 30 {
-            // Substantive user messages → agent notes
-            candidates.push((truncate_for_memory(content), MemoryCategory::AgentNote));
         }
+        // Note: we intentionally do NOT store generic user messages as AgentNote.
+        // The governance layer (commit 34edc79) removed auto-store to prevent
+        // agent_note flooding. Only error lessons and decisions are rescued —
+        // these are high-signal durable facts worth preserving.
     }
 
     // Dedup by content (avoid storing near-identical messages)

@@ -96,6 +96,10 @@ pub struct AgentLoop {
     skill_registry: Option<Arc<SkillRegistry>>,
     hooks: Arc<RwLock<CompositeHook>>,
     running: Arc<RwLock<bool>>,
+    /// Shutdown signal for the main loop and background tasks.
+    /// Triggered by `stop()`, awaited via `select!` so no RwLock guard
+    /// is held across `.await` (which would deadlock stop()).
+    shutdown_token: tokio_util::sync::CancellationToken,
     compaction_config: CompactionConfig,
     /// Shared set of channel names currently connected.
     connected_channels: Arc<parking_lot::RwLock<HashSet<String>>>,
@@ -157,6 +161,7 @@ impl AgentLoop {
             telegram_channel: None,
             active_sessions: Arc::new(DashMap::new()),
             pending_messages: Arc::new(DashMap::new()),
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -182,27 +187,36 @@ impl AgentLoop {
         // Spawn background interrupt listener that cancels sessions via
         // InterruptRequested bus events. This bypasses the sequential mpsc
         // bottleneck so /stop works even while an agent run is in progress.
+        //
+        // The listener races `event_rx.recv()` against the shutdown token
+        // via `select!`. This avoids holding an RwLock read guard across
+        // `.await` (which would deadlock `stop()`).
         let interrupt_active = self.active_sessions.clone();
         let interrupt_bus = self.bus.clone();
-        let interrupt_running = self.running.clone();
+        let interrupt_shutdown = self.shutdown_token.clone();
         let interrupt_pending = self.pending_messages.clone();
         tokio::spawn(async move {
             let mut event_rx = interrupt_bus.subscribe_events();
-            while *interrupt_running.read().await {
-                match event_rx.recv().await {
-                    Ok(AgentEvent::InterruptRequested { session_key }) => {
-                        if let Some((_, token)) = interrupt_active.remove(&session_key) {
-                            info!("Interrupt requested for session {}", session_key);
-                            token.cancel();
-                            // Clear any queued pending message for this session
-                            interrupt_pending.remove(&session_key);
+            loop {
+                tokio::select! {
+                    biased; // check shutdown first for prompt response
+                    _ = interrupt_shutdown.cancelled() => break,
+                    result = event_rx.recv() => {
+                        match result {
+                            Ok(AgentEvent::InterruptRequested { session_key }) => {
+                                if let Some((_, token)) = interrupt_active.remove(&session_key) {
+                                    info!("Interrupt requested for session {}", session_key);
+                                    token.cancel();
+                                    interrupt_pending.remove(&session_key);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Interrupt listener lagged by {n} events");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("Interrupt listener lagged by {n} events");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -215,9 +229,23 @@ impl AgentLoop {
             }
         };
 
-        while *self.running.read().await {
-            match inbound_rx.recv().await {
-                Some(msg) => {
+        // Main message loop. Use `select!` to race the inbound receiver
+        // against the shutdown token, so `stop()` unblocks immediately
+        // without waiting for the next message. This avoids holding an
+        // RwLock read guard across `.await`.
+        let main_shutdown = self.shutdown_token.clone();
+        loop {
+            tokio::select! {
+                biased; // check shutdown first for prompt response
+                _ = main_shutdown.cancelled() => {
+                    info!("Shutdown signal received, stopping agent loop");
+                    break;
+                }
+                msg = inbound_rx.recv() => {
+                    let Some(msg) = msg else {
+                        info!("Inbound channel closed, stopping agent loop");
+                        break;
+                    };
                     // Record activity for heartbeat tracking
                     *self.agent_activity.write() = Some(chrono::Local::now());
 
@@ -294,10 +322,6 @@ impl AgentLoop {
                             self.pending_messages.remove(&timeout_session_key);
                         }
                     }
-                }
-                None => {
-                    info!("Inbound channel closed, stopping agent loop");
-                    break;
                 }
             }
         }
@@ -1083,9 +1107,15 @@ impl AgentLoop {
     }
 
     /// Stop the agent loop.
-    pub async fn stop(&self) {
+    ///
+    /// Triggers the shutdown signal which unblocks the main loop and
+    /// background interrupt listener via `select!`. This does NOT acquire
+    /// the `running` write lock — that would deadlock if any task holds
+    /// the read guard across an `.await`. The `running` flag is set to
+    /// `false` by `run()` itself when it exits.
+    pub fn stop(&self) {
         info!("Stopping agent loop");
-        *self.running.write().await = false;
+        self.shutdown_token.cancel();
     }
 
     /// Get a reference to the hooks for adding new hooks.

@@ -41,6 +41,8 @@ pub struct TantivyStore {
     reader: IndexReader,
     writer: Arc<Mutex<IndexWriter>>,
     max_entries: usize,
+    /// Jieba segmenter reused for query pre-segmentation (see `segment_query`).
+    jieba: jieba_rs::Jieba,
     // Pre-bound field handles
     id_field: Field,
     content_field: Field,
@@ -102,6 +104,7 @@ impl TantivyStore {
             reader,
             writer: Arc::new(Mutex::new(writer)),
             max_entries: config.max_entries,
+            jieba: jieba_rs::Jieba::new(),
             id_field,
             content_field,
             category_field,
@@ -182,11 +185,16 @@ impl TantivyStore {
     fn build_query(&self, query: &MemoryQuery) -> Result<Box<dyn tantivy::query::Query>> {
         let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
 
-        // Text search via QueryParser (uses jieba+LowerCaser tokenizer on content field)
+        // Text search via QueryParser (uses jieba+LowerCaser tokenizer on content field).
+        // Pre-segment the query with the SAME analyzer and join tokens with spaces, so that
+        // unsegmented CJK input becomes a Boolean OR of terms (BM25-ranked) instead of one long
+        // phrase query — which almost never matches consecutive positions in a document and thus
+        // silently returned zero results for natural-language Chinese queries.
         if let Some(ref text) = query.text {
             if !text.is_empty() {
+                let segmented = self.segment_query(text);
                 let parser = QueryParser::for_index(&self.index, vec![self.content_field]);
-                let (parsed, _errors) = parser.parse_query_lenient(text);
+                let (parsed, _errors) = parser.parse_query_lenient(&segmented);
                 clauses.push((Occur::Must, parsed));
             }
         }
@@ -219,6 +227,24 @@ impl TantivyStore {
             Ok(clauses.remove(0).1)
         } else {
             Ok(Box::new(BooleanQuery::new(clauses)))
+        }
+    }
+
+    /// Pre-segment a query string with the content field's analyzer (jieba + LowerCaser) and
+    /// join the resulting tokens with spaces. This makes `parse_query_lenient` treat CJK input
+    /// as a Boolean OR of terms rather than one phrase query requiring consecutive positions.
+    fn segment_query(&self, text: &str) -> String {
+        let joined: String = self
+            .jieba
+            .cut(text, false)
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<&str>>()
+            .join(" ");
+        if joined.is_empty() {
+            text.to_string()
+        } else {
+            joined
         }
     }
 

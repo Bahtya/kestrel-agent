@@ -215,25 +215,13 @@ impl AgentRunner {
             "Starting agent run"
         );
 
-        // Inject recalled memory context into the last user message (a copy —
-        // the persisted session is never mutated). This mirrors the hermes-agent
-        // Inject recalled memory context BEFORE the user's question.
-        // Putting it first (rather than after the question) helps the LLM
-        // read the reference data before processing the query, improving
-        // extraction accuracy. The user's actual question comes last so
-        // it's the most recent token the LLM sees before generating.
-        let mut messages = messages;
-        if let Some(ctx) = memory_context.as_ref() {
-            if !ctx.is_empty() {
-                if let Some(last_user) = messages
-                    .iter_mut()
-                    .rev()
-                    .find(|m| m.role == MessageRole::User)
-                {
-                    last_user.content = format!("{}\n\n{}", ctx, last_user.content);
-                }
-            }
-        }
+        // Inject recalled memory context into the system prompt (mirrors
+        // hermes-agent's `system_prompt_block()` — recall lives in the system
+        // prompt; the persisted session and user message stay untouched).
+        let system_prompt = match memory_context.as_ref() {
+            Some(ctx) if !ctx.is_empty() => format!("{}\n\n{}", system_prompt, ctx),
+            _ => system_prompt,
+        };
 
         // Build initial messages with system prompt
         let mut conversation = vec![Message {

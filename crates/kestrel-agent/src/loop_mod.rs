@@ -28,7 +28,7 @@ use kestrel_core::{Message, MessageRole};
 use kestrel_heartbeat::HeartbeatService;
 use kestrel_learning::event::{ErrorClassification, LearningEvent, LearningEventBus, SkillOutcome};
 use kestrel_learning::prompt::{PromptAssembler, SkillIndexEntry};
-use kestrel_memory::types::MemoryQuery;
+use kestrel_memory::types::{MemoryCategory, MemoryEntry, MemoryQuery};
 use kestrel_memory::MemoryConfig;
 use kestrel_memory::MemoryStore as AsyncMemoryStore;
 use kestrel_providers::{CompletionRequest, ProviderRegistry};
@@ -722,6 +722,11 @@ impl AgentLoop {
                     } else {
                         session.add_assistant_message(result.content.clone());
 
+                        // Store conversation memory (mirrors hermes-agent's `sync_turn(user, asst)`
+                        // per-turn persistence; non-blocking — failures are logged, not propagated).
+                        self.store_conversation_memory(&msg.content, &result.content, &trace_id_str)
+                            .await;
+
                         // Auto-extract structured notes from the response
                         let extracted =
                             NotesManager::extract_notes_from_response(&mut session, &result.content);
@@ -1073,6 +1078,64 @@ impl AgentLoop {
     }
 
     /// Record an audit event if an audit callback is attached.
+    /// Store a memory entry from a completed conversation turn.
+    ///
+    /// Extracts a summary from the user message and agent response, then stores
+    /// it as a [`MemoryCategory::AgentNote`]. Failures are logged but not propagated
+    /// — memory storage must not break the agent loop. This mirrors hermes-agent's
+    /// `sync_turn(user, asst)` per-turn persistence hook.
+    async fn store_conversation_memory(
+        &self,
+        user_msg: &str,
+        agent_response: &str,
+        trace_id: &str,
+    ) {
+        let Some(store) = self.memory_store.as_ref() else {
+            return;
+        };
+
+        let quality = summary_quality(user_msg, agent_response);
+        if quality < MEMORY_QUALITY_THRESHOLD {
+            tracing::debug!(
+                trace_id = %trace_id,
+                "Skipping low-quality conversation memory (quality={:.2}): {:.80}",
+                quality,
+                user_msg
+            );
+            return;
+        }
+
+        let content = format_conversation_summary(user_msg, agent_response);
+
+        // Deduplication: skip if a near-duplicate already exists.
+        if let Ok(existing) = store
+            .search(
+                &MemoryQuery::new()
+                    .with_category(MemoryCategory::AgentNote)
+                    .with_limit(20),
+            )
+            .await
+        {
+            let entries: Vec<_> = existing.into_iter().map(|s| s.entry).collect();
+            if is_near_duplicate(&content, &entries) {
+                tracing::debug!(
+                    trace_id = %trace_id,
+                    "Skipping duplicate conversation memory: {:.80}",
+                    content
+                );
+                return;
+            }
+        }
+
+        let confidence = quality_to_confidence(quality);
+        let entry =
+            MemoryEntry::new(content, MemoryCategory::AgentNote).with_confidence(confidence);
+
+        if let Err(e) = store.store(entry).await {
+            warn!(trace_id = %trace_id, "Failed to store conversation memory: {}", e);
+        }
+    }
+
     fn record_audit(&self, entry: AuditLogEntry) {
         if let Some(cb) = &self.audit_callback {
             cb(entry);
@@ -1527,6 +1590,121 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Truncate a string to at most `max_len` characters, appending "..." if truncated.
+/// Takes the first 200 characters of the user message and first 100 characters
+/// of the agent response to create a deterministic, testable summary.
+fn format_conversation_summary(user_msg: &str, agent_response: &str) -> String {
+    let user_preview = truncate_str(user_msg, 200);
+    let response_preview = truncate_str(agent_response, 100);
+    format!("User: {} | Agent: {}", user_preview, response_preview)
+}
+
+/// Words that indicate trivial or low-information exchanges.
+const TRIVIAL_WORDS: &[&str] = &[
+    "hi", "hello", "hey", "thanks", "thank", "ok", "okay", "bye", "goodbye", "sure", "yes", "no",
+    "please", "sorry", "welcome", "cool", "nice", "great", "awesome", "got", "gotcha", "right",
+    "yep", "nope", "aha", "hmm", "lol", "haha",
+];
+
+/// Compute a quality score (0.0–1.0) for a conversation summary.
+///
+/// Uses deterministic heuristics: content length, information density (unique
+/// meaningful words / total), specificity signals (numbers, CamelCase tokens,
+/// file paths), and triviality detection.
+fn summary_quality(user_msg: &str, agent_response: &str) -> f64 {
+    let combined = format!("{user_msg} {agent_response}");
+    let tokens: Vec<&str> = combined
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        return 0.0;
+    }
+
+    // 1. Length component — penalize very short inputs
+    let total_chars: usize = combined.chars().count();
+    let length_score = (total_chars as f64 / 80.0).min(1.0);
+
+    // 2. Information density — unique lowercase words / total words
+    let lower: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+    let unique_count = {
+        let mut set = std::collections::HashSet::new();
+        for word in &lower {
+            set.insert(word.as_str());
+        }
+        set.len()
+    };
+    let density = unique_count as f64 / lower.len() as f64;
+
+    // 3. Specificity — bonus for numbers, CamelCase, paths, code-like tokens
+    let mut specificity_hits = 0usize;
+    for token in &tokens {
+        if token.chars().any(|c| c.is_ascii_digit()) {
+            specificity_hits += 1;
+        } else if token.chars().filter(|c| c.is_uppercase()).count() >= 2
+            && token.chars().filter(|c| c.is_lowercase()).count() >= 1
+        {
+            // CamelCase or ALL_CAPS with lowercase
+            specificity_hits += 1;
+        } else if token.contains('/') || token.contains('.') || token.contains('_') {
+            specificity_hits += 1;
+        }
+    }
+    let specificity = (specificity_hits as f64 / 4.0).min(1.0);
+
+    // 4. Triviality penalty — if most words are trivial filler
+    let trivial_count = lower
+        .iter()
+        .filter(|w| TRIVIAL_WORDS.contains(&w.as_str()))
+        .count();
+    let trivial_ratio = trivial_count as f64 / lower.len() as f64;
+    let triviality_penalty = if trivial_ratio > 0.6 { 0.3 } else { 1.0 };
+
+    // Weighted combination
+    let score =
+        (0.3 * length_score + 0.3 * density + 0.2 * specificity + 0.2 * 1.0) * triviality_penalty;
+
+    score.clamp(0.0, 1.0)
+}
+
+/// Minimum quality score required to store a conversation summary.
+const MEMORY_QUALITY_THRESHOLD: f64 = 0.2;
+
+/// Map a quality score to a confidence value in [0.3, 0.9].
+fn quality_to_confidence(quality: f64) -> f64 {
+    0.3 + quality * 0.6
+}
+
+/// Check whether a new summary is a near-duplicate of existing entries.
+///
+/// Returns `true` if any existing entry shares ≥ 80% of words with the new content.
+fn is_near_duplicate(new_content: &str, existing: &[kestrel_memory::MemoryEntry]) -> bool {
+    let new_words: std::collections::HashSet<String> = new_content
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+    if new_words.is_empty() {
+        return false;
+    }
+
+    for entry in existing {
+        let existing_words: std::collections::HashSet<String> = entry
+            .content
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .collect();
+        if existing_words.is_empty() {
+            continue;
+        }
+        let overlap = new_words.intersection(&existing_words).count();
+        let ratio = overlap as f64 / new_words.len().min(existing_words.len()) as f64;
+        if ratio >= 0.8 {
+            return true;
+        }
+    }
+    false
+}
+
 fn truncate_str(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         s

@@ -1007,7 +1007,7 @@ impl AgentLoop {
                 // Sort by created_at descending (newest first) so the budget
                 // truncation keeps the most recent memories rather than
                 // arbitrary segment/doc-id order from tantivy.
-                results.sort_by(|a, b| b.entry.created_at.cmp(&a.entry.created_at));
+                results.sort_by_key(|b| std::cmp::Reverse(b.entry.created_at));
 
                 let count = results.len();
                 let mut lines = Vec::new();

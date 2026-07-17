@@ -307,8 +307,8 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kestrel_core::{MessageRole, Platform, SessionSource};
-    use kestrel_session::{Session, SessionEntry, SessionMetadata};
+    use kestrel_core::{Platform, SessionSource};
+    use kestrel_session::{Session, SessionMetadata};
 
     async fn make_db_with_sessions() -> Arc<SessionDb> {
         let db = Arc::new(SessionDb::in_memory().unwrap());

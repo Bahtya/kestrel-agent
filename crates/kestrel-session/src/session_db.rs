@@ -499,9 +499,7 @@ impl SessionDb {
 // ─── helpers ─────────────────────────────────────────────────────
 
 /// Extract column values from a session's source metadata.
-fn decompose_source(
-    session: &Session,
-) -> (
+type DecomposedSource = (
     String,
     Option<String>,
     String,
@@ -509,7 +507,9 @@ fn decompose_source(
     Option<String>,
     Option<String>,
     Option<String>,
-) {
+);
+
+fn decompose_source(session: &Session) -> DecomposedSource {
     match &session.source {
         Some(src) => (
             src.platform.as_str().to_string(),
@@ -580,8 +580,8 @@ impl SessionSourceExt for kestrel_core::SessionSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Session, SessionEntry, SessionMetadata};
-    use kestrel_core::{MessageRole, Platform, SessionSource};
+    use crate::types::{Session, SessionMetadata};
+    use kestrel_core::{Platform, SessionSource};
 
     fn make_session(key: &str, platform: Platform) -> Session {
         let mut session = Session::new(key.to_string());

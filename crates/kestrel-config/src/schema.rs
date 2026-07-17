@@ -1363,6 +1363,7 @@ log_format: text
     #[test]
     fn test_provider_entry_optional_fields() {
         let entry = ProviderEntry {
+            enable_cache_control: true,
             api_key: None,
             base_url: None,
             model: None,

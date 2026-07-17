@@ -18,20 +18,20 @@ const MAX_FLOOD_STRIKES: u32 = 3;
 
 const OPEN_THINK_TAGS: &[&str] = &[
     "<REASONING_SCRATCHPAD>",
-    "\u{1f9e0}",
     "<reasoning>",
     "<THINKING>",
     "<thinking>",
     "<thought>",
+    "<think>",
 ];
 
 const CLOSE_THINK_TAGS: &[&str] = &[
     "</REASONING_SCRATCHPAD>",
-    "\u{1fae0}",
     "</reasoning>",
     "</THINKING>",
     "</thinking>",
     "</thought>",
+    "</think>",
 ];
 
 /// Manages progressive editing of a single platform message during streaming.

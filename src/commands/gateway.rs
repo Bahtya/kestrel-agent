@@ -370,9 +370,34 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
     // ── Shared bus ────────────────────────────────────────────
     let bus = MessageBus::new();
 
-    // ── Session manager ───────────────────────────────────────
+    // ── Session manager + session database ────────────────────
     let home = kestrel_config::paths::get_kestrel_home()?;
-    let session_manager = SessionManager::new(home.clone())?;
+
+    // Initialize the SQLite + FTS5 session database for session_search.
+    // Runs in parallel with JSONL persistence — JSONL remains authoritative.
+    let session_db_path = home.join("sessions.db");
+    let session_db: Arc<kestrel_session::SessionDb> =
+        match kestrel_session::SessionDb::new(&session_db_path) {
+            Ok(db) => {
+                info!(
+                    "Session database initialized (SQLite + FTS5 at {})",
+                    session_db_path.display()
+                );
+                Arc::new(db)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize session database, continuing without session_search: {}",
+                    e
+                );
+                return Err(anyhow::anyhow!(
+                    "Session database initialization failed: {}",
+                    e
+                ));
+            }
+        };
+
+    let session_manager = SessionManager::new(home.clone())?.with_session_db(session_db.clone());
 
     // ── Provider registry ─────────────────────────────────────
     let provider_registry = ProviderRegistry::from_config(&config)?;
@@ -479,6 +504,10 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
         info!("Memory tools registered (store_memory, recall_memory)");
     }
 
+    // Register session_search tool backed by the SQLite + FTS5 index.
+    builtins::register_session_search_tool(&tool_registry, session_db.clone());
+    info!("Session search tool registered (session_search)");
+
     let agent_loop = {
         let mut al = AgentLoop::new(
             config.clone(),
@@ -528,6 +557,21 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
         // Wire prompt assembler for dynamic system prompt construction
         al = al.with_prompt_assembler(PromptAssembler::new());
         info!("Prompt assembler wired into agent loop");
+
+        // Wire compaction config with pre-compression memory rescue hooks.
+        // These hooks extract durable facts and ensure session history is
+        // fully indexed before old messages are compacted away.
+        let mut compaction_config = kestrel_agent::CompactionConfig::default();
+        if let Some(ref ms) = memory_store {
+            compaction_config.hooks.push(Arc::new(
+                kestrel_agent::memory_rescue::MemoryRescueHook::new(ms.clone()),
+            ));
+        }
+        compaction_config.hooks.push(Arc::new(
+            kestrel_agent::memory_rescue::SessionRescueHook::new(session_db.clone()),
+        ));
+        al = al.with_compaction_config(compaction_config);
+        info!("Compaction hooks wired (memory_rescue, session_rescue)");
 
         // Wire Telegram channel for streaming display
         if let Some(tg) = telegram_stream_channel {

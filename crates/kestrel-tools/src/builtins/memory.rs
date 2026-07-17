@@ -35,9 +35,17 @@ impl Tool for StoreMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Store a piece of information in long-term memory for later recall. \
-         Use this to remember facts about the user, project conventions, \
-         lessons learned, or any knowledge worth persisting across conversations."
+        "Save durable facts to persistent memory that survive across sessions. \
+         Memory is injected into every future turn, so keep entries compact and high-signal.\n\n\
+         WHEN: save proactively when the user states a preference, correction, or personal \
+         detail, or you learn a stable fact about their environment, conventions, or workflow. \
+         Priority: user preferences & corrections > environment facts > procedures. The best \
+         memory stops the user repeating themselves.\n\n\
+         SKIP: trivial/obvious info, easily re-discovered facts, raw data dumps, task progress, \
+         completed-work logs, temporary TODO state, conversation summaries (use session_search \
+         for those). Do not record what was discussed in the current conversation.\n\n\
+         Write memories as declarative facts: 'User prefers concise responses' yes, \
+         'Always respond concisely' no."
     }
 
     fn parameters_schema(&self) -> Value {

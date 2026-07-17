@@ -283,6 +283,7 @@ mod tests {
     fn resolve_overrides_from_config() {
         let mut config = default_config();
         config.providers.anthropic = Some(kestrel_config::schema::ProviderEntry {
+            enable_cache_control: true,
             model_timeouts: {
                 let mut map = std::collections::HashMap::new();
                 map.insert(
@@ -309,6 +310,7 @@ mod tests {
     fn wildcard_no_match_falls_through() {
         let mut config = default_config();
         config.providers.anthropic = Some(kestrel_config::schema::ProviderEntry {
+            enable_cache_control: true,
             model_timeouts: {
                 let mut map = std::collections::HashMap::new();
                 map.insert(

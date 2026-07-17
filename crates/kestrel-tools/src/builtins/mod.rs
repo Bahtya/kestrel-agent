@@ -7,6 +7,7 @@ pub mod message;
 #[cfg(feature = "lua-script")]
 pub mod script;
 pub mod search;
+pub mod session_search;
 pub mod shell;
 pub mod spawn;
 pub mod terminal;
@@ -67,6 +68,13 @@ pub fn register_all_with_config(registry: &ToolRegistry, config: BuiltinsConfig)
 pub fn register_memory_tools(registry: &ToolRegistry, store: Arc<dyn MemoryStore>) {
     registry.register(memory::StoreMemoryTool::new(store.clone()));
     registry.register(memory::RecallMemoryTool::new(store));
+}
+
+/// Register the session_search tool backed by a [`SessionDb`].
+///
+/// Enables the agent to search past conversation history via SQLite + FTS5.
+pub fn register_session_search_tool(registry: &ToolRegistry, db: Arc<kestrel_session::SessionDb>) {
+    registry.register(session_search::SessionSearchTool::new(db));
 }
 
 /// Register terminal multiplexer tools that require a terminal manager.

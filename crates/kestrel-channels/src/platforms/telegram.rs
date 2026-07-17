@@ -21,7 +21,7 @@ use kestrel_bus::events::InboundMessage;
 use kestrel_core::{MediaAttachment, MessageType, Platform, SessionSource};
 
 use crate::base::{BaseChannel, SendResult};
-use crate::platforms::telegram_format::markdown_to_telegram;
+use crate::platforms::telegram_format::{markdown_to_html, markdown_to_telegram, strip_markdown};
 
 const TELEGRAM_PARSE_MODE: &str = "MarkdownV2";
 
@@ -1942,7 +1942,7 @@ impl BaseChannel for TelegramChannel {
         let (text, parse_mode) = Self::prepare_outbound_text(content);
         if text.len() <= 4096 {
             return self
-                .send_single_message(chat_id, &text, &parse_mode, reply_to)
+                .send_single_message(chat_id, &text, content, &parse_mode, reply_to)
                 .await;
         }
 
@@ -1958,8 +1958,11 @@ impl BaseChannel for TelegramChannel {
                 None
             };
             // Chunk is already in MarkdownV2; reuse the same parse_mode.
+            // For fallback, pass the chunk as raw_markdown (best effort —
+            // chunk boundaries may not align with markdown constructs, but
+            // this is strictly better than feeding MarkdownV2-escaped text).
             let result = self
-                .send_single_message(chat_id, chunk, &parse_mode, reply)
+                .send_single_message(chat_id, chunk, chunk, &parse_mode, reply)
                 .await?;
             if !result.success {
                 return Ok(result);
@@ -2194,10 +2197,15 @@ impl BaseChannel for TelegramChannel {
 
 impl TelegramChannel {
     /// Send a single Telegram message (no splitting).
+    ///
+    /// `text` is the MarkdownV2-escaped text sent to Telegram.
+    /// `raw_markdown` is the original un-escaped content used for HTML/plain
+    /// text fallback when MarkdownV2 is rejected.
     async fn send_single_message(
         &self,
         chat_id: &str,
         text: &str,
+        raw_markdown: &str,
         parse_mode: &Option<String>,
         reply_to: Option<&str>,
     ) -> Result<SendResult> {
@@ -2256,6 +2264,71 @@ impl TelegramChannel {
                 retryable: false,
             })
         } else {
+            // Fallback chain: MarkdownV2 → HTML → plain text.
+            // Telegram's MarkdownV2 parser is notoriously strict; when it
+            // rejects a message we try HTML (which preserves basic formatting
+            // like bold/italic/code) before falling back to raw plain text.
+            let err_desc = tg_resp.description.as_deref().unwrap_or("");
+            if parse_mode.as_deref() == Some(TELEGRAM_PARSE_MODE)
+                && (err_desc.contains("can't parse entities") || err_desc.contains("Bad Request"))
+            {
+                // Attempt 1: retry as HTML.
+                let html_text = markdown_to_html(raw_markdown);
+                warn!(
+                    "Telegram MarkdownV2 parse failed, retrying as HTML: {}",
+                    err_desc
+                );
+                let body = SendMessageBody {
+                    chat_id: chat_id_num,
+                    text: html_text,
+                    parse_mode: Some("HTML".to_string()),
+                    reply_to_message_id: reply_to_id,
+                    reply_markup: None,
+                };
+                let resp2 = self.client.post(&url).json(&body).send().await;
+                if let Ok(resp2) = resp2 {
+                    if let Ok(tg_resp2) = resp2.json::<TgResponse<TgSentMessage>>().await {
+                        if tg_resp2.ok {
+                            let msg_id = tg_resp2.result.map(|m| m.message_id.to_string());
+                            return Ok(SendResult {
+                                success: true,
+                                message_id: msg_id,
+                                error: None,
+                                retryable: false,
+                            });
+                        }
+
+                        // Attempt 2: HTML also failed — fall back to plain text.
+                        let err2 = tg_resp2.description.as_deref().unwrap_or("");
+                        warn!(
+                            "Telegram HTML parse also failed, falling back to plain text: {}",
+                            err2
+                        );
+                        let plain = strip_markdown(raw_markdown);
+                        let body3 = SendMessageBody {
+                            chat_id: chat_id_num,
+                            text: plain,
+                            parse_mode: None,
+                            reply_to_message_id: reply_to_id,
+                            reply_markup: None,
+                        };
+                        let resp3 = self.client.post(&url).json(&body3).send().await;
+                        if let Ok(resp3) = resp3 {
+                            if let Ok(tg_resp3) = resp3.json::<TgResponse<TgSentMessage>>().await {
+                                if tg_resp3.ok {
+                                    let msg_id = tg_resp3.result.map(|m| m.message_id.to_string());
+                                    return Ok(SendResult {
+                                        success: true,
+                                        message_id: msg_id,
+                                        error: None,
+                                        retryable: false,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(SendResult {
                 success: false,
                 message_id: None,

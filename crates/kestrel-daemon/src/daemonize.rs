@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chdir, close, dup2, fork, setsid, ForkResult};
 use std::fs::File;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::IntoRawFd;
 
 /// Daemonize the current process using the classic double-fork technique.
 ///
@@ -99,8 +99,11 @@ pub fn daemonize(working_dir: &str, log_file: Option<&str>) -> Result<()> {
 /// Stdin and stdout go to `/dev/null`. Stderr goes to `log_file` if provided,
 /// otherwise also to `/dev/null`.
 fn redirect_stdio(log_file: Option<&str>) -> Result<()> {
+    // Open /dev/null and leak its fd via `into_raw_fd` — we manually manage
+    // the lifetime below. Using `as_raw_fd` + `close()` would cause an
+    // IO-safety violation when the `File` is dropped (double-close).
     let devnull = File::open("/dev/null").context("open /dev/null")?;
-    let devnull_fd = devnull.as_raw_fd();
+    let devnull_fd = devnull.into_raw_fd();
 
     // stdin → /dev/null
     dup2(devnull_fd, 0).context("dup2 stdin")?;
@@ -114,12 +117,15 @@ fn redirect_stdio(log_file: Option<&str>) -> Result<()> {
             .append(true)
             .open(path)
             .context("open log file for stderr")?;
-        dup2(err_file.as_raw_fd(), 2).context("dup2 stderr to log file")?;
+        let err_fd = err_file.into_raw_fd();
+        dup2(err_fd, 2).context("dup2 stderr to log file")?;
+        // Close the original err fd (fd 2 now holds the duplicate).
+        close(err_fd).ok();
     } else {
         dup2(devnull_fd, 2).context("dup2 stderr")?;
     }
 
-    // Close the original /dev/null fd (fds 0,1,2 are now the active ones)
+    // Close the original /dev/null fd (fds 0,1,2 are now the active duplicates).
     close(devnull_fd).ok();
 
     Ok(())

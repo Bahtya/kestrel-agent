@@ -186,7 +186,12 @@ impl AgentRunner {
 
     /// Run the agent loop with a system prompt and message history.
     /// Uses streaming if a stream_tx is configured.
-    pub async fn run(&self, system_prompt: String, messages: Vec<Message>) -> Result<RunResult> {
+    pub async fn run(
+        &self,
+        system_prompt: String,
+        messages: Vec<Message>,
+        memory_context: Option<String>,
+    ) -> Result<RunResult> {
         let model = &self.config.agent.model;
         let provider_name = self.config.agent.provider.as_deref().unwrap_or("");
         let max_iterations = self.config.agent.max_iterations;
@@ -209,6 +214,14 @@ impl AgentRunner {
             llm_provider = %provider.name(),
             "Starting agent run"
         );
+
+        // Inject recalled memory context into the system prompt (mirrors
+        // hermes-agent's `system_prompt_block()` — recall lives in the system
+        // prompt; the persisted session and user message stay untouched).
+        let system_prompt = match memory_context.as_ref() {
+            Some(ctx) if !ctx.is_empty() => format!("{}\n\n{}", system_prompt, ctx),
+            _ => system_prompt,
+        };
 
         // Build initial messages with system prompt
         let mut conversation = vec![Message {
@@ -285,12 +298,26 @@ impl AgentRunner {
                 resp
             };
 
-            // Track usage
+            // Track usage — accumulate across iterations (not .or() which
+            // only keeps the first value). Each LLM call reports its own token
+            // usage, and the agent loop may make several calls per turn.
             if let Some(usage) = &response.usage {
-                total_usage.prompt_tokens = total_usage.prompt_tokens.or(usage.prompt_tokens);
-                total_usage.completion_tokens =
-                    total_usage.completion_tokens.or(usage.completion_tokens);
-                total_usage.total_tokens = total_usage.total_tokens.or(usage.total_tokens);
+                total_usage.prompt_tokens =
+                    Some(total_usage.prompt_tokens.unwrap_or(0) + usage.prompt_tokens.unwrap_or(0));
+                total_usage.completion_tokens = Some(
+                    total_usage.completion_tokens.unwrap_or(0)
+                        + usage.completion_tokens.unwrap_or(0),
+                );
+                total_usage.total_tokens =
+                    Some(total_usage.total_tokens.unwrap_or(0) + usage.total_tokens.unwrap_or(0));
+                total_usage.cache_read_tokens = Some(
+                    total_usage.cache_read_tokens.unwrap_or(0)
+                        + usage.cache_read_tokens.unwrap_or(0),
+                );
+                total_usage.cache_write_tokens = Some(
+                    total_usage.cache_write_tokens.unwrap_or(0)
+                        + usage.cache_write_tokens.unwrap_or(0),
+                );
             }
 
             // If no tool calls, we're done

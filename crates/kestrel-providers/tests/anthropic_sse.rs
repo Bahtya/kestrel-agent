@@ -117,6 +117,7 @@ fn make_config(port: u16) -> AnthropicConfig {
         model: "claude-sonnet-4-20250514".to_string(),
         api_version: Some("2023-06-01".to_string()),
         base_url: Some(format!("http://127.0.0.1:{}", port)),
+        ..Default::default()
     }
 }
 

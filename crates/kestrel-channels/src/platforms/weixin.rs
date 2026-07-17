@@ -2110,7 +2110,7 @@ async fn process_message(
         let mime = media_item
             .mime_type
             .as_deref()
-            .and_then(|m| if m.is_empty() { None } else { Some(m) })
+            .filter(|m| !m.is_empty())
             .or_else(|| guess_mime_from_filename(&file_name))
             .unwrap_or_else(|| item_type_to_mime(item_type));
 

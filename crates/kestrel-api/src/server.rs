@@ -665,7 +665,7 @@ async fn non_stream_completion(
     )
     .with_trace_id(&request_id);
 
-    match runner.run(system_prompt, messages).await {
+    match runner.run(system_prompt, messages, None).await {
         Ok(result) => {
             let response = ChatCompletionResponse {
                 id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -739,7 +739,7 @@ async fn stream_completion(
     )
     .with_trace_id(&request_id);
 
-    let stream_result = runner.run(system_prompt, messages).await;
+    let stream_result = runner.run(system_prompt, messages, None).await;
     let cancel = state.cancel.clone();
 
     let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = match stream_result

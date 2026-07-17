@@ -11,6 +11,7 @@ pub mod context_budget;
 pub mod heartbeat;
 pub mod hook;
 pub mod loop_mod;
+pub mod memory_rescue;
 pub mod notes;
 pub mod runner;
 pub mod skills;
@@ -19,7 +20,9 @@ pub mod stream_progress;
 pub mod subagent;
 
 pub use cancel_registry::CancelRegistry;
-pub use compaction::{compact_session, CompactionConfig, CompactionResult, CompactionStrategy};
+pub use compaction::{
+    compact_session, CompactionConfig, CompactionHook, CompactionResult, CompactionStrategy,
+};
 pub use context::ContextBuilder;
 pub use context_budget::{
     prune_messages, BudgetAllocation, ContextBudget, ContextBudgetConfig, PruneResult,

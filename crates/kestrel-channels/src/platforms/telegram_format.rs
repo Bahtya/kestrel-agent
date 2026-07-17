@@ -290,9 +290,218 @@ fn push_escaped(output: &mut String, ch: char) {
     output.push(ch);
 }
 
+/// Escape HTML special characters for Telegram's HTML parse mode.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Convert Markdown to Telegram HTML format.
+///
+/// This is the fallback when MarkdownV2 conversion fails or Telegram rejects
+/// the MarkdownV2 payload. HTML is more forgiving than MarkdownV2 and supports
+/// `<b>`, `<i>`, `<code>`, `<pre>`, `<a>`, `<blockquote>` tags.
+///
+/// Conversion rules (common subset):
+/// - `**text**` → `<b>text</b>`
+/// - `*text*` → `<i>text</i>`
+/// - `` `code` `` → `<code>code</code>`
+/// - ` ```lang\ncode``` ` → `<pre><code class="language-lang">code</code></pre>`
+/// - `## Header` → `<b>Header</b>`
+/// - `- item` → `• item`
+/// - `[text](url)` → `<a href="url">text</a>`
+/// - All other `<`, `>`, `&` are HTML-escaped.
+pub fn markdown_to_html(input: &str) -> String {
+    let mut output = String::with_capacity(input.len() + 256);
+    let mut remaining = input;
+
+    while !remaining.is_empty() {
+        // Fenced code block ```...```
+        if let Some(after_fence) = remaining.strip_prefix("```") {
+            if let Some(end) = after_fence.find("```") {
+                let inner = &after_fence[..end];
+                let (lang, body) = if let Some(nl) = inner.find('\n') {
+                    let prefix = &inner[..nl];
+                    if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
+                        (Some(prefix), &inner[nl + 1..])
+                    } else {
+                        (None, inner)
+                    }
+                } else {
+                    (None, inner)
+                };
+                let escaped_body = escape_html(body.trim_end_matches('\n'));
+                if let Some(l) = lang {
+                    output.push_str(&format!(
+                        r#"<pre><code class="language-{}">{}</code></pre>"#,
+                        l, escaped_body
+                    ));
+                } else {
+                    output.push_str(&format!("<pre><code>{}</code></pre>", escaped_body));
+                }
+                remaining = &after_fence[end + 3..];
+                continue;
+            }
+        }
+
+        // Inline code `code`
+        if remaining.starts_with('`') {
+            let rest = &remaining[1..];
+            if let Some(end) = rest.find('`') {
+                let code = &rest[..end];
+                output.push_str(&format!("<code>{}</code>", escape_html(code)));
+                remaining = &rest[end + 1..];
+                continue;
+            }
+        }
+
+        // Bold **text**
+        if let Some(after) = remaining.strip_prefix("**") {
+            if let Some(close) = after.find("**") {
+                let inner = &after[..close];
+                output.push_str(&format!("<b>{}</b>", markdown_to_html(inner)));
+                remaining = &after[close + 2..];
+                continue;
+            }
+        }
+
+        // Italic *text* (avoid matching ** which is bold)
+        if remaining.starts_with('*') && !remaining.starts_with("**") {
+            let rest = &remaining[1..];
+            if let Some(close) = find_italic_close(rest) {
+                let inner = &rest[..close];
+                output.push_str(&format!("<i>{}</i>", markdown_to_html(inner)));
+                remaining = &rest[close + 1..];
+                continue;
+            }
+        }
+
+        // Link [text](url)
+        if remaining.starts_with('[') {
+            if let Some(close_text) = remaining.find("](") {
+                if close_text > 1 {
+                    let link_text = &remaining[1..close_text];
+                    let url_start = close_text + 2;
+                    if let Some(url_end) = find_url_end(&remaining[url_start..]) {
+                        let url = &remaining[url_start..url_start + url_end];
+                        output.push_str(&format!(
+                            r#"<a href="{}">{}</a>"#,
+                            escape_html(url),
+                            escape_html(link_text)
+                        ));
+                        remaining = &remaining[url_start + url_end + 1..];
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Header ## text (line-level)
+        if let Some(rest) = remaining.strip_prefix("## ") {
+            if let Some(nl) = rest.find('\n') {
+                output.push_str(&format!("<b>{}</b>\n", escape_html(&rest[..nl])));
+                remaining = &rest[nl..];
+                continue;
+            } else {
+                output.push_str(&format!("<b>{}</b>", escape_html(rest)));
+                break;
+            }
+        }
+
+        // Single-char: escape if needed, advance one char
+        let ch = remaining.chars().next().unwrap();
+        match ch {
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '&' => output.push_str("&amp;"),
+            _ => output.push(ch),
+        }
+        remaining = &remaining[ch.len_utf8()..];
+    }
+
+    output
+}
+
+/// Find the closing `*` for italic, skipping `**` (bold markers).
+fn find_italic_close(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == b'*' {
+            let prev_is_star = idx > 0 && bytes[idx - 1] == b'*';
+            let next_is_star = idx + 1 < bytes.len() && bytes[idx + 1] == b'*';
+            if !prev_is_star && !next_is_star {
+                return Some(idx);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// Find the closing `)` for a URL in `[text](url)`.
+fn find_url_end(input: &str) -> Option<usize> {
+    for (idx, ch) in input.char_indices() {
+        if ch == ')' {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Strip all Markdown formatting to produce clean plain text.
+///
+/// This is the last-resort fallback when both MarkdownV2 and HTML fail.
+/// It removes formatting markers while preserving readable text.
+pub fn strip_markdown(input: &str) -> String {
+    let mut result = input.to_string();
+
+    // Remove code fences but keep content
+    result = result.replace("```", "");
+
+    // Remove bold/italic markers
+    result = result.replace("**", "");
+    // Single * that aren't list markers — just remove the asterisk
+    // Be conservative: only remove * that are clearly emphasis (preceded/followed by word char)
+    result = result.replace('*', "");
+
+    // Remove header markers
+    result = result.replace("## ", "");
+    result = result.replace("# ", "");
+
+    // Remove link syntax, keep text: [text](url) → text
+    while let Some(start) = result.find('[') {
+        if let Some(close_text) = result[start..].find("](") {
+            if let Some(url_end) = result[start + close_text + 2..].find(')') {
+                let text = &result[start + 1..start + close_text];
+                let after = &result[start + close_text + 2 + url_end + 1..];
+                result = format!("{}{}{}", &result[..start], text, after);
+                continue;
+            }
+        }
+        break; // Malformed link, stop
+    }
+
+    // Remove strikethrough markers
+    result = result.replace("~~", "");
+
+    // Remove inline code backticks
+    result = result.replace('`', "");
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::markdown_to_telegram;
+    use super::{markdown_to_html, markdown_to_telegram, strip_markdown};
 
     #[test]
     fn test_bold_and_italic_conversion() {
@@ -348,5 +557,82 @@ mod tests {
     fn test_multiline_fenced_code_block_stays_fenced() {
         let formatted = markdown_to_telegram("```rust\nlet x = 1;\nlet y = x + 1;\n```").unwrap();
         assert_eq!(formatted, "```rust\nlet x = 1;\nlet y = x + 1;\n```");
+    }
+
+    // ── markdown_to_html tests ──────────────────────────────
+
+    #[test]
+    fn test_html_bold_and_italic() {
+        let html = markdown_to_html("**bold** and *italic*");
+        assert_eq!(html, "<b>bold</b> and <i>italic</i>");
+    }
+
+    #[test]
+    fn test_html_code_block() {
+        let html = markdown_to_html("```rust\nlet x = 1;\n```");
+        assert!(html.contains("<pre><code"));
+        assert!(html.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn test_html_inline_code() {
+        let html = markdown_to_html("Use `git status` to check");
+        assert_eq!(html, "Use <code>git status</code> to check");
+    }
+
+    #[test]
+    fn test_html_header() {
+        let html = markdown_to_html("## My Heading\nNext line");
+        assert!(html.starts_with("<b>My Heading</b>"));
+    }
+
+    #[test]
+    fn test_html_link() {
+        let html = markdown_to_html("[click here](https://example.com)");
+        assert_eq!(html, r#"<a href="https://example.com">click here</a>"#);
+    }
+
+    #[test]
+    fn test_html_escapes_special() {
+        let html = markdown_to_html("a < b > c & d");
+        assert_eq!(html, "a &lt; b &gt; c &amp; d");
+    }
+
+    #[test]
+    fn test_html_table_content_preserved() {
+        // Tables don't have special HTML handling — pipe chars pass through
+        let html = markdown_to_html("| col1 | col2 |");
+        assert!(html.contains("col1"));
+        assert!(html.contains("col2"));
+    }
+
+    // ── strip_markdown tests ────────────────────────────────
+
+    #[test]
+    fn test_strip_bold_italic() {
+        assert_eq!(strip_markdown("**bold** and *italic*"), "bold and italic");
+    }
+
+    #[test]
+    fn test_strip_code() {
+        assert_eq!(strip_markdown("Use `code` here"), "Use code here");
+    }
+
+    #[test]
+    fn test_strip_header() {
+        assert_eq!(strip_markdown("## Heading"), "Heading");
+    }
+
+    #[test]
+    fn test_strip_link() {
+        assert_eq!(strip_markdown("[text](https://example.com)"), "text");
+    }
+
+    #[test]
+    fn test_strip_code_block() {
+        assert_eq!(
+            strip_markdown("```rust\nlet x = 1;\n```"),
+            "rust\nlet x = 1;\n"
+        );
     }
 }

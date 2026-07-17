@@ -23,6 +23,44 @@ pub struct AnthropicConfig {
     pub model: String,
     pub api_version: Option<String>,
     pub base_url: Option<String>,
+    /// Enable Anthropic prompt caching (`cache_control` breakpoints).
+    ///
+    /// When `true` (default), up to 3 ephemeral breakpoints are placed on
+    /// the system prompt, tool definitions, and the last message — keeping
+    /// the stable prefix warm across turns and agent-loop iterations.
+    /// Set to `false` for providers that reject `cache_control`.
+    pub enable_cache_control: bool,
+}
+
+impl Default for AnthropicConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            model: String::new(),
+            api_version: None,
+            base_url: None,
+            enable_cache_control: true,
+        }
+    }
+}
+
+impl AnthropicConfig {
+    /// Create a new config with caching enabled by default.
+    pub fn new(api_key: String, model: String) -> Self {
+        Self {
+            api_key,
+            model,
+            api_version: None,
+            base_url: None,
+            enable_cache_control: true,
+        }
+    }
+
+    /// Disable prompt caching.
+    pub fn without_cache_control(mut self) -> Self {
+        self.enable_cache_control = false;
+        self
+    }
 }
 
 /// Anthropic Claude provider using the Messages API.
@@ -165,8 +203,24 @@ impl AnthropicProvider {
     }
 
     /// Build the request body for the Anthropic API.
+    ///
+    /// When `cache_control` is enabled (default), up to 3 ephemeral cache
+    /// breakpoints are placed to maximize prompt-cache reuse:
+    /// 1. The system prompt (large and stable across turns).
+    /// 2. The tool definitions (large and stable).
+    /// 3. The last conversation message (grows the cached prefix turn over turn).
+    ///
+    /// Anthropic allows at most 4 `cache_control` breakpoints per request.
     fn build_request_body(&self, request: &CompletionRequest) -> serde_json::Value {
-        let (system, messages) = self.convert_messages(&request.messages);
+        let (system, mut messages) = self.convert_messages(&request.messages);
+
+        // Breakpoint 3: tag the last message's final content block.
+        // This grows the cached conversation prefix across the agent loop.
+        if self.config.enable_cache_control {
+            if let Some(last) = messages.last_mut() {
+                tag_last_content_block_with_cache_control(last);
+            }
+        }
 
         let mut body = json!({
             "model": request.model,
@@ -175,13 +229,29 @@ impl AnthropicProvider {
         });
 
         if let Some(sys) = system {
-            body["system"] = json!(sys);
+            if self.config.enable_cache_control {
+                // Breakpoint 1: system prompt as a cached content block.
+                body["system"] = json!([{
+                    "type": "text",
+                    "text": sys,
+                    "cache_control": {"type": "ephemeral"}
+                }]);
+            } else {
+                body["system"] = json!(sys);
+            }
         }
         if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
         if let Some(tools) = &request.tools {
-            body["tools"] = json!(self.convert_tools(tools));
+            let mut tool_values = self.convert_tools(tools);
+            // Breakpoint 2: tag the last tool definition.
+            if self.config.enable_cache_control {
+                if let Some(last_tool) = tool_values.last_mut() {
+                    last_tool["cache_control"] = json!({"type": "ephemeral"});
+                }
+            }
+            body["tools"] = json!(tool_values);
         }
         body
     }
@@ -304,6 +374,12 @@ impl AnthropicProvider {
                                 prompt_tokens: None,
                                 completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
                                 total_tokens: None,
+                                cache_read_tokens: u
+                                    .get("cache_read_input_tokens")
+                                    .and_then(|v| v.as_u64()),
+                                cache_write_tokens: u
+                                    .get("cache_creation_input_tokens")
+                                    .and_then(|v| v.as_u64()),
                             });
                             let tool_call_deltas = build_anthropic_tool_call_deltas(&tc_acc);
                             tc_acc.clear();
@@ -316,6 +392,35 @@ impl AnthropicProvider {
                                     done: false,
                                 }))
                                 .await;
+                        }
+                        "message_stop" => {
+                            // Native Anthropic terminal event — emit done:true
+                            // so consumers don't rely solely on channel-close.
+                            let tool_call_deltas = build_anthropic_tool_call_deltas(&tc_acc);
+                            tc_acc.clear();
+                            let _ = tx
+                                .send(Ok(CompletionChunk {
+                                    delta: None,
+                                    reasoning_content: None,
+                                    tool_call_deltas,
+                                    usage: None,
+                                    done: true,
+                                }))
+                                .await;
+                            return;
+                        }
+                        "error" => {
+                            // Surface mid-stream errors (rate limits, policy violations)
+                            // instead of silently swallowing them.
+                            let err_msg = event
+                                .get("error")
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown stream error");
+                            let _ = tx
+                                .send(Err(anyhow::anyhow!("Anthropic stream error: {}", err_msg)))
+                                .await;
+                            return;
                         }
                         _ => {}
                     }
@@ -487,6 +592,10 @@ impl LlmProvider for AnthropicProvider {
                     prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                     completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
                     total_tokens: None,
+                    cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                    cache_write_tokens: u
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64()),
                 });
 
                 let stop_reason = api_resp
@@ -591,6 +700,34 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
+/// Tag the last content block in a message with `cache_control: ephemeral`.
+///
+/// Anthropic messages can have `content` as either a plain string or an
+/// array of content blocks. When it's a string, we convert it to a single
+/// text block and tag it. When it's an array, we tag the last block.
+/// No-op if the content is empty or not a recognized shape.
+fn tag_last_content_block_with_cache_control(message: &mut serde_json::Value) {
+    let Some(content) = message.get_mut("content") else {
+        return;
+    };
+
+    if let Some(s) = content.as_str() {
+        // Convert plain string to a single cached text block.
+        if !s.is_empty() {
+            *content = json!([{
+                "type": "text",
+                "text": s,
+                "cache_control": {"type": "ephemeral"}
+            }]);
+        }
+    } else if let Some(arr) = content.as_array_mut() {
+        // Tag the last content block.
+        if let Some(last_block) = arr.last_mut() {
+            last_block["cache_control"] = json!({"type": "ephemeral"});
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +739,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: Some("2023-06-01".to_string()),
             base_url: Some("https://custom.api.com".to_string()),
+            ..Default::default()
         };
         assert_eq!(config.api_key, "sk-test-123");
         assert_eq!(config.model, "claude-sonnet-4-20250514");
@@ -616,6 +754,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
 
@@ -633,6 +772,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(provider.name(), "anthropic");
@@ -645,6 +785,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
 
@@ -681,6 +822,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
 
@@ -709,6 +851,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
 
@@ -744,6 +887,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
 
@@ -767,6 +911,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
 
@@ -801,7 +946,12 @@ mod tests {
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
         assert_eq!(body["max_tokens"], 2048);
         assert_eq!(body["temperature"], 0.5);
-        assert_eq!(body["system"], "Be helpful");
+        // System prompt is now a cached content block array (cache_control).
+        let system_arr = body["system"].as_array().unwrap();
+        assert_eq!(system_arr.len(), 1);
+        assert_eq!(system_arr[0]["type"], "text");
+        assert_eq!(system_arr[0]["text"], "Be helpful");
+        assert_eq!(system_arr[0]["cache_control"]["type"], "ephemeral");
         assert!(body["messages"].is_array());
     }
 
@@ -812,6 +962,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(provider.base_url(), "https://api.anthropic.com");
@@ -824,6 +975,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             api_version: None,
             base_url: Some("https://custom.api.com".to_string()),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(provider.base_url(), "https://custom.api.com");

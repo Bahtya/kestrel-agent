@@ -3,14 +3,37 @@
 //! When the estimated token count exceeds a threshold (default 80% of context window),
 //! older messages are replaced with a compact summary. This keeps the agent functional
 //! in long-running sessions without losing essential context.
+//!
+//! Before discarding old messages, registered [`CompactionHook`] implementations
+//! get a chance to extract and persist important content — this is the
+//! "memory rescue" mechanism that prevents loss of durable facts during compression.
 
 use crate::notes::extract_compaction_notes;
 use anyhow::Result;
 use kestrel_core::{
     COMPACTION_KEEP_RECENT, COMPACTION_THRESHOLD_RATIO, DEFAULT_CONTEXT_WINDOW_TOKENS,
 };
-use kestrel_session::Session;
+use kestrel_session::{Session, SessionEntry};
+use std::sync::Arc;
 use tracing::{debug, info};
+
+/// Hook invoked before old messages are discarded during compaction.
+///
+/// Implementations can extract important content (facts, decisions, error
+/// lessons) and persist it to long-term memory before the messages are
+/// summarized away. This mirrors the hermes-agent `on_pre_compress` hook.
+#[async_trait::async_trait]
+pub trait CompactionHook: Send + Sync {
+    /// Human-readable name for logging.
+    fn name(&self) -> &str;
+
+    /// Called with the session and the old messages about to be discarded.
+    ///
+    /// Returns the number of items rescued (for logging/metrics).
+    /// Implementations must be best-effort — failures should be logged,
+    /// not propagated, to avoid breaking compaction.
+    async fn on_pre_compress(&self, session: &Session, old_messages: &[SessionEntry]) -> usize;
+}
 
 /// Compaction strategy for reducing conversation history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +45,7 @@ pub enum CompactionStrategy {
 }
 
 /// Configuration for context compaction.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CompactionConfig {
     /// Maximum context window in tokens.
     pub context_window_tokens: usize,
@@ -32,6 +55,20 @@ pub struct CompactionConfig {
     pub keep_recent: usize,
     /// Compaction strategy.
     pub strategy: CompactionStrategy,
+    /// Pre-compression hooks (memory rescue, session indexing, etc.).
+    pub hooks: Vec<Arc<dyn CompactionHook>>,
+}
+
+impl std::fmt::Debug for CompactionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactionConfig")
+            .field("context_window_tokens", &self.context_window_tokens)
+            .field("threshold_ratio", &self.threshold_ratio)
+            .field("keep_recent", &self.keep_recent)
+            .field("strategy", &self.strategy)
+            .field("hooks_count", &self.hooks.len())
+            .finish()
+    }
 }
 
 impl Default for CompactionConfig {
@@ -41,6 +78,7 @@ impl Default for CompactionConfig {
             threshold_ratio: COMPACTION_THRESHOLD_RATIO,
             keep_recent: COMPACTION_KEEP_RECENT,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         }
     }
 }
@@ -87,7 +125,7 @@ pub struct CompactionResult {
 /// For the `Summarize` strategy, older messages are replaced with a single
 /// system message containing a structured summary. For `Truncate`, older
 /// messages are simply dropped.
-pub fn compact_session(
+pub async fn compact_session(
     session: &mut Session,
     config: &CompactionConfig,
 ) -> Result<CompactionResult> {
@@ -125,13 +163,16 @@ pub fn compact_session(
     }
 
     match config.strategy {
-        CompactionStrategy::Summarize => compact_summarize(session, config),
+        CompactionStrategy::Summarize => compact_summarize(session, config).await,
         CompactionStrategy::Truncate => compact_truncate(session, config),
     }
 }
 
 /// Summarize older messages into a compact system message.
-fn compact_summarize(session: &mut Session, config: &CompactionConfig) -> Result<CompactionResult> {
+async fn compact_summarize(
+    session: &mut Session,
+    config: &CompactionConfig,
+) -> Result<CompactionResult> {
     let messages_before = session.messages.len();
     let tokens_before = session.estimated_tokens();
 
@@ -161,6 +202,28 @@ fn compact_summarize(session: &mut Session, config: &CompactionConfig) -> Result
     // Build summary from old messages (excluding initial system message)
     let old_messages = session.messages[summary_start..split_point].to_vec();
     let summary = build_summary(&old_messages);
+
+    // Run pre-compression hooks: let memory systems rescue important content
+    // before the old messages are summarized away. Each hook is best-effort.
+    let mut total_rescued = 0;
+    for hook in &config.hooks {
+        let rescued = hook.on_pre_compress(session, &old_messages).await;
+        if rescued > 0 {
+            total_rescued += rescued;
+            info!(
+                "Compaction hook '{}' rescued {} items from session '{}'",
+                hook.name(),
+                rescued,
+                session.key
+            );
+        }
+    }
+    if total_rescued > 0 {
+        info!(
+            "Total items rescued by compaction hooks for session '{}': {}",
+            session.key, total_rescued
+        );
+    }
 
     // Extract structured notes from old messages before discarding them.
     // This preserves key information (decisions, action items, questions)
@@ -351,6 +414,7 @@ mod tests {
             threshold_ratio: 0.8,
             keep_recent: 5,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let session = make_session_with_messages(2);
         // 2 exchanges * 2 msgs + 1 system = 5 msgs, ~100 tokens, threshold 800
@@ -364,38 +428,41 @@ mod tests {
             threshold_ratio: 0.5,       // threshold = 100 tokens
             keep_recent: 4,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let session = make_session_with_messages(20);
         assert!(config.needs_compaction(&session));
     }
 
-    #[test]
-    fn test_compact_session_noop_when_below_threshold() {
+    #[tokio::test]
+    async fn test_compact_session_noop_when_below_threshold() {
         let config = CompactionConfig {
             context_window_tokens: 100_000,
             threshold_ratio: 0.8,
             keep_recent: 10,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let mut session = make_session_with_messages(3);
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
         assert_eq!(result.messages_before, result.messages_after);
     }
 
-    #[test]
-    fn test_compact_session_summarize() {
+    #[tokio::test]
+    async fn test_compact_session_summarize() {
         let config = CompactionConfig {
             context_window_tokens: 500,
             threshold_ratio: 0.5, // threshold = 250
             keep_recent: 4,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let mut session = make_session_with_messages(15);
         let before_count = session.messages.len();
         let before_tokens = session.estimated_tokens();
 
         assert!(before_tokens > 250);
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
         assert_eq!(result.messages_before, before_count);
         assert!(result.messages_after < before_count);
         assert!(result.tokens_after < before_tokens);
@@ -405,16 +472,17 @@ mod tests {
         assert!(session.messages[1].content.contains("Conversation Summary"));
     }
 
-    #[test]
-    fn test_compact_session_preserves_system_message() {
+    #[tokio::test]
+    async fn test_compact_session_preserves_system_message() {
         let config = CompactionConfig {
             context_window_tokens: 500,
             threshold_ratio: 0.3,
             keep_recent: 2,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let mut session = make_session_with_messages(10);
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
 
         // First message should still be the original system message
         assert_eq!(session.messages[0].role, MessageRole::System);
@@ -422,33 +490,35 @@ mod tests {
         assert!(result.messages_after < result.messages_before);
     }
 
-    #[test]
-    fn test_compact_session_truncate_strategy() {
+    #[tokio::test]
+    async fn test_compact_session_truncate_strategy() {
         let config = CompactionConfig {
             context_window_tokens: 500,
             threshold_ratio: 0.3,
             keep_recent: 6,
             strategy: CompactionStrategy::Truncate,
+            hooks: Vec::new(),
         };
         let mut session = make_session_with_messages(10);
         let before_count = session.messages.len();
 
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
         assert!(result.messages_after < before_count);
         // truncate(6) keeps system msg + last 6 = 7 total
         assert!(result.messages_after <= 7);
     }
 
-    #[test]
-    fn test_compact_session_too_short() {
+    #[tokio::test]
+    async fn test_compact_session_too_short() {
         let config = CompactionConfig {
             context_window_tokens: 100,
             threshold_ratio: 0.1,
             keep_recent: 100, // Higher than message count
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let mut session = make_session_with_messages(2);
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
         // Should be noop because keep_recent >= message count
         assert_eq!(result.messages_before, result.messages_after);
     }
@@ -467,16 +537,17 @@ mod tests {
         assert!(summary.contains("How do I use Rust?"));
     }
 
-    #[test]
-    fn test_compaction_result_fields() {
+    #[tokio::test]
+    async fn test_compaction_result_fields() {
         let config = CompactionConfig {
             context_window_tokens: 500,
             threshold_ratio: 0.3,
             keep_recent: 2,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let mut session = make_session_with_messages(15);
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
 
         assert!(result.messages_before > result.messages_after);
         assert!(result.tokens_before > result.tokens_after);
@@ -486,13 +557,14 @@ mod tests {
         assert!(result.notes_extracted > 0);
     }
 
-    #[test]
-    fn test_compaction_notes_extracted_count() {
+    #[tokio::test]
+    async fn test_compaction_notes_extracted_count() {
         let config = CompactionConfig {
             context_window_tokens: 500,
             threshold_ratio: 0.3,
             keep_recent: 2,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
         let mut session = Session::new("test:notes_count".to_string());
         session.add_system_message("System".to_string());
@@ -508,18 +580,19 @@ mod tests {
             session.add_assistant_message(format!("filler response {}", i));
         }
 
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
         // Should extract at least summary + decisions + action_items + questions
         assert!(result.notes_extracted >= 1);
     }
 
-    #[test]
-    fn test_compaction_notes_deduplicated() {
+    #[tokio::test]
+    async fn test_compaction_notes_deduplicated() {
         let config = CompactionConfig {
             context_window_tokens: 500,
             threshold_ratio: 0.3,
             keep_recent: 2,
             strategy: CompactionStrategy::Summarize,
+            hooks: Vec::new(),
         };
 
         // Run compaction twice on the same session
@@ -530,7 +603,7 @@ mod tests {
             session.add_assistant_message(format!("Assistant response {}", i));
         }
 
-        let r1 = compact_session(&mut session, &config).unwrap();
+        let r1 = compact_session(&mut session, &config).await.unwrap();
         let notes_after_first = session.all_notes().len();
 
         // Add more messages to trigger second compaction
@@ -539,7 +612,7 @@ mod tests {
             session.add_assistant_message(format!("More assistant response {}", i));
         }
 
-        let r2 = compact_session(&mut session, &config).unwrap();
+        let r2 = compact_session(&mut session, &config).await.unwrap();
 
         // Notes count should be similar (deduped), not doubled
         let notes_after_second = session.all_notes().len();
@@ -555,16 +628,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_truncate_notes_extracted_is_zero() {
+    #[tokio::test]
+    async fn test_truncate_notes_extracted_is_zero() {
         let config = CompactionConfig {
             context_window_tokens: 500,
             threshold_ratio: 0.3,
             keep_recent: 6,
             strategy: CompactionStrategy::Truncate,
+            hooks: Vec::new(),
         };
         let mut session = make_session_with_messages(10);
-        let result = compact_session(&mut session, &config).unwrap();
+        let result = compact_session(&mut session, &config).await.unwrap();
         assert_eq!(result.notes_extracted, 0);
     }
 }

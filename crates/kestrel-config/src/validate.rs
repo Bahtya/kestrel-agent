@@ -1258,6 +1258,7 @@ mod tests {
     fn make_valid_config() -> Config {
         let mut config = Config::default();
         config.providers.openai = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-test-key-12345".to_string()),
             base_url: None,
             model: Some("gpt-4o".to_string()),
@@ -1367,6 +1368,7 @@ mod tests {
     fn test_openai_empty_key() {
         let mut config = make_valid_config();
         config.providers.openai = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some(String::new()),
             base_url: None,
             model: None,
@@ -1384,6 +1386,7 @@ mod tests {
     fn test_openai_bad_prefix() {
         let mut config = make_valid_config();
         config.providers.openai = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("bad-key".to_string()),
             base_url: None,
             model: None,
@@ -1401,6 +1404,7 @@ mod tests {
     fn test_anthropic_bad_prefix() {
         let mut config = make_valid_config();
         config.providers.anthropic = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-wrong-prefix".to_string()),
             base_url: None,
             model: None,
@@ -1418,6 +1422,7 @@ mod tests {
     fn test_anthropic_valid_key() {
         let mut config = make_valid_config();
         config.providers.anthropic = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-ant-api03-valid-key".to_string()),
             base_url: None,
             model: None,
@@ -1479,6 +1484,7 @@ mod tests {
     fn test_ollama_no_base_url() {
         let mut config = make_valid_config();
         config.providers.ollama = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: None,
             base_url: Some(String::new()),
             model: Some("llama3".to_string()),
@@ -2091,6 +2097,7 @@ mod tests {
     fn test_cross_field_provider_not_configured() {
         let mut config = Config::default();
         config.providers.anthropic = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-ant-valid".to_string()),
             base_url: None,
             model: None,
@@ -2109,6 +2116,7 @@ mod tests {
     fn test_cross_field_no_explicit_provider_warns() {
         let mut config = Config::default();
         config.providers.openai = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-test".to_string()),
             base_url: None,
             model: None,
@@ -2183,6 +2191,7 @@ mod tests {
         config.agent.model = String::new();
         config.agent.max_tokens = 0;
         config.providers.openai = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-test".to_string()),
             base_url: None,
             model: None,
@@ -2209,6 +2218,7 @@ mod tests {
     fn test_provider_none_api_key() {
         let mut config = make_valid_config();
         config.providers.openai = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: None,
             base_url: None,
             model: None,
@@ -2230,6 +2240,7 @@ mod tests {
     fn test_multiple_providers() {
         let mut config = make_valid_config();
         config.providers.anthropic = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-ant-valid".to_string()),
             base_url: None,
             model: None,
@@ -2314,6 +2325,7 @@ mod tests {
     fn test_openai_invalid_base_url() {
         let mut config = make_valid_config();
         config.providers.openai = Some(ProviderEntry {
+            enable_cache_control: true,
             api_key: Some("sk-test".to_string()),
             base_url: Some("ftp://bad.proto".to_string()),
             model: None,

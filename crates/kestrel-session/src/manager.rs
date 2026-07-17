@@ -4,6 +4,7 @@
 //! via DashMap, matching the Python session/manager.py SessionManager pattern.
 
 use crate::note_store::NoteStore;
+use crate::session_db::SessionDb;
 use crate::store::SessionStore;
 use crate::types::{Note, Session, SessionEntry};
 use anyhow::Result;
@@ -30,6 +31,13 @@ pub struct SessionManager {
 
     /// Dedicated note file storage.
     note_store: Arc<Mutex<NoteStore>>,
+
+    /// Optional SQLite + FTS5 session database (parallel to JSONL).
+    ///
+    /// Shared via an `Arc<Mutex<Option<...>>>` (like `persist_hook`) so the
+    /// background worker picks up a db attached via `with_session_db` after
+    /// construction.
+    session_db: Arc<Mutex<Option<Arc<SessionDb>>>>,
 
     /// Maximum messages per session before truncation.
     max_history: usize,
@@ -60,6 +68,7 @@ impl SessionManager {
         let store = Arc::new(Mutex::new(store));
         let note_store = Arc::new(Mutex::new(note_store));
         let persist_hook = Arc::new(Mutex::new(None));
+        let session_db: Arc<Mutex<Option<Arc<SessionDb>>>> = Arc::new(Mutex::new(None));
         let (persist_tx, persist_rx) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
         let sessions = Arc::new(DashMap::new());
 
@@ -67,6 +76,7 @@ impl SessionManager {
             sessions.clone(),
             store.clone(),
             note_store.clone(),
+            session_db.clone(),
             persist_hook.clone(),
             persist_rx,
         );
@@ -75,10 +85,25 @@ impl SessionManager {
             sessions,
             store,
             note_store,
+            session_db,
             max_history,
             persist_tx: Arc::new(persist_tx),
             persist_hook,
         })
+    }
+
+    /// Attach a [`SessionDb`] to mirror session data into SQLite + FTS5.
+    ///
+    /// Must be called before the first `save_session` / `save_session_async`
+    /// to ensure all subsequent persists are indexed.
+    pub fn with_session_db(self, db: Arc<SessionDb>) -> Self {
+        *self.session_db.lock() = Some(db);
+        self
+    }
+
+    /// Access the optional session database, if attached.
+    pub fn session_db(&self) -> Option<Arc<SessionDb>> {
+        self.session_db.lock().clone()
     }
 
     /// Get or create a session for the given key.
@@ -288,12 +313,19 @@ impl SessionManager {
     }
 
     fn persist_snapshot(&self, session: &Session) -> Result<()> {
-        Self::persist_snapshot_inner(&self.store, &self.note_store, &self.persist_hook, session)
+        Self::persist_snapshot_inner(
+            &self.store,
+            &self.note_store,
+            &self.session_db,
+            &self.persist_hook,
+            session,
+        )
     }
 
     fn persist_snapshot_inner(
         store: &Arc<Mutex<SessionStore>>,
         note_store: &Arc<Mutex<NoteStore>>,
+        session_db: &Arc<Mutex<Option<Arc<SessionDb>>>>,
         persist_hook: &Arc<Mutex<Option<Arc<PersistHook>>>>,
         session: &Session,
     ) -> Result<()> {
@@ -303,6 +335,21 @@ impl SessionManager {
 
         store.lock().save(session)?;
         note_store.lock().save_notes(&session.key, &session.notes)?;
+
+        // Mirror into SQLite + FTS5 (best-effort — failures are logged, not fatal).
+        // This runs after the JSONL write so the authoritative store is always
+        // updated even if indexing fails. We clone the Arc out of the lock to
+        // minimize hold time.
+        let db = session_db.lock().clone();
+        if let Some(db) = db {
+            if let Err(e) = db.persist_session(session) {
+                warn!(
+                    session_key = %session.key,
+                    "SessionDb indexing failed (non-fatal): {e}"
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -310,6 +357,7 @@ impl SessionManager {
         sessions: Arc<DashMap<String, Session>>,
         store: Arc<Mutex<SessionStore>>,
         note_store: Arc<Mutex<NoteStore>>,
+        session_db: Arc<Mutex<Option<Arc<SessionDb>>>>,
         persist_hook: Arc<Mutex<Option<Arc<PersistHook>>>>,
         persist_rx: Receiver<String>,
     ) {
@@ -328,9 +376,13 @@ impl SessionManager {
                         continue;
                     };
 
-                    if let Err(e) =
-                        Self::persist_snapshot_inner(&store, &note_store, &persist_hook, &session)
-                    {
+                    if let Err(e) = Self::persist_snapshot_inner(
+                        &store,
+                        &note_store,
+                        &session_db,
+                        &persist_hook,
+                        &session,
+                    ) {
                         error!(
                             session_key = %session.key,
                             "Background session persistence failed: {e}"

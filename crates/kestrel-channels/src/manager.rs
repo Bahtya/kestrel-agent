@@ -3,7 +3,6 @@
 use crate::base::BaseChannel;
 use crate::platforms::websocket;
 use crate::registry::ChannelRegistry;
-use crate::split_message;
 use anyhow::Result;
 use dashmap::DashMap;
 use kestrel_bus::events::{AgentEvent, OutboundMessage, StreamChunk};
@@ -101,7 +100,13 @@ impl ChannelManager {
         match self.running_channels.get(&channel_name) {
             Some(channel) => {
                 let channel = channel.lock().await;
-                let chunks = split_message(&msg.content, 4096);
+                // Send the full message to the channel — each channel is
+                // responsible for its own splitting and format conversion.
+                // Previously we split at 4096 here (raw bytes), which broke
+                // markdown constructs mid-marker when the channel then
+                // applied format-specific escaping (e.g. Telegram MarkdownV2).
+                // Channels like Telegram already split AFTER conversion.
+                let chunks = vec![msg.content.clone()];
                 let mut first = true;
                 for chunk in chunks {
                     let reply = if first {

@@ -87,7 +87,6 @@ impl<'a> ContextBuilder<'a> {
         msg: &InboundMessage,
         session: &Session,
         tool_registry: &ToolRegistry,
-        recalled_memory: Option<&str>,
     ) -> Result<String> {
         let mut sections: Vec<PromptSection> = Vec::new();
 
@@ -102,19 +101,9 @@ impl<'a> ContextBuilder<'a> {
             content: self.build_runtime_content(msg),
         });
 
-        // Recalled memories from the memory store (takes precedence)
-        if let Some(memory_ctx) = recalled_memory {
-            if !memory_ctx.is_empty() {
-                sections.push(PromptSection::Memory {
-                    content: memory_ctx.to_string(),
-                });
-            }
-        } else if !session.messages.is_empty() {
-            // Fallback: generic memory hint for continuing conversations
-            sections.push(PromptSection::Memory {
-                content: self.build_memory_hint_content(),
-            });
-        }
+        // Note: recalled memory is now injected into the user message (not
+        // the system prompt) to keep the prompt-cache prefix stable.
+        // See runner.rs memory_context parameter.
 
         // Structured notes (prefer structured format with categories)
         if let Some(notes_ctx) = NotesManager::format_structured_context(session) {
@@ -163,14 +152,12 @@ impl<'a> ContextBuilder<'a> {
             sections.push(PromptSection::ToolGuidance { content: guidance });
         }
 
-        // Memory fence — structured recall triggers based on known categories
-        let memory_fence_content =
-            PromptAssembler::build_memory_fence(&Self::default_memory_fences());
-        if !memory_fence_content.is_empty() {
-            sections.push(PromptSection::MemoryFence {
-                content: memory_fence_content,
-            });
-        }
+        // Memory governance — guides what the agent should and should NOT
+        // save to long-term memory. Mirrors the hermes-agent MEMORY_GUIDANCE.
+        sections.push(PromptSection::Custom {
+            label: "Memory Guidance".to_string(),
+            content: Self::memory_guidance().to_string(),
+        });
 
         // Skill index — list of all available skills with metadata
         if let Some(ref entries) = self.skill_index_entries {
@@ -208,48 +195,42 @@ impl<'a> ContextBuilder<'a> {
     }
 
     /// Build the runtime metadata content (time, platform, chat ID).
+    ///
+    /// Uses date-only precision for the timestamp to keep the system prompt
+    /// byte-stable within a day, preserving the prompt-cache prefix across
+    /// turns (mirrors the hermes-agent cache-stability invariant).
     fn build_runtime_content(&self, msg: &InboundMessage) -> String {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+        let now = chrono::Local::now().format("%Y-%m-%d");
         format!(
-            "- Current time: {}\n- Platform: {}\n- Chat ID: {}",
+            "- Current date: {}\n- Platform: {}\n- Chat ID: {}",
             now, msg.channel, msg.chat_id,
         )
     }
 
-    /// Build the memory hint content for continuing conversations.
-    fn build_memory_hint_content(&self) -> String {
-        "This is a continuing conversation. Use the message history to maintain context."
-            .to_string()
-    }
-
-    /// Return the default memory fence entries for structured recall triggers.
+    /// Memory governance instructions appended to the system prompt.
     ///
-    /// These fences guide the agent on when to consider recalling specific
-    /// categories of memories from the store.
-    fn default_memory_fences() -> Vec<kestrel_learning::prompt::MemoryFenceEntry> {
-        vec![
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "user_profile".to_string(),
-                hint: "When personalizing responses or addressing the user".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "environment".to_string(),
-                hint: "When discussing project setup, tools, or infrastructure".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "preference".to_string(),
-                hint: "When choosing between approaches or making style decisions".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "error_lesson".to_string(),
-                hint: "When encountering errors or debugging issues".to_string(),
-            },
-            kestrel_learning::prompt::MemoryFenceEntry {
-                category: "project_convention".to_string(),
-                hint: "When writing code, configuring tools, or making architecture decisions"
-                    .to_string(),
-            },
-        ]
+    /// Mirrors the hermes-agent `MEMORY_GUIDANCE` (prompt_builder.py:151-172).
+    /// Controls what the agent saves to long-term memory vs. what belongs in
+    /// session_search instead.
+    fn memory_guidance() -> &'static str {
+        "You have persistent memory across sessions. Save durable facts using the \
+         store_memory tool: user preferences, environment details, tool quirks, and \
+         stable conventions. Memory is injected into every turn, so keep it compact \
+         and focused on facts that will still matter later.\n\
+         Prioritize what reduces future user steering — the most valuable memory is \
+         one that prevents the user from having to correct or remind you again. \
+         User preferences and recurring corrections matter more than procedural task \
+         details.\n\
+         Do NOT save task progress, session outcomes, completed-work logs, or \
+         temporary TODO state to memory; use session_search to recall those from \
+         past transcripts. Specifically: do not record what was discussed in the \
+         current conversation, 'user asked X', task summaries, or any artifact that \
+         will be stale in 7 days. If a fact will be stale in a week, it does not \
+         belong in memory.\n\
+         Write memories as declarative facts, not instructions to yourself. \
+         'User prefers concise responses' is correct. 'Always respond concisely' is \
+         wrong. Imperative phrasing gets re-read as a directive in later sessions \
+         and can override the user's current request."
     }
 }
 
@@ -287,25 +268,25 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
 
         // Should contain identity section
         assert!(prompt.contains("Kestrel"));
         // Should contain runtime section with platform
         assert!(prompt.contains("telegram"));
         assert!(prompt.contains("chat1"));
-        // Empty session → no memory section (but Memory Fence is present)
+        // Empty session → no memory section (but Memory Guidance is present)
         assert!(!prompt.contains("## Memory\n"));
         // No tools → no tool guidance section
         assert!(!prompt.contains("## Tool Guidance"));
         // Memory fence is always present (from default fences)
-        assert!(prompt.contains("## Memory Fence"));
+        assert!(prompt.contains("## Memory Guidance"));
     }
 
     #[test]
     fn test_build_system_prompt_with_session_history() {
+        // Memory is no longer in the system prompt — verify it's absent
+        // but the prompt still builds correctly with session history.
         let config = Config::default();
         let builder = ContextBuilder::new(&config);
         let msg = make_inbound();
@@ -313,11 +294,10 @@ mod tests {
         session.add_user_message("previous message".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
-        assert!(prompt.contains("## Memory"));
-        assert!(prompt.contains("continuing conversation"));
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
+        assert!(!prompt.contains("continuing conversation"));
+        // Memory Guidance should still be present
+        assert!(prompt.contains("## Memory Guidance"));
     }
 
     #[test]
@@ -350,9 +330,7 @@ mod tests {
         }
         tools.register(DummyTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### dummy_tool"));
         assert!(prompt.contains("A test tool"));
@@ -369,9 +347,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("CustomBot"));
     }
 
@@ -386,9 +362,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Additional Instructions"));
         assert!(prompt.contains("Always respond in French"));
     }
@@ -421,7 +395,7 @@ mod tests {
         let runtime = builder.build_runtime_content(&msg);
         assert!(runtime.contains("telegram"));
         assert!(runtime.contains("chat1"));
-        assert!(runtime.contains("Current time"));
+        assert!(runtime.contains("Current date"));
     }
 
     #[test]
@@ -460,15 +434,13 @@ mod tests {
         }
         tools.register(AnotherTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("TestBot"));
         assert!(prompt.contains("## Runtime"));
         assert!(prompt.contains("## Memory"));
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### my_tool"));
-        assert!(prompt.contains("## Memory Fence"));
+        assert!(prompt.contains("## Memory Guidance"));
         assert!(prompt.contains("## Additional Instructions"));
     }
 
@@ -481,9 +453,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Skills"));
         assert!(prompt.contains("deploy-k8s"));
         assert!(prompt.contains("Apply manifests"));
@@ -498,9 +468,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Empty skill section should not appear
         assert!(!prompt.contains("## Skills"));
     }
@@ -513,28 +481,25 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // No skill section injected
         assert!(!prompt.contains("## Skills"));
     }
 
     #[test]
-    fn test_build_system_prompt_with_recalled_memory() {
+    fn test_build_system_prompt_no_memory_section() {
+        // Recalled memory is now injected into the user message, not the
+        // system prompt. The system prompt should NOT contain a Memory section.
         let config = Config::default();
         let builder = ContextBuilder::new(&config);
         let msg = make_inbound();
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let recalled = "- User prefers Rust\n- Project uses Tokio";
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, Some(recalled))
-            .unwrap();
-        assert!(prompt.contains("## Memory"));
-        assert!(prompt.contains("User prefers Rust"));
-        // Should NOT contain the generic memory hint since recalled memory is present
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
+        // Should NOT contain recalled memory in system prompt
+        assert!(!prompt.contains("## Memory\n- User prefers"));
+        // Should NOT contain the old "continuing conversation" hint
         assert!(!prompt.contains("continuing conversation"));
     }
 
@@ -546,10 +511,8 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, Some(""))
-            .unwrap();
-        // Empty recalled memory should not add a Memory section (but Memory Fence is present)
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
+        // Empty recalled memory should not add a Memory section (but Memory Guidance is present)
         assert!(!prompt.contains("## Memory\n"));
     }
 
@@ -564,9 +527,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Custom separator should be used between sections
         assert!(prompt.contains("\n---\n"));
     }
@@ -580,9 +541,7 @@ mod tests {
         session.add_user_message("history".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // PromptAssembler adds ## headers for each section
         assert!(prompt.contains("## System"));
         assert!(prompt.contains("## Runtime"));
@@ -600,9 +559,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Sections should appear in order: System, Runtime, ..., Additional Instructions
         let system_pos = prompt.find("## System").unwrap();
         let runtime_pos = prompt.find("## Runtime").unwrap();
@@ -621,9 +578,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         // Default assembler uses double newline separator
         assert!(prompt.contains("\n\n"));
         assert!(prompt.contains("## System"));
@@ -668,9 +623,7 @@ mod tests {
         }
         tools.register(RichTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### search"));
         assert!(prompt.contains("Search the codebase for patterns"));
@@ -678,22 +631,17 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_fence_includes_categories() {
+    fn test_memory_guidance_in_prompt() {
         let config = Config::default();
         let builder = ContextBuilder::new(&config);
         let msg = make_inbound();
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
-        assert!(prompt.contains("## Memory Fence"));
-        assert!(prompt.contains("**user_profile**:"));
-        assert!(prompt.contains("**environment**:"));
-        assert!(prompt.contains("**preference**:"));
-        assert!(prompt.contains("**error_lesson**:"));
-        assert!(prompt.contains("**project_convention**:"));
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
+        assert!(prompt.contains("## Memory Guidance"));
+        assert!(prompt.contains("Do NOT save task progress"));
+        assert!(prompt.contains("declarative facts"));
     }
 
     #[test]
@@ -718,9 +666,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Skill Index"));
         assert!(prompt.contains("skill_view(name)"));
         assert!(prompt.contains("- deploy-k8s: Deploy to Kubernetes [category: devops]"));
@@ -735,9 +681,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(!prompt.contains("## Skill Index"));
     }
 
@@ -749,9 +693,7 @@ mod tests {
         let session = Session::new("test:key".to_string());
         let tools = ToolRegistry::new();
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(!prompt.contains("## Skill Index"));
     }
 
@@ -798,22 +740,18 @@ mod tests {
         let mut session = Session::new("test:key".to_string());
         session.add_user_message("history".to_string());
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
 
-        // Verify section ordering: System → Runtime → Memory → Notes → Skills → Tool Guidance → Memory Fence → Skill Index → Additional Instructions
+        // Verify section ordering: System → Runtime → Tool Guidance → Memory Guidance → Skill Index → Additional Instructions
         let system_pos = prompt.find("## System").unwrap();
         let runtime_pos = prompt.find("## Runtime").unwrap();
-        let memory_pos = prompt.find("## Memory").unwrap();
         let tool_guidance_pos = prompt.find("## Tool Guidance").unwrap();
-        let fence_pos = prompt.find("## Memory Fence").unwrap();
+        let fence_pos = prompt.find("## Memory Guidance").unwrap();
         let skill_index_pos = prompt.find("## Skill Index").unwrap();
         let instructions_pos = prompt.find("## Additional Instructions").unwrap();
 
         assert!(system_pos < runtime_pos);
-        assert!(runtime_pos < memory_pos);
-        assert!(memory_pos < tool_guidance_pos);
+        assert!(runtime_pos < tool_guidance_pos);
         assert!(tool_guidance_pos < fence_pos);
         assert!(fence_pos < skill_index_pos);
         assert!(skill_index_pos < instructions_pos);
@@ -868,9 +806,7 @@ mod tests {
         tools.register(ToolA);
         tools.register(ToolB);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("### tool_a"));
         assert!(prompt.contains("First tool"));
         assert!(prompt.contains("### tool_b"));
@@ -916,9 +852,7 @@ mod tests {
 
         tools.register(VerboseTool);
 
-        let prompt = builder
-            .build_system_prompt(&msg, &session, &tools, None)
-            .unwrap();
+        let prompt = builder.build_system_prompt(&msg, &session, &tools).unwrap();
         assert!(prompt.contains("## Tool Guidance"));
         assert!(prompt.contains("### verbose_tool"));
         assert!(prompt.contains("Parameters:"));

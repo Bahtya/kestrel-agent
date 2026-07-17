@@ -28,7 +28,7 @@ to any LLM with built-in memory, skills, and self-evolution.
 - **Cron scheduling** — tick-based scheduler with JSON state persistence
 - **Health checks** — registry-based checks with auto-restart and exponential backoff
 - **Skill system** — TOML manifests, hot-reload, `SkillCompiler`, runtime skill injection
-- **Tiered memory** — `MemoryStore` trait with HotStore (L1 in-memory) and WarmStore (L2 LanceDB vectors)
+- **Memory & recall** — `MemoryStore` trait (tantivy BM25 + jieba CJK), hermes-style frozen-snapshot recall, SQLite/FTS5 session history search
 - **Learning & evolution** — `LearningEvent` bus, event processors, prompt assembly from observations
 - **Unified TraceID** — cross-channel trace IDs (`kst_{channel}_{id}`) for end-to-end request tracking
 - **Provider resilience** — automatic retry with exponential backoff on 429s
@@ -108,7 +108,7 @@ to any LLM with built-in memory, skills, and self-evolution.
 
 ### Prerequisites
 
-**Rust** 1.75+ and **protobuf-compiler** (required by LanceDB).
+**Rust** 1.75+ and **protobuf-compiler** (required by the channels protobuf build).
 
 ```bash
 # Fedora / RHEL
@@ -362,7 +362,7 @@ Environment variables in values (`${VAR}`) are expanded at load time.
 | [`kestrel-channels`](./crates/kestrel-channels) | Platform adapters — Telegram, Discord, Feishu, Weixin, WebSocket — via `ChannelManager` |
 | [`kestrel-api`](./crates/kestrel-api) | OpenAI-compatible HTTP API server (Axum) |
 | [`kestrel-daemon`](./crates/kestrel-daemon) | Unix daemon: double-fork, PID file (flock), signal handling, file logging |
-| [`kestrel-memory`](./crates/kestrel-memory) | `MemoryStore` trait, HotStore (L1 in-memory), WarmStore/LanceDB (L2 vectors) |
+| [`kestrel-memory`](./crates/kestrel-memory) | `MemoryStore` trait, tantivy BM25 (jieba CJK), SQLite/FTS5 session search |
 | [`kestrel-skill`](./crates/kestrel-skill) | `Skill` trait, TOML manifests, `SkillRegistry`, `SkillCompiler` |
 | [`kestrel-learning`](./crates/kestrel-learning) | `LearningEvent` bus, event processors, prompt assembly |
 
@@ -451,7 +451,7 @@ curl http://localhost:8080/ready     # 200=ready, 503=not ready (Kubernetes prob
 <details>
 <summary><strong>Build error: <code>protoc not found</code></strong></summary>
 
-LanceDB requires the protobuf compiler.
+The channels crate builds a .proto via prost-build, which requires the protobuf compiler.
 
 ```bash
 # Fedora / RHEL
@@ -512,7 +512,7 @@ cargo check
 - **Latent vs deterministic** — Judgment goes to the model; parsing and validation stay in code. Never mix the two.
 - **Context engineering** — JIT loading, compaction, and structured notes to stay within the context window.
 - **Fewer, better tools** — Consolidated operations with token-efficient returns and poka-yoke defaults.
-- **LanceDB over SQLite FTS5** — Semantic vector search for memory and session recall.
+- **SQLite FTS5 + tantivy BM25** — Full-text session history search and BM25 memory recall (no external vector DB).
 - **TOML over YAML** — Rust-native parsing for skill manifests and configuration.
 
 ## Contributing

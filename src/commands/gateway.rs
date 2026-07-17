@@ -542,7 +542,7 @@ pub async fn run(config: Config, channels: Vec<String>, dangerous: bool) -> Resu
             al = al.with_audit_callback(audit_cb);
         }
 
-        // Wire memory store (TieredStore L1+L2)
+        // Wire memory store (TantivyStore with jieba CJK)
         if let Some(ref ms) = memory_store {
             al = al.with_memory_store(ms.clone());
             al = al.with_memory_config(memory_config.clone());

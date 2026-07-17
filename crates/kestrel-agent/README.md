@@ -21,8 +21,8 @@ tasks.
 | `ContextBuilder` | Assembles system prompt from identity, runtime metadata, tools, memory |
 | `AgentHook` (trait) | Lifecycle event handler (`on_event`) |
 | `CompositeHook` | Fan-out to multiple hooks, tolerates individual failures |
-| `MemoryStore` | File-based persistent memory (MEMORY.md + per-user files) |
-| `Consolidator` | Archives conversation summaries into the memory store |
+| `MemoryStore` | Long-term memory via the `kestrel-memory` crate (tantivy BM25 + jieba CJK) |
+| `MemoryRescueHook` | Pre-compaction hook that rescues lessons/decisions/facts before context compression |
 | `SkillsLoader` | Loads markdown skill definitions with YAML frontmatter |
 | `SubagentManager` | Tracks background tasks with Running/Completed/Failed status |
 

@@ -11,9 +11,8 @@ use std::path::PathBuf;
 ///
 /// ```toml
 /// max_entries = 1000
-/// hot_store_path = "/home/user/.kestrel/memory/hot.jsonl"
-/// warm_store_path = "/home/user/.kestrel/memory/warm"
-/// embedding_dim = 1536
+/// memory_char_budget = 2200
+/// memory_char_budget_overflow = 1375
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {

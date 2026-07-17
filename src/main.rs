@@ -73,7 +73,11 @@ enum Commands {
     Status,
 
     /// Run comprehensive system diagnostics.
-    Doctor,
+    Doctor {
+        /// Auto-fix issues (add missing config fields with documented defaults).
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// Daemon management commands.
     Daemon {
@@ -228,9 +232,9 @@ fn main() -> Result<()> {
         Commands::Status => {
             commands::status::run(&config)?;
         }
-        Commands::Doctor => {
+        Commands::Doctor { fix } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::doctor::run(&config))?;
+            rt.block_on(commands::doctor::run(&config, fix))?;
         }
         Commands::Daemon { subcommand } => {
             let action = match subcommand {

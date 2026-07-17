@@ -16,6 +16,7 @@ tracing = { workspace = true }
 ipnet = "2"
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
+toml_edit = "0.22"
 
 [dev-dependencies]
 tempfile = { workspace = true }

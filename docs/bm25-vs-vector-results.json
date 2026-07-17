@@ -1,0 +1,746 @@
+{
+  "config": {
+    "bm25_approach": "真实 TantivyStore（jieba + BM25）",
+    "n_docs": "40",
+    "n_queries": "20",
+    "top_k": "5",
+    "vector_approach": "TF-IDF 向量空间模型（jieba 分词，无模型/无 API）",
+    "vocab_dim": "343"
+  },
+  "overall": {
+    "bm25": {
+      "recall": 0.6568627450980392,
+      "mrr": 0.5196078431372549,
+      "precision": 0.21176470588235294,
+      "ndcg": 0.5586839237893235,
+      "n": 17
+    },
+    "vector": {
+      "recall": 0.6176470588235294,
+      "mrr": 0.5588235294117647,
+      "precision": 0.2,
+      "ndcg": 0.5522453578978386,
+      "n": 17
+    }
+  },
+  "by_kind": {
+    "conceptual": {
+      "bm25": {
+        "recall": 0.6666666666666666,
+        "mrr": 0.4583333333333333,
+        "precision": 0.19999999999999998,
+        "ndcg": 0.5220325981522241,
+        "n": 6
+      },
+      "vector": {
+        "recall": 0.7222222222222222,
+        "mrr": 0.625,
+        "precision": 0.2333333333333333,
+        "ndcg": 0.5988969479522367,
+        "n": 6
+      }
+    },
+    "cross-lingual": {
+      "bm25": {
+        "recall": 0.5,
+        "mrr": 0.5,
+        "precision": 0.1,
+        "ndcg": 0.5,
+        "n": 2
+      },
+      "vector": {
+        "recall": 0.5,
+        "mrr": 0.5,
+        "precision": 0.1,
+        "ndcg": 0.5,
+        "n": 2
+      }
+    },
+    "lexical": {
+      "bm25": {
+        "recall": 0.9166666666666666,
+        "mrr": 0.875,
+        "precision": 0.35,
+        "ndcg": 0.8826803184943108,
+        "n": 4
+      },
+      "vector": {
+        "recall": 0.9166666666666666,
+        "mrr": 0.875,
+        "precision": 0.35,
+        "ndcg": 0.8826803184943108,
+        "n": 4
+      }
+    },
+    "semantic": {
+      "bm25": {
+        "recall": 0.5,
+        "mrr": 0.31666666666666665,
+        "precision": 0.16,
+        "ndcg": 0.36694196830558223,
+        "n": 5
+      },
+      "vector": {
+        "recall": 0.3,
+        "mrr": 0.25,
+        "precision": 0.08,
+        "ndcg": 0.25281362451451816,
+        "n": 5
+      }
+    }
+  },
+  "per_query": [
+    {
+      "id": 0,
+      "kind": "lexical",
+      "query": "tantivy",
+      "relevant": [
+        14,
+        18,
+        28
+      ],
+      "bm25_top5": [
+        13,
+        14,
+        18
+      ],
+      "bm25": {
+        "recall": 0.6666666666666666,
+        "mrr": 0.5,
+        "precision": 0.4,
+        "ndcg": 0.5307212739772434,
+        "n": 0
+      },
+      "vector_top5": [
+        13,
+        14,
+        18,
+        0,
+        1
+      ],
+      "vector_top1_cos": 0.279599,
+      "vector": {
+        "recall": 0.6666666666666666,
+        "mrr": 0.5,
+        "precision": 0.4,
+        "ndcg": 0.5307212739772434,
+        "n": 0
+      }
+    },
+    {
+      "id": 1,
+      "kind": "lexical",
+      "query": "cargo fmt clippy",
+      "relevant": [
+        10,
+        22
+      ],
+      "bm25_top5": [
+        22,
+        10,
+        35,
+        8
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.4,
+        "ndcg": 1.0,
+        "n": 0
+      },
+      "vector_top5": [
+        10,
+        22,
+        35,
+        8,
+        0
+      ],
+      "vector_top1_cos": 0.505654,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.4,
+        "ndcg": 1.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 2,
+      "kind": "lexical",
+      "query": "Bahtyar",
+      "relevant": [
+        0
+      ],
+      "bm25_top5": [
+        0
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      },
+      "vector_top5": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "vector_top1_cos": 0.311253,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 3,
+      "kind": "lexical",
+      "query": "rustls",
+      "relevant": [
+        9,
+        19
+      ],
+      "bm25_top5": [
+        9,
+        19
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.4,
+        "ndcg": 1.0,
+        "n": 0
+      },
+      "vector_top5": [
+        9,
+        19,
+        0,
+        1,
+        2
+      ],
+      "vector_top1_cos": 0.271566,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.4,
+        "ndcg": 1.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 4,
+      "kind": "semantic",
+      "query": "记忆系统是怎么做搜索的",
+      "relevant": [
+        14,
+        13
+      ],
+      "bm25_top5": [
+        34,
+        32,
+        13,
+        14,
+        0
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 0.3333333333333333,
+        "precision": 0.4,
+        "ndcg": 0.5706417189553201,
+        "n": 0
+      },
+      "vector_top5": [
+        34,
+        32,
+        0,
+        15,
+        9
+      ],
+      "vector_top1_cos": 0.235233,
+      "vector": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 5,
+      "kind": "semantic",
+      "query": "怎么避免重复造轮子",
+      "relevant": [
+        11,
+        5
+      ],
+      "bm25_top5": [],
+      "bm25": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": -0.0,
+        "n": 0
+      },
+      "vector_top5": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "vector_top1_cos": 0.0,
+      "vector": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 6,
+      "kind": "semantic",
+      "query": "怎么保证代码风格统一",
+      "relevant": [
+        10,
+        22
+      ],
+      "bm25_top5": [
+        39,
+        9,
+        3,
+        10,
+        15
+      ],
+      "bm25": {
+        "recall": 0.5,
+        "mrr": 0.25,
+        "precision": 0.2,
+        "ndcg": 0.2640681225725909,
+        "n": 0
+      },
+      "vector_top5": [
+        39,
+        9,
+        3,
+        10,
+        15
+      ],
+      "vector_top1_cos": 0.372634,
+      "vector": {
+        "recall": 0.5,
+        "mrr": 0.25,
+        "precision": 0.2,
+        "ndcg": 0.2640681225725909,
+        "n": 0
+      }
+    },
+    {
+      "id": 7,
+      "kind": "semantic",
+      "query": "异步运行时该选哪个",
+      "relevant": [
+        0
+      ],
+      "bm25_top5": [
+        0,
+        7,
+        9
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      },
+      "vector_top5": [
+        0,
+        7,
+        2,
+        9,
+        37
+      ],
+      "vector_top1_cos": 0.47915,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 8,
+      "kind": "semantic",
+      "query": "提交 PR 之前要走什么流程",
+      "relevant": [
+        22,
+        23
+      ],
+      "bm25_top5": [
+        24,
+        29
+      ],
+      "bm25": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      },
+      "vector_top5": [
+        29,
+        24,
+        21,
+        18,
+        0
+      ],
+      "vector_top1_cos": 0.309432,
+      "vector": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 9,
+      "kind": "cross-lingual",
+      "query": "which port does the database run on",
+      "relevant": [
+        7
+      ],
+      "bm25_top5": [
+        17,
+        18
+      ],
+      "bm25": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      },
+      "vector_top5": [
+        17,
+        18,
+        0,
+        1,
+        2
+      ],
+      "vector_top1_cos": 0.197257,
+      "vector": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 10,
+      "kind": "cross-lingual",
+      "query": "API key should never be committed to git",
+      "relevant": [
+        29
+      ],
+      "bm25_top5": [
+        29,
+        17,
+        16,
+        26
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      },
+      "vector_top5": [
+        29,
+        17,
+        16,
+        26,
+        0
+      ],
+      "vector_top1_cos": 0.362939,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 11,
+      "kind": "conceptual",
+      "query": "为什么本地不能编译",
+      "relevant": [
+        8,
+        35
+      ],
+      "bm25_top5": [
+        20,
+        29,
+        24,
+        8,
+        35
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 0.25,
+        "precision": 0.4,
+        "ndcg": 0.5012658353418871,
+        "n": 0
+      },
+      "vector_top5": [
+        20,
+        35,
+        8,
+        24,
+        0
+      ],
+      "vector_top1_cos": 0.227503,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 0.5,
+        "precision": 0.4,
+        "ndcg": 0.6934264036172708,
+        "n": 0
+      }
+    },
+    {
+      "id": 12,
+      "kind": "conceptual",
+      "query": "上线前有哪些质量门禁",
+      "relevant": [
+        10,
+        22,
+        23
+      ],
+      "bm25_top5": [],
+      "bm25": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": -0.0,
+        "n": 0
+      },
+      "vector_top5": [
+        22,
+        18,
+        0,
+        1,
+        2
+      ],
+      "vector_top1_cos": 0.266499,
+      "vector": {
+        "recall": 0.3333333333333333,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 0.46927872602275644,
+        "n": 0
+      }
+    },
+    {
+      "id": 13,
+      "kind": "conceptual",
+      "query": "向量检索是怎么排序的",
+      "relevant": [
+        38,
+        27
+      ],
+      "bm25_top5": [
+        38,
+        27,
+        28,
+        34,
+        14
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.4,
+        "ndcg": 1.0,
+        "n": 0
+      },
+      "vector_top5": [
+        38,
+        27,
+        28,
+        14,
+        34
+      ],
+      "vector_top1_cos": 0.376708,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.4,
+        "ndcg": 1.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 14,
+      "kind": "conceptual",
+      "query": "如何安全地操作数据库",
+      "relevant": [
+        30
+      ],
+      "bm25_top5": [
+        7,
+        30,
+        13,
+        17
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 0.5,
+        "precision": 0.2,
+        "ndcg": 0.6309297535714575,
+        "n": 0
+      },
+      "vector_top5": [
+        7,
+        17,
+        13,
+        30,
+        0
+      ],
+      "vector_top1_cos": 0.216537,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 0.25,
+        "precision": 0.2,
+        "ndcg": 0.43067655807339306,
+        "n": 0
+      }
+    },
+    {
+      "id": 15,
+      "kind": "conceptual",
+      "query": "agent 是怎么自我学习和演进的",
+      "relevant": [
+        31,
+        32,
+        33
+      ],
+      "bm25_top5": [
+        25,
+        2,
+        5,
+        28,
+        6
+      ],
+      "bm25": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      },
+      "vector_top5": [
+        25,
+        5,
+        2,
+        6,
+        28
+      ],
+      "vector_top1_cos": 0.285502,
+      "vector": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "precision": 0.0,
+        "ndcg": 0.0,
+        "n": 0
+      }
+    },
+    {
+      "id": 16,
+      "kind": "conceptual",
+      "query": "解析 JSON 该用什么工具",
+      "relevant": [
+        36
+      ],
+      "bm25_top5": [
+        36,
+        39,
+        1,
+        10,
+        12
+      ],
+      "bm25": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      },
+      "vector_top5": [
+        36,
+        39,
+        10,
+        1,
+        12
+      ],
+      "vector_top1_cos": 0.338736,
+      "vector": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "ndcg": 1.0,
+        "n": 0
+      }
+    }
+  ],
+  "negatives": [
+    {
+      "id": 17,
+      "query": "今天北京天气怎么样",
+      "bm25_returned": 0,
+      "vector_top5": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "vector_max_cos": 0.0
+    },
+    {
+      "id": 18,
+      "query": "推荐一部好看的科幻电影",
+      "bm25_returned": 5,
+      "vector_top5": [
+        28,
+        5,
+        3,
+        18,
+        16
+      ],
+      "vector_max_cos": 0.223718
+    },
+    {
+      "id": 19,
+      "query": "股票行情实时分析",
+      "bm25_returned": 0,
+      "vector_top5": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "vector_max_cos": 0.0
+    }
+  ]
+}

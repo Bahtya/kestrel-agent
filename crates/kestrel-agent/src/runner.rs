@@ -548,22 +548,23 @@ impl AgentRunner {
                     }
                     Err(_) => {
                         let health_state = health.check_health();
+                        match health_state {
+                            crate::stream_health::HealthState::Healthy => {
+                                continue;
+                            }
+                            crate::stream_health::HealthState::Dead => {
+                                break 'stream_retry Err(anyhow::anyhow!(
+                                    "Stream dead: no content for {}s ({} chunks, {} tokens)",
+                                    health.time_since_any().as_secs(),
+                                    health.content_chunks(),
+                                    health.total_tokens(),
+                                ));
+                            }
+                            crate::stream_health::HealthState::Stale => {}
+                        }
                         if let Some(msg) = progress.on_reconnect() {
                             self.emit_progress(&msg);
                         }
-                        let err = match health_state {
-                            crate::stream_health::HealthState::Dead => anyhow::anyhow!(
-                                "Stream health dead after {}s ({} chunks, {} tokens)",
-                                health.time_since_any().as_secs(),
-                                health.content_chunks(),
-                                health.total_tokens(),
-                            ),
-                            _ => anyhow::anyhow!(
-                                "SSE stream timed out: no data within {}s (stale: {}s)",
-                                poll_timeout.as_secs(),
-                                health.time_since_content().as_secs()
-                            ),
-                        };
                         if stream_attempt < max_stream_retries {
                             stream_attempt += 1;
                             let backoff = std::time::Duration::from_millis(500 << stream_attempt);
@@ -572,12 +573,17 @@ impl AgentRunner {
                                 attempt = stream_attempt,
                                 max_retries = max_stream_retries,
                                 backoff_ms = backoff.as_millis() as u64,
+                                stale_s = health.time_since_content().as_secs(),
                                 "Stream idle timeout, retrying provider call"
                             );
                             tokio::time::sleep(backoff).await;
                             continue 'stream_retry;
                         }
-                        break 'stream_retry Err(err);
+                        break 'stream_retry Err(anyhow::anyhow!(
+                            "SSE stream timed out: no data within {}s (stale: {}s)",
+                            poll_timeout.as_secs(),
+                            health.time_since_content().as_secs()
+                        ));
                     }
                 };
                 let chunk = match chunk_result {
@@ -616,6 +622,16 @@ impl AgentRunner {
                         "SSE first-byte received"
                     );
                     first_byte_logged = true;
+                    // Transition based on whether the first chunk is reasoning or content
+                    if chunk.reasoning_content.is_some() && chunk.delta.is_none() {
+                        progress.transition(crate::stream_progress::StreamPhase::Thinking);
+                    } else {
+                        progress.transition(crate::stream_progress::StreamPhase::Streaming);
+                    }
+                } else if *progress.phase() == crate::stream_progress::StreamPhase::Thinking
+                    && chunk.delta.is_some()
+                {
+                    // Reasoning finished, real content starting
                     progress.transition(crate::stream_progress::StreamPhase::Streaming);
                 }
                 last_chunk_at = std::time::Instant::now();

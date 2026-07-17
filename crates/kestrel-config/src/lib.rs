@@ -4,6 +4,7 @@
 //! Uses TOML format for the config file (`config.toml`).
 
 pub mod crypto;
+pub mod documented;
 pub mod loader;
 pub mod migration;
 pub mod paths;
